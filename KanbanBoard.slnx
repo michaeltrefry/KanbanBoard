@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="KanbanBoard.Api/KanbanBoard.Api.csproj" />
+  <Project Path="KanbanBoard.Mcp/KanbanBoard.Mcp.csproj" />
+  <Project Path="KanbanBoard.Shared/KanbanBoard.Shared.csproj" />
+</Solution>

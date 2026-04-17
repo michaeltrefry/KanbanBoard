@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: ./KanbanBoard.Api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      KANBAN_DATA_DIR: /data
+    volumes:
+      - kanban_data:/data
+
+  mcp:
+    build:
+      context: .
+      dockerfile: ./KanbanBoard.Mcp/Dockerfile
+    ports:
+      - "3001:3001"
+    depends_on:
+      - api
+    environment:
+      ASPNETCORE_URLS: http://+:3001
+      KANBAN_API_BASE_URL: http://api:8080
+
+volumes:
+  kanban_data:
