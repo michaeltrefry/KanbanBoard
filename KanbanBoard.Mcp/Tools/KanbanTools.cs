@@ -10,6 +10,8 @@ namespace KanbanBoard.Mcp.Tools;
 [McpServerToolType]
 public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
 {
+    public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -107,21 +109,23 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
     }
 
     [McpServerTool, Description("Delete a project.")]
-    public async Task DeleteProject(
+    public async Task<DeleteResultDto> DeleteProject(
         [Description("Project id")] Guid projectId)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/projects/{projectId}");
         response.EnsureSuccessStatusCode();
+        return new DeleteResultDto(projectId, "project", true);
     }
 
     [McpServerTool, Description("Delete an epic.")]
-    public async Task DeleteEpic(
+    public async Task<DeleteResultDto> DeleteEpic(
         [Description("Epic id")] Guid epicId)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/epics/{epicId}");
         response.EnsureSuccessStatusCode();
+        return new DeleteResultDto(epicId, "epic", true);
     }
 
     [McpServerTool, Description("List documents that belong to an epic.")]
@@ -164,17 +168,30 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Fetch issue work items, optionally filtered by project and status.")]
-    public async Task<IReadOnlyList<WorkItemDto>> GetIssues(
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status.")]
+    public async Task<IReadOnlyList<WorkItemDto>> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
-        [Description("Optional status filter")] WorkItemStatus? status = null)
+        [Description("Optional epic id")] Guid? epicId = null,
+        [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
+        [Description("Optional status filter")] WorkItemStatus? status = null,
+        [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
-        var parameters = new List<string> { "type=Issue" };
+        var parameters = new List<string>();
 
         if (projectId is not null)
         {
             parameters.Add($"projectId={projectId}");
+        }
+
+        if (epicId is not null)
+        {
+            parameters.Add($"epicId={epicId}");
+        }
+
+        if (type is not null)
+        {
+            parameters.Add($"type={type}");
         }
 
         if (status is not null)
@@ -182,11 +199,35 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
             parameters.Add($"status={status}");
         }
 
-        var path = $"/api/items?{string.Join('&', parameters)}";
+        if (includeArchivedEpics)
+        {
+            parameters.Add("includeArchivedEpics=true");
+        }
+
+        var path = parameters.Count == 0
+            ? "/api/items"
+            : $"/api/items?{string.Join('&', parameters)}";
+
         return await client.GetFromJsonAsync<IReadOnlyList<WorkItemDto>>(path, JsonOptions) ?? [];
     }
 
-    [McpServerTool, Description("Create a work item in a project.")]
+    [McpServerTool, Description("List work items that belong to a specific epic backlog.")]
+    public Task<IReadOnlyList<WorkItemDto>> ListEpicWorkItems(
+        [Description("Epic id")] Guid epicId,
+        [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
+        [Description("Optional status filter")] WorkItemStatus? status = null,
+        [Description("Whether to include items when the epic is archived")] bool includeArchivedEpics = false) =>
+        ListWorkItems(epicId: epicId, type: type, status: status, includeArchivedEpics: includeArchivedEpics);
+
+    [McpServerTool, Description("Fetch issue work items, optionally filtered by project and status.")]
+    public async Task<IReadOnlyList<WorkItemDto>> GetIssues(
+        [Description("Optional project id")] Guid? projectId = null,
+        [Description("Optional status filter")] WorkItemStatus? status = null)
+    {
+        return await ListWorkItems(projectId: projectId, type: WorkItemType.Issue, status: status);
+    }
+
+    [McpServerTool, Description("Create a story, issue, or task in a project backlog. Pass epicId to attach it to a specific epic backlog.")]
     public async Task<WorkItemDto?> CreateWorkItem(
         [Description("Project id")] Guid projectId,
         [Description("Title")] string title,
@@ -201,6 +242,35 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             projectId,
+            epicId,
+            title,
+            description,
+            type,
+            status,
+            priority,
+            estimate,
+            labels));
+
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
+    }
+
+    [McpServerTool, Description("Create a story, issue, or task directly in an epic backlog.")]
+    public async Task<WorkItemDto?> CreateEpicWorkItem(
+        [Description("Epic id")] Guid epicId,
+        [Description("Title")] string title,
+        [Description("Type: Story, Issue, or Task")] WorkItemType type = WorkItemType.Story,
+        [Description("Status")] WorkItemStatus status = WorkItemStatus.Backlog,
+        [Description("Priority")] WorkItemPriority priority = WorkItemPriority.Medium,
+        [Description("Optional description")] string? description = null,
+        [Description("Optional estimate")] int? estimate = null,
+        [Description("Optional comma-separated labels")] string? labels = null)
+    {
+        var client = httpClientFactory.CreateClient("kanban-api");
+        var epic = await GetRequiredEpicAsync(client, epicId);
+
+        var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
+            epic.ProjectId,
             epicId,
             title,
             description,
@@ -262,12 +332,19 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
     }
 
     [McpServerTool, Description("Delete a work item.")]
-    public async Task DeleteWorkItem(
+    public async Task<DeleteResultDto> DeleteWorkItem(
         [Description("Work item id")] Guid itemId)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/items/{itemId}");
         response.EnsureSuccessStatusCode();
+        return new DeleteResultDto(itemId, "work_item", true);
+    }
+
+    private async Task<EpicDto> GetRequiredEpicAsync(HttpClient client, Guid epicId)
+    {
+        var epic = await client.GetFromJsonAsync<EpicDto>($"/api/epics/{epicId}", JsonOptions);
+        return epic ?? throw new InvalidOperationException($"Epic {epicId} was not found.");
     }
 
     private async Task<ProjectBoardDto?> FindBoardForItemAsync(HttpClient client, Guid itemId)

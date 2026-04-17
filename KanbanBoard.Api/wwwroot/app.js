@@ -1,1191 +1,1476 @@
-const statusOrder = ["Backlog", "Ready", "InProgress", "Blocked", "Done"];
-const statusLabels = {
-  Backlog: "Backlog",
-  Ready: "Ready",
-  InProgress: "In Progress",
-  Blocked: "Blocked",
-  Done: "Done"
+/* Kanban — React app wired to the .NET API.
+   Single-file: API client + all components + root App. */
+
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ============ Constants ============ */
+const STATUS_ORDER = ["Backlog", "Ready", "InProgress", "Blocked", "Done"];
+const STATUS_LABEL = { Backlog: "Backlog", Ready: "Ready", InProgress: "In Progress", Blocked: "Blocked", Done: "Done" };
+const WORK_ITEM_TYPES = ["Story", "Issue", "Task"];
+const PRIORITY_ORDER = ["Low", "Medium", "High", "Critical"];
+
+const TWEAK_DEFAULTS = {
+  theme: "ink",
+  density: "comfortable",
+  showAging: true,
 };
 
-const state = {
-  projects: [],
-  board: null,
-  epics: [],
-  epicDocuments: [],
-  selectedProjectId: null,
-  selectedEpicId: null,
-  selectedDocumentId: null,
-  draggedItemId: null,
-  activeDetailItem: null,
-  showArchivedProjects: false,
-  showArchivedEpics: false,
-  editingEpicId: null,
-  editingDocumentId: null,
-  feedbackTimeoutId: null
+/* ============ Helpers ============ */
+function clsx(...xs) { return xs.filter(Boolean).join(" "); }
+
+function shortKey(projectKey, id) {
+  if (!id) return projectKey || "—";
+  const hex = String(id).replace(/-/g, "").slice(0, 4).toUpperCase();
+  return `${projectKey || "ITEM"}-${hex}`;
+}
+
+function daysBetween(a, b) {
+  const ms = b.getTime() - a.getTime();
+  return Math.max(0, Math.floor(ms / 86_400_000));
+}
+
+function agedDays(item) {
+  if (!item?.updatedAtUtc) return 0;
+  const d = new Date(item.updatedAtUtc);
+  if (Number.isNaN(d.getTime())) return 0;
+  return daysBetween(d, new Date());
+}
+
+function ageBand(d) {
+  if (d >= 7) return "hot";
+  if (d >= 3) return "warm";
+  return "cold";
+}
+function ageLabel(d) {
+  if (d === 0) return "today";
+  if (d === 1) return "1d";
+  return `${d}d`;
+}
+
+function parseLabels(str) {
+  if (!str) return [];
+  return String(str).split(",").map(s => s.trim()).filter(Boolean);
+}
+function labelsToString(arr) {
+  return (arr || []).map(s => s.trim()).filter(Boolean).join(",");
+}
+
+function formatDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+/* ============ API Client ============ */
+async function fetchJson(input, init) {
+  const res = await fetch(input, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      if (body?.message) message = body.message;
+    } catch { /* ignore */ }
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
+  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+const api = {
+  listProjects: (includeArchived = false) =>
+    fetchJson(`/api/projects${includeArchived ? "?includeArchived=true" : ""}`),
+  getProjectBoard: (projectId, { includeArchivedEpics = false } = {}) =>
+    fetchJson(`/api/projects/${projectId}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
+  createProject: (payload) =>
+    fetchJson(`/api/projects`, { method: "POST", body: JSON.stringify(payload) }),
+  updateProject: (id, payload) =>
+    fetchJson(`/api/projects/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteProject: (id) =>
+    fetchJson(`/api/projects/${id}`, { method: "DELETE" }),
+
+  listProjectEpics: (projectId, includeArchived = false) =>
+    fetchJson(`/api/projects/${projectId}/epics${includeArchived ? "?includeArchived=true" : ""}`),
+  createEpic: (projectId, payload) =>
+    fetchJson(`/api/projects/${projectId}/epics`, { method: "POST", body: JSON.stringify(payload) }),
+  updateEpic: (id, payload) =>
+    fetchJson(`/api/epics/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteEpic: (id) =>
+    fetchJson(`/api/epics/${id}`, { method: "DELETE" }),
+
+  listEpicDocuments: (epicId) =>
+    fetchJson(`/api/epics/${epicId}/documents`),
+  createEpicDocument: (epicId, payload) =>
+    fetchJson(`/api/epics/${epicId}/documents`, { method: "POST", body: JSON.stringify(payload) }),
+  updateEpicDocument: (id, payload) =>
+    fetchJson(`/api/epic-documents/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+
+  createWorkItem: (payload) =>
+    fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
+  updateWorkItem: (id, payload) =>
+    fetchJson(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  moveWorkItem: (id, status, order) =>
+    fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
+  deleteWorkItem: (id) =>
+    fetchJson(`/api/items/${id}`, { method: "DELETE" }),
 };
 
-const projectList = document.querySelector("#project-list");
-const board = document.querySelector("#board");
-const boardTitle = document.querySelector("#board-title");
-const boardDescription = document.querySelector("#board-description");
-const projectStats = document.querySelector("#project-stats");
-const feedbackBanner = document.querySelector("#feedback-banner");
-const epicList = document.querySelector("#epic-list");
-const epicFocusTitle = document.querySelector("#epic-focus-title");
-const epicFocusBadge = document.querySelector("#epic-focus-badge");
-const epicFocusDescription = document.querySelector("#epic-focus-description");
-const epicFocusStats = document.querySelector("#epic-focus-stats");
-const epicDocumentsList = document.querySelector("#epic-documents-list");
-const epicDocumentTitle = document.querySelector("#epic-document-title");
-const epicDocumentBody = document.querySelector("#epic-document-body");
-const projectForm = document.querySelector("#project-form");
-const projectNameInput = document.querySelector("#project-name");
-const projectKeyInput = document.querySelector("#project-key");
-const projectDescriptionInput = document.querySelector("#project-description");
-const newProjectButton = document.querySelector("#new-project-button");
-const showArchivedProjectsToggle = document.querySelector("#show-archived-projects");
-const archiveProjectButton = document.querySelector("#archive-project-button");
-const restoreProjectButton = document.querySelector("#restore-project-button");
-const deleteProjectButton = document.querySelector("#delete-project-button");
-const projectArchiveBadge = document.querySelector("#project-archive-badge");
-const itemForm = document.querySelector("#item-form");
-const itemModal = document.querySelector("#item-modal");
-const openItemModalButton = document.querySelector("#open-item-modal-button");
-const closeItemModalButton = document.querySelector("#close-item-modal-button");
-const cancelItemModalButton = document.querySelector("#cancel-item-modal-button");
-const itemModalBackdrop = document.querySelector("#item-modal-backdrop");
-const itemTitleInput = document.querySelector("#item-title");
-const itemPrioritySelect = document.querySelector("#item-priority");
-const itemTypeSelect = document.querySelector("#item-type");
-const itemStatusSelect = document.querySelector("#item-status");
-const itemDescriptionInput = document.querySelector("#item-description");
-const itemEstimateInput = document.querySelector("#item-estimate");
-const itemLabelsInput = document.querySelector("#item-labels");
-const itemEpicSelect = document.querySelector("#item-epic");
-const newEpicButton = document.querySelector("#new-epic-button");
-const editEpicButton = document.querySelector("#edit-epic-button");
-const showArchivedEpicsToggle = document.querySelector("#show-archived-epics");
-const archiveEpicButton = document.querySelector("#archive-epic-button");
-const restoreEpicButton = document.querySelector("#restore-epic-button");
-const deleteEpicButton = document.querySelector("#delete-epic-button");
-const epicArchiveBadge = document.querySelector("#epic-archive-badge");
-const epicModal = document.querySelector("#epic-modal");
-const epicModalTitle = document.querySelector("#epic-modal-title");
-const closeEpicModalButton = document.querySelector("#close-epic-modal-button");
-const cancelEpicModalButton = document.querySelector("#cancel-epic-modal-button");
-const epicModalBackdrop = document.querySelector("#epic-modal-backdrop");
-const epicForm = document.querySelector("#epic-form");
-const epicNameInput = document.querySelector("#epic-name");
-const epicDescriptionInput = document.querySelector("#epic-description");
-const epicFormError = document.querySelector("#epic-form-error");
-const newDocumentButton = document.querySelector("#new-document-button");
-const editDocumentButton = document.querySelector("#edit-document-button");
-const documentModal = document.querySelector("#document-modal");
-const documentModalTitle = document.querySelector("#document-modal-title");
-const closeDocumentModalButton = document.querySelector("#close-document-modal-button");
-const cancelDocumentModalButton = document.querySelector("#cancel-document-modal-button");
-const documentModalBackdrop = document.querySelector("#document-modal-backdrop");
-const documentForm = document.querySelector("#document-form");
-const documentTitleInput = document.querySelector("#document-title-input");
-const documentBodyInput = document.querySelector("#document-body-input");
-const documentFormError = document.querySelector("#document-form-error");
-const detailModal = document.querySelector("#detail-modal");
-const detailModalBackdrop = document.querySelector("#detail-modal-backdrop");
-const closeDetailModalButton = document.querySelector("#close-detail-modal-button");
-const detailModalTitle = document.querySelector("#detail-modal-title");
-const detailType = document.querySelector("#detail-type");
-const detailPriority = document.querySelector("#detail-priority");
-const detailStatus = document.querySelector("#detail-status");
-const detailEpic = document.querySelector("#detail-epic");
-const detailEstimate = document.querySelector("#detail-estimate");
-const detailLabels = document.querySelector("#detail-labels");
-const detailDescription = document.querySelector("#detail-description");
-const editDetailButton = document.querySelector("#edit-detail-button");
-const detailViewMode = document.querySelector("#detail-view-mode");
-const detailEditForm = document.querySelector("#detail-edit-form");
-const detailEditTitle = document.querySelector("#detail-edit-title");
-const detailEditDescription = document.querySelector("#detail-edit-description");
-const detailEditType = document.querySelector("#detail-edit-type");
-const detailEditStatus = document.querySelector("#detail-edit-status");
-const detailEditPriority = document.querySelector("#detail-edit-priority");
-const detailEditEpic = document.querySelector("#detail-edit-epic");
-const detailEditEstimate = document.querySelector("#detail-edit-estimate");
-const detailEditLabels = document.querySelector("#detail-edit-labels");
-const cancelDetailEditButton = document.querySelector("#cancel-detail-edit-button");
-const detailEditError = document.querySelector("#detail-edit-error");
-
-newProjectButton.addEventListener("click", () => {
-  state.selectedProjectId = null;
-  projectForm.reset();
-  projectKeyInput.value = "";
-  syncProjectArchiveControls(null);
-  updateActionAvailability();
-  projectNameInput.focus();
-});
-
-showArchivedProjectsToggle.addEventListener("change", async event => {
-  state.showArchivedProjects = event.target.checked;
-  await withFeedback(async () => {
-    await loadProjects();
-  }, "Could not reload projects.");
-});
-
-archiveProjectButton.addEventListener("click", async () => {
-  await updateProjectArchiveState(true);
-});
-
-restoreProjectButton.addEventListener("click", async () => {
-  await updateProjectArchiveState(false);
-});
-
-deleteProjectButton.addEventListener("click", async () => {
-  await deleteSelectedProject();
-});
-
-openItemModalButton.addEventListener("click", () => openItemModal());
-closeItemModalButton.addEventListener("click", () => closeModal(itemModal, openItemModalButton));
-cancelItemModalButton.addEventListener("click", () => closeModal(itemModal, openItemModalButton));
-itemModalBackdrop.addEventListener("click", () => closeModal(itemModal, openItemModalButton));
-
-newEpicButton.addEventListener("click", () => openEpicModal());
-editEpicButton.addEventListener("click", () => openEpicModal(getSelectedEpic()));
-showArchivedEpicsToggle.addEventListener("change", async event => {
-  state.showArchivedEpics = event.target.checked;
-  await withFeedback(async () => {
-    if (state.selectedProjectId) {
-      await loadBoard(state.selectedProjectId);
-    } else {
-      renderEpicWorkspace();
-    }
-  }, "Could not reload epics.");
-});
-archiveEpicButton.addEventListener("click", async () => {
-  await updateEpicArchiveState(true);
-});
-restoreEpicButton.addEventListener("click", async () => {
-  await updateEpicArchiveState(false);
-});
-deleteEpicButton.addEventListener("click", async () => {
-  await deleteSelectedEpic();
-});
-closeEpicModalButton.addEventListener("click", () => closeModal(epicModal, newEpicButton));
-cancelEpicModalButton.addEventListener("click", () => closeModal(epicModal, newEpicButton));
-epicModalBackdrop.addEventListener("click", () => closeModal(epicModal, newEpicButton));
-
-newDocumentButton.addEventListener("click", () => openDocumentModal());
-editDocumentButton.addEventListener("click", () => openDocumentModal(getSelectedDocument()));
-closeDocumentModalButton.addEventListener("click", () => closeModal(documentModal, newDocumentButton));
-cancelDocumentModalButton.addEventListener("click", () => closeModal(documentModal, newDocumentButton));
-documentModalBackdrop.addEventListener("click", () => closeModal(documentModal, newDocumentButton));
-
-closeDetailModalButton.addEventListener("click", closeDetailModal);
-detailModalBackdrop.addEventListener("click", closeDetailModal);
-editDetailButton.addEventListener("click", startDetailEditMode);
-cancelDetailEditButton.addEventListener("click", stopDetailEditMode);
-
-document.addEventListener("keydown", event => {
-  if (event.key !== "Escape") {
-    return;
-  }
-
-  if (!detailModal.hidden) {
-    closeDetailModal();
-    return;
-  }
-
-  if (!documentModal.hidden) {
-    closeModal(documentModal, newDocumentButton);
-    return;
-  }
-
-  if (!epicModal.hidden) {
-    closeModal(epicModal, newEpicButton);
-    return;
-  }
-
-  if (!itemModal.hidden) {
-    closeModal(itemModal, openItemModalButton);
-  }
-});
-
-projectForm.addEventListener("submit", async event => {
-  event.preventDefault();
-
-  const payload = {
-    name: projectNameInput.value,
-    key: projectKeyInput.value,
-    description: projectDescriptionInput.value || null,
-    isArchived: getSelectedProject()?.isArchived ?? false
-  };
-
-  const isEditing = Boolean(state.selectedProjectId);
-  const url = isEditing ? `/api/projects/${state.selectedProjectId}` : "/api/projects";
-  const method = isEditing ? "PUT" : "POST";
-
-  try {
-    const savedProject = await fetchJson(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    state.selectedProjectId = savedProject.id;
-    await loadProjects();
-    showFeedback(isEditing ? "Project updated." : "Project created and selected.");
-  } catch (error) {
-    showFeedback(error.message || "Could not save project.", "error");
-  }
-});
-
-itemForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!state.selectedProjectId) {
-    showFeedback("Select a project before creating work.", "error");
-    return;
-  }
-
-  const estimateValue = itemEstimateInput.value;
-  const payload = {
-    projectId: state.selectedProjectId,
-    epicId: itemEpicSelect.value || null,
-    title: itemTitleInput.value,
-    description: itemDescriptionInput.value || null,
-    type: itemTypeSelect.value,
-    status: itemStatusSelect.value,
-    priority: itemPrioritySelect.value,
-    estimate: estimateValue ? Number(estimateValue) : null,
-    labels: itemLabelsInput.value || null
-  };
-
-  try {
-    await fetchJson("/api/items", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    itemForm.reset();
-    itemPrioritySelect.value = "Medium";
-    closeModal(itemModal, openItemModalButton);
-    await loadBoard(state.selectedProjectId);
-    showFeedback("Work item created.");
-  } catch (error) {
-    showFeedback(error.message || "Could not create work item.", "error");
-  }
-});
-
-epicForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!state.selectedProjectId) {
-    showFeedback("Select a project before creating an epic.", "error");
-    return;
-  }
-
-  const selectedEpic = getSelectedEpic();
-  const isEditing = Boolean(state.editingEpicId);
-  const url = isEditing
-    ? `/api/epics/${state.editingEpicId}`
-    : `/api/projects/${state.selectedProjectId}/epics`;
-  const method = isEditing ? "PUT" : "POST";
-  const payload = {
-    name: epicNameInput.value,
-    description: epicDescriptionInput.value || null,
-    isArchived: getSelectedEpic()?.isArchived ?? false
-  };
-
-  try {
-    epicFormError.hidden = true;
-    epicFormError.textContent = "";
-
-    const savedEpic = await fetchJson(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    state.selectedEpicId = savedEpic.id;
-    await loadBoard(state.selectedProjectId);
-    closeModal(epicModal, isEditing ? editEpicButton : newEpicButton);
-    showFeedback(isEditing ? "Epic updated." : "Epic created.");
-    if (!selectedEpic || selectedEpic.id !== savedEpic.id) {
-      state.selectedDocumentId = null;
-    }
-  } catch (error) {
-    epicFormError.hidden = false;
-    epicFormError.textContent = error.message || "Could not save epic.";
-  }
-});
-
-documentForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!state.selectedEpicId) {
-    showFeedback("Select an epic before saving a document.", "error");
-    return;
-  }
-
-  const isEditing = Boolean(state.editingDocumentId);
-  const url = isEditing
-    ? `/api/epic-documents/${state.editingDocumentId}`
-    : `/api/epics/${state.selectedEpicId}/documents`;
-  const method = isEditing ? "PUT" : "POST";
-  const payload = {
-    title: documentTitleInput.value,
-    body: documentBodyInput.value
-  };
-
-  try {
-    documentFormError.hidden = true;
-    documentFormError.textContent = "";
-
-    const savedDocument = await fetchJson(url, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    state.selectedDocumentId = savedDocument.id;
-    await loadSelectedEpicDocuments();
-    renderEpicWorkspace();
-    updateActionAvailability();
-    closeModal(documentModal, isEditing ? editDocumentButton : newDocumentButton);
-    showFeedback(isEditing ? "Document updated." : "Document created.");
-  } catch (error) {
-    documentFormError.hidden = false;
-    documentFormError.textContent = error.message || "Could not save document.";
-  }
-});
-
-detailEditForm.addEventListener("submit", async event => {
-  event.preventDefault();
-  if (!state.activeDetailItem) {
-    return;
-  }
-
-  const estimateValue = detailEditEstimate.value;
-  const payload = {
-    epicId: detailEditEpic.value || null,
-    title: detailEditTitle.value,
-    description: detailEditDescription.value || null,
-    type: detailEditType.value,
-    status: detailEditStatus.value,
-    priority: detailEditPriority.value,
-    estimate: estimateValue ? Number(estimateValue) : null,
-    labels: detailEditLabels.value || null
-  };
-
-  detailEditError.hidden = true;
-  detailEditError.textContent = "";
-
-  try {
-    const updatedItem = await fetchJson(`/api/items/${state.activeDetailItem.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-
-    state.activeDetailItem = updatedItem;
-    await loadBoard(state.selectedProjectId);
-    populateDetailModal(updatedItem);
-    stopDetailEditMode();
-    showFeedback("Work item updated.");
-  } catch (error) {
-    detailEditError.hidden = false;
-    detailEditError.textContent = error.message || "Could not save changes.";
-  }
-});
-
-async function loadProjects() {
-  state.projects = await fetchJson(`/api/projects?includeArchived=${state.showArchivedProjects}`);
-
-  if (state.selectedProjectId && !state.projects.some(project => project.id === state.selectedProjectId)) {
-    state.selectedProjectId = state.projects[0]?.id ?? null;
-  }
-
-  if (!state.selectedProjectId && state.projects.length > 0) {
-    state.selectedProjectId = state.projects[0].id;
-  }
-
-  renderProjectList();
-
-  if (state.selectedProjectId) {
-    await loadBoard(state.selectedProjectId);
-  } else {
-    state.board = null;
-    state.epics = [];
-    state.epicDocuments = [];
-    state.selectedEpicId = null;
-    state.selectedDocumentId = null;
-    board.innerHTML = "";
-    renderEpicWorkspace();
-    projectForm.reset();
-    projectKeyInput.value = "";
-    boardTitle.textContent = "No active project selected";
-    boardDescription.textContent = state.showArchivedProjects
-      ? "Choose a project or create a new one."
-      : "No active projects are visible. Toggle archived projects or create a new one.";
-    projectStats.textContent = "";
-    syncProjectArchiveControls(null);
-    updateActionAvailability();
-  }
+/* ============ Feedback hook ============ */
+function useFeedback() {
+  const [msg, setMsg] = useState(null);
+  const timer = useRef(null);
+  const show = useCallback((text, tone = "error") => {
+    clearTimeout(timer.current);
+    setMsg({ text, tone });
+    timer.current = setTimeout(() => setMsg(null), 4500);
+  }, []);
+  const clear = useCallback(() => { clearTimeout(timer.current); setMsg(null); }, []);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  return { msg, show, clear };
 }
 
-async function loadBoard(projectId) {
-  const boardUrl = `/api/projects/${projectId}?includeArchivedEpics=${state.showArchivedEpics}`;
-  const epicsUrl = `/api/projects/${projectId}/epics?includeArchived=${state.showArchivedEpics}`;
-  const [boardData, epicData] = await Promise.all([
-    fetchJson(boardUrl),
-    fetchJson(epicsUrl)
-  ]);
-
-  state.board = boardData;
-  state.epics = epicData;
-  state.selectedProjectId = projectId;
-  if (!state.epics.some(epic => epic.id === state.selectedEpicId)) {
-    state.selectedEpicId = null;
-  }
-
-  await loadSelectedEpicDocuments();
-
-  if (state.activeDetailItem) {
-    state.activeDetailItem = state.board.items.find(item => item.id === state.activeDetailItem.id) ?? state.activeDetailItem;
-  }
-
-  syncEpicSelectOptions();
-  renderProjectList();
-  renderEpicWorkspace();
-  renderBoard();
-  populateProjectEditor();
-  updateActionAvailability();
+function FeedbackBar({ msg, onClose }) {
+  if (!msg) return null;
+  return (
+    <div className={clsx("feedback", msg.tone === "success" && "success")} role="status">
+      <span>{msg.text}</span>
+      <button onClick={onClose} aria-label="Dismiss">×</button>
+    </div>
+  );
 }
 
-function renderProjectList() {
-  projectList.innerHTML = "";
-
-  for (const project of state.projects) {
-    const safeName = project.name || "Untitled project";
-    const safeKey = project.key || "No key";
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `project-tile ${project.id === state.selectedProjectId ? "active" : ""}`;
-    button.innerHTML = `
-      <strong>${escapeHtml(safeName)}</strong>
-      <div class="subtle">${escapeHtml(safeKey)}</div>
-      <div class="subtle">${project.isArchived ? "Archived project" : "Active project"}</div>
-      <div class="subtle">${project.openItems} open / ${project.totalItems} total</div>
-    `;
-    button.addEventListener("click", async () => {
-      await loadBoard(project.id);
-    });
-    projectList.appendChild(button);
-  }
-}
-
-function renderBoard() {
-  if (!state.board) {
-    return;
-  }
-
-  const visibleItems = getVisibleItems();
-  const selectedEpic = getSelectedEpic();
-  boardTitle.textContent = selectedEpic ? `${state.board.name} / ${selectedEpic.name}` : state.board.name || "Untitled project";
-  boardDescription.textContent = selectedEpic
-    ? selectedEpic.description || "This epic does not have a description yet."
-    : state.board.description || "No project description yet.";
-  const openCount = visibleItems.filter(item => item.status !== "Done").length;
-  projectStats.textContent = `${openCount} active ${selectedEpic ? "items in epic" : "items"}`;
-
-  board.innerHTML = "";
-
-  for (const status of statusOrder) {
-    const items = getOrderedItemsByStatus(visibleItems, status);
-
-    const column = document.createElement("section");
-    column.className = "column";
-    column.dataset.status = status;
-    column.innerHTML = `
-      <div class="column-header">
-        <h3>${statusLabels[status]}</h3>
-        <span class="stat-pill">${items.length}</span>
+/* ============ Sidebar ============ */
+function BrandMark() {
+  return (
+    <div className="brand">
+      <div className="brand-mark">K</div>
+      <div className="brand-text">
+        <span className="name">Kanban</span>
+        <span className="sub">Single-dev workspace</span>
       </div>
-      <div class="column-items"></div>
-    `;
-
-    const columnItems = column.querySelector(".column-items");
-    columnItems.addEventListener("dragover", event => event.preventDefault());
-    columnItems.addEventListener("drop", async event => {
-      event.preventDefault();
-      if (!state.draggedItemId) {
-        return;
-      }
-
-      try {
-        await moveItem(state.draggedItemId, status, getStatusItems(status).length);
-        showFeedback(`Moved item to ${statusLabels[status]}.`);
-      } catch (error) {
-        showFeedback(error.message || "Could not move item.", "error");
-      } finally {
-        state.draggedItemId = null;
-      }
-    });
-
-    for (const item of items) {
-      const node = createCard(item);
-      columnItems.appendChild(node);
-    }
-
-    board.appendChild(column);
-  }
+    </div>
+  );
 }
 
-function createCard(item) {
-  const template = document.querySelector("#item-template");
-  const node = template.content.firstElementChild.cloneNode(true);
-  node.dataset.id = item.id;
-  node.querySelector(".item-type").textContent = item.type;
-  const priorityBadge = node.querySelector(".item-priority");
-  priorityBadge.textContent = item.priority;
-  priorityBadge.classList.add(`priority-${item.priority}`);
-  node.querySelector(".item-title").textContent = item.title || "Untitled item";
-  node.querySelector(".item-title-button").addEventListener("click", () => openDetailModal(item));
-  node.querySelector(".item-description").textContent = item.description || "No description";
-  node.querySelector(".estimate").textContent = item.estimate ? `${item.estimate} pts` : "No estimate";
-  node.querySelector(".epic-name").textContent = item.epic?.name ? `Epic: ${item.epic.name}` : "No epic";
-  node.querySelector(".labels").textContent = item.labels || "No labels";
+function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showArchived, setShowArchived }) {
+  return (
+    <aside className="sidebar">
+      <BrandMark />
+      <div className="side-section">
+        <div className="side-heading">
+          <span>Projects</span>
+          <button className="icon-btn" title="New project" aria-label="New project" onClick={onNewProject}>+</button>
+        </div>
+        {projects.length === 0 && (
+          <div className="docs-empty" style={{padding:"8px 10px"}}>No projects yet. Click + to create one.</div>
+        )}
+        {projects.map(p => (
+          <div
+            key={p.id}
+            className={clsx("proj-item", currentProjectId === p.id && "active")}
+            onClick={() => setProjectId(p.id)}
+          >
+            <span className="proj-key">{p.key}</span>
+            <span className="proj-name">
+              {p.name}
+              {p.isArchived && <span className="archived-tag" style={{marginLeft:6}}>archived</span>}
+            </span>
+            <span className="proj-count">{p.openItems ?? 0}</span>
+          </div>
+        ))}
+        <label className="side-toggle">
+          <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+          Show archived
+        </label>
+      </div>
 
-  node.addEventListener("dragstart", () => {
-    state.draggedItemId = item.id;
-    node.classList.add("dragging");
+      <div className="spacer"/>
+      <div style={{fontSize:11, color:"var(--muted)", padding:"8px 6px", borderTop:"1px solid var(--line)"}}>
+        <span className="kbd">⌘K</span> &nbsp;quick add
+      </div>
+    </aside>
+  );
+}
+
+/* ============ Topbar ============ */
+function Topbar({ project, epic, onOpenPalette, onOpenTweaks, onNewItem }) {
+  return (
+    <header className="topbar">
+      <div className="crumbs">
+        {project && <>
+          <span className="crumb-key">{project.key}</span>
+          <span className="crumb-title">{project.name}</span>
+        </>}
+        {epic && <>
+          <span className="sep">/</span>
+          <span className="crumb-title" style={{fontSize:16, color:"var(--ink-2)"}}>{epic.name}</span>
+        </>}
+      </div>
+      <div className="top-actions">
+        <button className="btn ghost" onClick={onOpenPalette} disabled={!project}>
+          <span>Search</span>
+          <span className="kbd">⌘K</span>
+        </button>
+        <button className="btn" onClick={onNewItem} disabled={!project}>+ Add story</button>
+        <button className="btn ghost" onClick={onOpenTweaks} title="Tweaks">⚙</button>
+      </div>
+    </header>
+  );
+}
+
+/* ============ Epic strip ============ */
+function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic }) {
+  const byEpic = useMemo(() => {
+    const m = {};
+    for (const it of items) {
+      const id = it.epicId || "__none";
+      if (!m[id]) m[id] = { Done: 0, InProgress: 0, Blocked: 0, Ready: 0, Backlog: 0, total: 0 };
+      m[id][it.status]++;
+      m[id].total++;
+    }
+    return m;
+  }, [items]);
+
+  return (
+    <section className="epic-strip">
+      <div className="epic-strip-header">
+        <div className="epic-strip-title">
+          <span className="epic-strip-eyebrow">Epics</span>
+        </div>
+        <div className="epic-strip-actions">
+          <button className="btn small ghost" onClick={onNewEpic}>+ New epic</button>
+        </div>
+      </div>
+      <div className="epic-rail">
+        <div
+          className={clsx("epic-card all-view", !currentEpicId && "active")}
+          onClick={() => setEpicId(null)}
+          style={{flex:"0 0 180px"}}
+        >
+          <div className="epic-card-row">
+            <div className="epic-card-name">All project work</div>
+          </div>
+          <div className="epic-card-foot">
+            <span>{items.length} stories total</span>
+          </div>
+        </div>
+        {epics.map(e => {
+          const c = byEpic[e.id] || { Done: 0, InProgress: 0, Blocked: 0, Ready: 0, Backlog: 0, total: 0 };
+          const pct = (k) => c.total ? (c[k] / c.total) * 100 : 0;
+          return (
+            <div
+              key={e.id}
+              className={clsx("epic-card", currentEpicId === e.id && "active")}
+              onClick={() => setEpicId(e.id)}
+            >
+              <div className="epic-card-row">
+                <div className="epic-card-name">
+                  {e.name}
+                  {e.isArchived && <span className="archived-tag" style={{marginLeft:6}}>archived</span>}
+                </div>
+                <div className="epic-card-target">{formatDate(e.updatedAtUtc)}</div>
+              </div>
+              <div className="epic-progress" title={`${c.Done}/${c.total} done`}>
+                <span className="seg-done"     style={{flex: pct("Done")}}/>
+                <span className="seg-progress" style={{flex: pct("InProgress")}}/>
+                <span className="seg-blocked"  style={{flex: pct("Blocked")}}/>
+                <span className="seg-ready"    style={{flex: pct("Ready")}}/>
+                <span className="seg-backlog"  style={{flex: pct("Backlog")}}/>
+              </div>
+              <div className="epic-card-foot">
+                <span><span className="count-done">{c.Done}</span> / {c.total} done</span>
+                {c.Blocked > 0 && <span style={{color:"var(--status-blocked-ink)"}}>{c.Blocked} blocked</span>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/* ============ Epic detail + docs rail ============ */
+function EpicDetail({ epic, project, items, docs, onOpenDoc, onNewDoc, onEditEpic, onArchiveEpic, onDeleteEpic }) {
+  const count = items.length;
+  const done = items.filter(s => s.status === "Done").length;
+  const wip = items.filter(s => s.status === "InProgress").length;
+  const blk = items.filter(s => s.status === "Blocked").length;
+  const est = items.reduce((a, s) => a + (s.estimate || 0), 0);
+
+  if (!epic) {
+    return (
+      <section className="epic-detail">
+        <div className="epic-headline">
+          <h1 className="epic-title">{project ? `${project.name} — everything open` : "Select a project"}</h1>
+          {project && <p className="epic-summary">{project.description || "No description yet."}</p>}
+          <div className="epic-headline-stats">
+            <span><b>{count}</b> stories</span>
+            <span><b>{done}</b> done</span>
+            <span><b>{wip}</b> in progress</span>
+            {blk > 0 && <span style={{color:"var(--status-blocked-ink)"}}><b>{blk}</b> blocked</span>}
+            <span><b>{est}</b> pts total</span>
+          </div>
+        </div>
+        <aside className="docs-rail">
+          <div className="docs-heading"><span>Docs</span></div>
+          <div className="docs-empty">Select an epic to see its documents.</div>
+        </aside>
+      </section>
+    );
+  }
+
+  return (
+    <section className="epic-detail">
+      <div className="epic-headline">
+        <h1 className="epic-title">
+          {epic.name}
+          {epic.isArchived && <span className="archived-pill" style={{marginLeft:12, verticalAlign:"middle", fontSize:11}}>archived</span>}
+        </h1>
+        <p className="epic-summary">{epic.description || "No description yet."}</p>
+        <div className="epic-headline-stats">
+          <span><b>{done}/{count}</b> done</span>
+          <span><b>{wip}</b> in flight</span>
+          {blk > 0 && <span style={{color:"var(--status-blocked-ink)"}}><b>{blk}</b> blocked</span>}
+          <span><b>{est}</b> pts</span>
+          <span>updated <b>{formatDate(epic.updatedAtUtc)}</b></span>
+          <span style={{display:"flex", gap:6, marginLeft:"auto"}}>
+            <button className="btn small ghost" onClick={onEditEpic}>Edit</button>
+            <button className="btn small ghost" onClick={onArchiveEpic}>{epic.isArchived ? "Restore" : "Archive"}</button>
+            <button className="btn small ghost" onClick={onDeleteEpic}>Delete</button>
+          </span>
+        </div>
+      </div>
+      <aside className="docs-rail">
+        <div className="docs-heading">
+          <span>Docs</span>
+          <button className="btn small ghost" onClick={onNewDoc}>+</button>
+        </div>
+        {docs.length === 0 && <div className="docs-empty">No docs yet. Capture PRDs, plans, runbooks.</div>}
+        {docs.map(d => (
+          <button key={d.id} className="doc-item" onClick={() => onOpenDoc(d)}>
+            <span className="doc-ico"/>
+            <span>
+              <div className="doc-title">{d.title}</div>
+              <div className="doc-preview">{(d.body || "").replace(/\n/g, " ").replace(/#+ /g, "").slice(0, 70)}</div>
+            </span>
+          </button>
+        ))}
+      </aside>
+    </section>
+  );
+}
+
+/* ============ Card + Board ============ */
+function Card({ story, projectKey, onOpen, onDragStart, onDragEnd, dragging, showAging }) {
+  const prioBars = { Low: 1, Medium: 2, High: 3, Critical: 4 }[story.priority] || 1;
+  const aged = agedDays(story);
+  const labels = parseLabels(story.labels);
+  return (
+    <article
+      className={clsx("card", dragging && "dragging", story.status === "Done" && "done")}
+      draggable
+      onDragStart={(e) => onDragStart(e, story)}
+      onDragEnd={onDragEnd}
+      onClick={() => onOpen(story)}
+    >
+      <div className="card-head">
+        <span className="card-key">{shortKey(projectKey, story.id)}</span>
+        <span className={clsx("card-type", story.type)}>{story.type}</span>
+        <span className={clsx("card-prio", "prio-" + story.priority)} title={story.priority}>
+          {Array.from({length: prioBars}).map((_, i) => (
+            <span key={i} className="bar" style={{height: 6 + i * 2}}/>
+          ))}
+        </span>
+      </div>
+      <p className="card-title">{story.title}</p>
+      <div className="card-foot">
+        <div className="card-foot-left">
+          {story.estimate > 0 && <span className="card-est">{story.estimate}pt</span>}
+          <span className="card-labels">
+            {labels.slice(0, 2).map(l => <span key={l} className="label-chip">{l}</span>)}
+            {labels.length > 2 && <span className="label-chip">+{labels.length - 2}</span>}
+          </span>
+        </div>
+        {showAging && story.status !== "Done" && aged > 0 && (
+          <span className={clsx("card-age", ageBand(aged))} title={`In column for ~${aged} day(s)`}>
+            <span className="card-age-dot"/>
+            {ageLabel(aged)}
+          </span>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function Board({ items, projectKey, onOpen, onMove, showAging }) {
+  const [dragId, setDragId] = useState(null);
+  const [dragOver, setDragOver] = useState(null);
+
+  const onDragStart = (e, story) => {
+    setDragId(story.id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", story.id);
+  };
+  const onDragEnd = () => { setDragId(null); setDragOver(null); };
+
+  const onDragOverCol = (e, status) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (dragOver !== status) setDragOver(status);
+  };
+  const onDropCol = (e, status) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData("text/plain") || dragId;
+    if (id) onMove(id, status);
+    setDragOver(null);
+    setDragId(null);
+  };
+
+  const byStatus = useMemo(() => {
+    const m = Object.fromEntries(STATUS_ORDER.map(s => [s, []]));
+    items.forEach(s => { if (m[s.status]) m[s.status].push(s); });
+    return m;
+  }, [items]);
+
+  return (
+    <div className="board-wrap">
+      <div className="board">
+        {STATUS_ORDER.map(s => {
+          const list = byStatus[s];
+          return (
+            <section
+              key={s}
+              className={clsx("col", dragOver === s && "drag-over")}
+              data-status={s}
+              onDragOver={(e) => onDragOverCol(e, s)}
+              onDragLeave={() => setDragOver(prev => prev === s ? null : prev)}
+              onDrop={(e) => onDropCol(e, s)}
+            >
+              <header className="col-head">
+                <div className="col-title">
+                  <span className="col-dot"/>
+                  <span>{STATUS_LABEL[s]}</span>
+                </div>
+                <span className="col-count">{list.length}</span>
+              </header>
+              <div className="col-body">
+                {list.map(story => (
+                  <Card
+                    key={story.id}
+                    story={story}
+                    projectKey={projectKey}
+                    onOpen={onOpen}
+                    onDragStart={onDragStart}
+                    onDragEnd={onDragEnd}
+                    dragging={dragId === story.id}
+                    showAging={showAging}
+                  />
+                ))}
+                {list.length === 0 && <div className="col-empty">Drop stories here</div>}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ============ Command Palette ============ */
+function CommandPalette({ open, onClose, items, projects, epics, currentProject, onOpenStory, onQuickAdd, setProjectId, setEpicId }) {
+  const [q, setQ] = useState("");
+  const [idx, setIdx] = useState(0);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (open) {
+      setQ(""); setIdx(0);
+      setTimeout(() => inputRef.current?.focus(), 30);
+    }
+  }, [open]);
+
+  const rows = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const out = [];
+
+    if (s && currentProject) {
+      out.push({
+        kind: "create",
+        title: <>Create story: <span style={{color:"var(--ink)", fontWeight:600}}>"{q}"</span></>,
+        hint: "↵ create",
+        action: () => { onQuickAdd(q); onClose(); },
+      });
+    }
+
+    const matchedStories = items
+      .filter(st => !s || st.title.toLowerCase().includes(s))
+      .slice(0, 8)
+      .map(st => ({
+        kind: "story",
+        title: (<><span className="kbd" style={{marginRight:6}}>{shortKey(currentProject?.key, st.id)}</span>{st.title}</>),
+        hint: st.status,
+        action: () => { onOpenStory(st); onClose(); },
+      }));
+
+    const matchedEpics = epics
+      .filter(e => !s || e.name.toLowerCase().includes(s))
+      .slice(0, 4)
+      .map(e => ({
+        kind: "epic",
+        title: <>Go to epic: {e.name}</>,
+        hint: "epic",
+        action: () => {
+          setEpicId(e.id);
+          onClose();
+        },
+      }));
+
+    const matchedProjects = projects
+      .filter(p => !s || p.name.toLowerCase().includes(s) || p.key.toLowerCase().includes(s))
+      .slice(0, 4)
+      .map(p => ({
+        kind: "project",
+        title: <>Go to project: {p.key} · {p.name}</>,
+        hint: "project",
+        action: () => { setProjectId(p.id); setEpicId(null); onClose(); },
+      }));
+
+    return [
+      ...out,
+      ...(matchedStories.length ? [{ label: "Stories" }, ...matchedStories] : []),
+      ...(matchedEpics.length ? [{ label: "Epics" }, ...matchedEpics] : []),
+      ...(matchedProjects.length ? [{ label: "Projects" }, ...matchedProjects] : []),
+    ];
+  }, [q, items, projects, epics, currentProject]);
+
+  const actionable = rows.filter(i => !i.label);
+
+  useEffect(() => {
+    if (!open) return;
+    const h = (e) => {
+      if (e.key === "Escape") { onClose(); }
+      else if (e.key === "ArrowDown") { setIdx(i => Math.min(i + 1, actionable.length - 1)); e.preventDefault(); }
+      else if (e.key === "ArrowUp") { setIdx(i => Math.max(i - 1, 0)); e.preventDefault(); }
+      else if (e.key === "Enter") { actionable[idx]?.action?.(); }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [open, actionable, idx, onClose]);
+
+  if (!open) return null;
+  let actionIdx = -1;
+  return (
+    <div className="palette-overlay" onClick={onClose}>
+      <div className="palette" onClick={(e) => e.stopPropagation()}>
+        <div className="palette-input-row">
+          <span className="palette-eyebrow">Quick add</span>
+          <input
+            ref={inputRef}
+            placeholder="Type a new story title, or search stories, epics, projects…"
+            value={q}
+            onChange={e => { setQ(e.target.value); setIdx(0); }}
+          />
+        </div>
+        <div className="palette-body">
+          {rows.length === 0 && (
+            <div className="palette-section-label" style={{padding:16}}>Start typing to create or search.</div>
+          )}
+          {rows.map((it, i) => {
+            if (it.label) return <div key={"l" + i} className="palette-section-label">{it.label}</div>;
+            actionIdx++;
+            const active = actionIdx === idx;
+            return (
+              <div
+                key={i}
+                className={clsx("palette-row", active && "active")}
+                onMouseEnter={() => setIdx(actionIdx)}
+                onClick={it.action}
+              >
+                <div className="palette-row-title">{it.title}</div>
+                <div className="palette-row-hint">{it.hint}</div>
+              </div>
+            );
+          })}
+        </div>
+        <div className="palette-footer">
+          <span>Tip: type a full sentence and hit ↵ to create a new story in this project.</span>
+          <div className="keys">
+            <span className="kbd">↑↓</span><span className="kbd">↵</span><span className="kbd">esc</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ Detail sheet ============ */
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete }) {
+  const [local, setLocal] = useState(story);
+  const [saving, setSaving] = useState(false);
+  const saveTimer = useRef(null);
+
+  useEffect(() => { setLocal(story); }, [story?.id]);
+
+  const patch = (p) => {
+    const next = { ...local, ...p };
+    setLocal(next);
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => {
+      setSaving(true);
+      onUpdate(next).finally(() => setSaving(false));
+    }, 400);
+  };
+
+  if (!story || !local) return null;
+  return (
+    <>
+      <div className="sheet-overlay" onClick={onClose}/>
+      <aside className="sheet">
+        <header className="sheet-head">
+          <div style={{flex:1}}>
+            <div className="sheet-eyebrow">{shortKey(projectKey, story.id)} {saving && "· saving…"}</div>
+            <input
+              className="sheet-title"
+              style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
+              value={local.title}
+              onChange={e => patch({ title: e.target.value })}
+            />
+          </div>
+          <div className="sheet-head-actions">
+            <button className="btn ghost" onClick={() => { if (confirm("Delete this item?")) { onDelete(story.id); onClose(); } }}>Delete</button>
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </header>
+        <div className="sheet-body">
+          <div>
+            <div className="sheet-row">
+              <label>Type</label>
+              <select value={local.type} onChange={e => patch({ type: e.target.value })}>
+                {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
+            <div className="sheet-row">
+              <label>Status</label>
+              <select value={local.status} onChange={e => patch({ status: e.target.value })}>
+                {STATUS_ORDER.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+              </select>
+            </div>
+            <div className="sheet-row">
+              <label>Priority</label>
+              <select value={local.priority} onChange={e => patch({ priority: e.target.value })}>
+                {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
+              </select>
+            </div>
+            <div className="sheet-row">
+              <label>Epic</label>
+              <select value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
+                <option value="">(no epic)</option>
+                {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+              </select>
+            </div>
+            <div className="sheet-row">
+              <label>Estimate</label>
+              <input type="number" min={0} max={100} value={local.estimate ?? 0}
+                     onChange={e => patch({ estimate: Number(e.target.value) })} />
+            </div>
+            <div className="sheet-row">
+              <label>Labels</label>
+              <input value={parseLabels(local.labels).join(", ")}
+                     onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
+            </div>
+          </div>
+          <div>
+            <div className="sheet-section-title">Description</div>
+            <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
+              <textarea
+                placeholder="Add a description…"
+                value={local.description || ""}
+                onChange={e => patch({ description: e.target.value })}
+              />
+            </div>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/* ============ Doc sheet (view + edit) ============ */
+function DocSheet({ doc, epicId, onClose, onSave }) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!doc) return;
+    setTitle(doc.title || "");
+    setBody(doc.body || "");
+    setEditing(!!doc.__draft);
+  }, [doc?.id]);
+
+  if (!doc) return null;
+  const isDraft = !!doc.__draft;
+
+  const commit = async () => {
+    if (!title.trim() || !body.trim()) return;
+    setSaving(true);
+    try {
+      await onSave({ id: doc.id, epicId: epicId || doc.epicId, title: title.trim(), body });
+      setEditing(false);
+      if (isDraft) onClose();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="sheet-overlay" onClick={onClose}/>
+      <aside className="sheet">
+        <header className="sheet-head">
+          <div style={{flex:1}}>
+            <div className="sheet-eyebrow">Epic document{saving && " · saving…"}</div>
+            {editing ? (
+              <input
+                className="sheet-title"
+                style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
+                value={title}
+                onChange={e => setTitle(e.target.value)}
+                placeholder="Doc title"
+              />
+            ) : (
+              <h2 className="sheet-title">{title}</h2>
+            )}
+          </div>
+          <div className="sheet-head-actions">
+            {editing ? (
+              <>
+                <button className="btn ghost" onClick={onClose}>Cancel</button>
+                <button className="btn primary" onClick={commit} disabled={saving}>Save</button>
+              </>
+            ) : (
+              <>
+                <button className="btn ghost" onClick={() => setEditing(true)}>Edit</button>
+                <button className="btn" onClick={onClose}>Close</button>
+              </>
+            )}
+          </div>
+        </header>
+        <div className="sheet-body">
+          {editing ? (
+            <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
+              <textarea
+                placeholder="Markdown-flavoured body…"
+                value={body}
+                onChange={e => setBody(e.target.value)}
+                style={{minHeight: "55vh"}}
+              />
+            </div>
+          ) : (
+            <pre style={{
+              whiteSpace:"pre-wrap", fontFamily:"var(--font-body)",
+              fontSize: 14, lineHeight: 1.65, color:"var(--ink-2)", margin: 0
+            }}>{body}</pre>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/* ============ Tweaks panel ============ */
+function TweaksPanel({ tweaks, setTweaks, open, onClose }) {
+  const themes = [
+    { id: "clay",  name: "Warm Clay",  chips: ["#c96b29", "#f4eee1", "#1e2024"] },
+    { id: "paper", name: "Editorial",  chips: ["#1f1f22", "#fbf9f4", "#d7d1c0"] },
+    { id: "ink",   name: "Focus Dark", chips: ["#e7e5de", "#0f1113", "#d0a45a"] },
+  ];
+  if (!open) return null;
+  return (
+    <div className="tweaks open">
+      <div className="tweaks-head">
+        <h4>Tweaks</h4>
+        <button className="icon-btn" onClick={onClose}>×</button>
+      </div>
+      <div className="tweaks-body">
+        <div className="tweak-group">
+          <div className="tweak-label">Theme</div>
+          <div className="theme-swatches">
+            {themes.map(t => (
+              <button
+                key={t.id}
+                className={clsx("theme-swatch", tweaks.theme === t.id && "on")}
+                onClick={() => setTweaks({ ...tweaks, theme: t.id })}
+              >
+                <div className="chip-row">
+                  {t.chips.map((c, i) => <span key={i} style={{background: c}}/>)}
+                </div>
+                <div className="name">{t.name}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="tweak-group">
+          <div className="tweak-label">Density</div>
+          <div className="seg">
+            <button className={tweaks.density === "comfortable" ? "on" : ""} onClick={() => setTweaks({...tweaks, density: "comfortable"})}>Comfortable</button>
+            <button className={tweaks.density === "compact" ? "on" : ""}     onClick={() => setTweaks({...tweaks, density: "compact"})}>Compact</button>
+          </div>
+        </div>
+
+        <div className="tweak-group">
+          <div className="tweak-label">Show aging</div>
+          <div className="seg">
+            <button className={tweaks.showAging ? "on" : ""}  onClick={() => setTweaks({...tweaks, showAging: true})}>On</button>
+            <button className={!tweaks.showAging ? "on" : ""} onClick={() => setTweaks({...tweaks, showAging: false})}>Off</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ Project modal ============ */
+function ProjectModal({ open, project, onClose, onSave, onDelete }) {
+  const isEdit = !!project;
+  const [name, setName] = useState("");
+  const [key, setKey] = useState("");
+  const [description, setDescription] = useState("");
+  const [isArchived, setIsArchived] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(project?.name || "");
+    setKey(project?.key || "");
+    setDescription(project?.description || "");
+    setIsArchived(project?.isArchived || false);
+    setErr(null);
+  }, [open, project?.id]);
+
+  if (!open) return null;
+
+  const submit = async () => {
+    try {
+      setErr(null);
+      await onSave({
+        name: name.trim(),
+        key: key.trim().toUpperCase(),
+        description: description.trim() || null,
+        isArchived,
+      });
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Save failed");
+    }
+  };
+
+  return (
+    <>
+      <div className="sheet-overlay" onClick={onClose}/>
+      <aside className="sheet" style={{width: "min(440px, 92vw)"}}>
+        <header className="sheet-head">
+          <div>
+            <div className="sheet-eyebrow">{isEdit ? "Edit project" : "New project"}</div>
+            <h2 className="sheet-title">{isEdit ? project.name : "Create a project"}</h2>
+          </div>
+          <div className="sheet-head-actions">
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </header>
+        <div className="sheet-body">
+          <div className="sheet-row">
+            <label>Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Ledger API"/>
+          </div>
+          <div className="sheet-row">
+            <label>Key</label>
+            <input value={key} onChange={e => setKey(e.target.value.toUpperCase())} placeholder="API" maxLength={8}/>
+          </div>
+          <div className="sheet-row" style={{gridTemplateColumns: "90px 1fr"}}>
+            <label>Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What's this project about?"/>
+          </div>
+          {isEdit && (
+            <div className="sheet-row">
+              <label>Archived</label>
+              <label className="side-toggle" style={{padding:0}}>
+                <input type="checkbox" checked={isArchived} onChange={e => setIsArchived(e.target.checked)}/>
+                {isArchived ? "yes — hidden from default lists" : "no"}
+              </label>
+            </div>
+          )}
+          {err && <div style={{color:"var(--status-blocked-ink)", fontSize:13}}>{err}</div>}
+          <div style={{display:"flex", gap:8, justifyContent: isEdit ? "space-between" : "flex-end"}}>
+            {isEdit && <button className="btn ghost" onClick={() => { if (confirm("Delete project? All epics, docs, and stories go with it.")) { onDelete(project.id); onClose(); } }}>Delete</button>}
+            <div style={{display:"flex", gap:8}}>
+              <button className="btn ghost" onClick={onClose}>Cancel</button>
+              <button className="btn primary" onClick={submit}>{isEdit ? "Save" : "Create project"}</button>
+            </div>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/* ============ Epic modal ============ */
+function EpicModal({ open, epic, onClose, onSave }) {
+  const isEdit = !!epic;
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [isArchived, setIsArchived] = useState(false);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(epic?.name || "");
+    setDescription(epic?.description || "");
+    setIsArchived(epic?.isArchived || false);
+    setErr(null);
+  }, [open, epic?.id]);
+
+  if (!open) return null;
+
+  const submit = async () => {
+    try {
+      setErr(null);
+      await onSave({
+        name: name.trim(),
+        description: description.trim() || null,
+        isArchived,
+      });
+      onClose();
+    } catch (e) {
+      setErr(e.message || "Save failed");
+    }
+  };
+
+  return (
+    <>
+      <div className="sheet-overlay" onClick={onClose}/>
+      <aside className="sheet" style={{width: "min(440px, 92vw)"}}>
+        <header className="sheet-head">
+          <div>
+            <div className="sheet-eyebrow">{isEdit ? "Edit epic" : "New epic"}</div>
+            <h2 className="sheet-title">{isEdit ? epic.name : "Create an epic"}</h2>
+          </div>
+          <div className="sheet-head-actions">
+            <button className="btn" onClick={onClose}>Close</button>
+          </div>
+        </header>
+        <div className="sheet-body">
+          <div className="sheet-row">
+            <label>Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} placeholder="Auth v2 (OAuth + refresh)"/>
+          </div>
+          <div className="sheet-row" style={{gridTemplateColumns: "90px 1fr"}}>
+            <label>Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="Scope, goals, constraints."/>
+          </div>
+          {isEdit && (
+            <div className="sheet-row">
+              <label>Archived</label>
+              <label className="side-toggle" style={{padding:0}}>
+                <input type="checkbox" checked={isArchived} onChange={e => setIsArchived(e.target.checked)}/>
+                {isArchived ? "yes" : "no"}
+              </label>
+            </div>
+          )}
+          {err && <div style={{color:"var(--status-blocked-ink)", fontSize:13}}>{err}</div>}
+          <div style={{display:"flex", gap:8, justifyContent:"flex-end"}}>
+            <button className="btn ghost" onClick={onClose}>Cancel</button>
+            <button className="btn primary" onClick={submit}>{isEdit ? "Save" : "Create epic"}</button>
+          </div>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/* ============ Main App ============ */
+function App() {
+  const [projects, setProjects] = useState([]);
+  const [epics, setEpics] = useState([]);
+  const [docs, setDocs] = useState([]);
+  const [items, setItems] = useState([]);
+
+  const [currentProjectId, setCurrentProjectId] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("project") || null;
+  });
+  const [currentEpicId, setCurrentEpicId] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("epic") || null;
   });
 
-  node.addEventListener("dragend", () => {
-    node.classList.remove("dragging");
-    state.draggedItemId = null;
+  /* URL <-> state routing plumbing */
+  const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
+  const skipEpicReset = useRef(true);      // keep URL-loaded epic on initial mount + on popstate
+  const initialUrlSyncDone = useRef(false);
+
+  const [selectedStory, setSelectedStory] = useState(null);
+  const [activeDoc, setActiveDoc] = useState(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+
+  const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+
+  const [projectModal, setProjectModal] = useState({ open: false, project: null });
+  const [epicModal, setEpicModal] = useState({ open: false, epic: null });
+
+  const [tweaksOpen, setTweaksOpen] = useState(false);
+  const [tweaks, setTweaks] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("kanban-tweaks") || "null");
+      return { ...TWEAK_DEFAULTS, ...(saved || {}) };
+    } catch { return TWEAK_DEFAULTS; }
   });
 
-  node.querySelector(".move-up").addEventListener("click", async () => {
-    await reorderWithinStatus(item, -1);
-  });
-  node.querySelector(".move-down").addEventListener("click", async () => {
-    await reorderWithinStatus(item, 1);
-  });
-  node.querySelector(".move-left").addEventListener("click", async () => {
-    await stepMove(item, -1);
-  });
-  node.querySelector(".move-right").addEventListener("click", async () => {
-    await stepMove(item, 1);
-  });
-  node.querySelector(".delete-button").addEventListener("click", async () => {
-    if (!window.confirm(`Delete "${item.title || "this item"}"?`)) {
+  const [bootstrapped, setBootstrapped] = useState(false);
+  const { msg, show, clear } = useFeedback();
+
+  /* Apply theme + density */
+  useEffect(() => {
+    document.documentElement.dataset.theme = tweaks.theme;
+    document.documentElement.dataset.density = tweaks.density;
+    localStorage.setItem("kanban-tweaks", JSON.stringify(tweaks));
+  }, [tweaks]);
+
+  /* Sync URL <- state (replaceState for the first pass after bootstrap, pushState for real navigations) */
+  useEffect(() => {
+    if (!bootstrapped) return;
+    if (skipUrlPush.current) {
+      skipUrlPush.current = false;
+      initialUrlSyncDone.current = true;
       return;
     }
+    const params = new URLSearchParams();
+    if (currentProjectId) params.set("project", currentProjectId);
+    if (currentEpicId) params.set("epic", currentEpicId);
+    const qs = params.toString();
+    const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
+    const currentUrl = window.location.pathname + window.location.search;
+    if (newUrl === currentUrl) {
+      initialUrlSyncDone.current = true;
+      return;
+    }
+    const state = { projectId: currentProjectId, epicId: currentEpicId };
+    if (!initialUrlSyncDone.current) {
+      window.history.replaceState(state, "", newUrl);
+      initialUrlSyncDone.current = true;
+    } else {
+      window.history.pushState(state, "", newUrl);
+    }
+  }, [bootstrapped, currentProjectId, currentEpicId]);
 
+  /* Sync state <- URL on back/forward */
+  useEffect(() => {
+    const onPop = () => {
+      const params = new URLSearchParams(window.location.search);
+      const nextProject = params.get("project") || null;
+      const nextEpic = params.get("epic") || null;
+      skipUrlPush.current = true;
+      setCurrentProjectId(prev => {
+        // Only suppress the project-change effect's epic reset if we'd
+        // otherwise clobber a valid URL-provided epic.
+        if (prev !== nextProject) skipEpicReset.current = true;
+        return nextProject;
+      });
+      setCurrentEpicId(nextEpic);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const currentProject = useMemo(
+    () => projects.find(p => p.id === currentProjectId) || null,
+    [projects, currentProjectId]
+  );
+  const currentEpic = useMemo(
+    () => epics.find(e => e.id === currentEpicId) || null,
+    [epics, currentEpicId]
+  );
+
+  const boardItems = useMemo(() => {
+    if (currentEpicId) return items.filter(s => s.epicId === currentEpicId);
+    return items;
+  }, [items, currentEpicId]);
+
+  const epicDocs = useMemo(() => {
+    if (!currentEpicId) return [];
+    return docs.filter(d => d.epicId === currentEpicId);
+  }, [docs, currentEpicId]);
+
+  /* Fetch projects on mount + when archive toggle changes */
+  const loadProjects = useCallback(async (preferredId) => {
     try {
-      await fetchJson(`/api/items/${item.id}`, { method: "DELETE" });
-      await loadBoard(state.selectedProjectId);
-      showFeedback("Work item deleted.");
-    } catch (error) {
-      showFeedback(error.message || "Could not delete work item.", "error");
+      const list = await api.listProjects(showArchivedProjects);
+      setProjects(list);
+      if (list.length === 0) {
+        setCurrentProjectId(null);
+      } else if (preferredId && list.some(p => p.id === preferredId)) {
+        setCurrentProjectId(preferredId);
+      } else if (!currentProjectId || !list.some(p => p.id === currentProjectId)) {
+        setCurrentProjectId(list[0].id);
+      }
+    } catch (e) {
+      show(`Couldn't load projects: ${e.message}`);
     }
-  });
-
-  return node;
-}
-
-async function reorderWithinStatus(item, delta) {
-  const statusItems = getStatusItems(item.status);
-  const currentIndex = statusItems.findIndex(candidate => candidate.id === item.id);
-  const nextIndex = currentIndex + delta;
-  if (currentIndex === -1 || nextIndex < 0 || nextIndex >= statusItems.length) {
-    return;
-  }
-
-  try {
-    await moveItem(item.id, item.status, nextIndex);
-    showFeedback(delta < 0 ? "Moved card up." : "Moved card down.");
-  } catch (error) {
-    showFeedback(error.message || "Could not reorder card.", "error");
-  }
-}
-
-async function stepMove(item, delta) {
-  const currentIndex = statusOrder.indexOf(item.status);
-  const nextIndex = currentIndex + delta;
-  if (nextIndex < 0 || nextIndex >= statusOrder.length) {
-    return;
-  }
-
-  const nextStatus = statusOrder[nextIndex];
-  const nextOrder = getStatusItems(nextStatus).length;
-
-  try {
-    await moveItem(item.id, nextStatus, nextOrder);
-    showFeedback(`Moved item to ${statusLabels[nextStatus]}.`);
-  } catch (error) {
-    showFeedback(error.message || "Could not move item.", "error");
-  }
-}
-
-async function moveItem(itemId, status, order) {
-  await fetchJson(`/api/items/${itemId}/move`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ status, order })
-  });
-
-  await loadBoard(state.selectedProjectId);
-}
-
-function populateProjectEditor() {
-  const selected = getSelectedProject();
-  if (!selected) {
-    projectForm.reset();
-    projectKeyInput.value = "";
-    syncProjectArchiveControls(null);
-    return;
-  }
-
-  projectNameInput.value = selected.name;
-  projectKeyInput.value = selected.key;
-  projectDescriptionInput.value = selected.description || "";
-  syncProjectArchiveControls(selected);
-}
-
-function renderEpicWorkspace() {
-  if (!state.board) {
-    epicList.innerHTML = '<div class="empty-note">Select a project to browse its epics.</div>';
-    epicFocusTitle.textContent = "All project work";
-    epicFocusBadge.textContent = "All Work";
-    epicFocusDescription.textContent = "Choose a project to browse its epics, work items, and planning documents.";
-    epicFocusStats.innerHTML = "";
-    epicDocumentsList.innerHTML = '<div class="empty-note">Epic documents will appear here after a project is selected.</div>';
-    epicDocumentTitle.textContent = "Select a project";
-    epicDocumentBody.textContent = "Pick a project first, then choose an epic to read its documents.";
-    epicDocumentBody.className = "document-body subtle";
-    updateActionAvailability();
-    return;
-  }
-
-  renderEpicList();
-  renderEpicFocus();
-  updateActionAvailability();
-}
-
-function renderEpicList() {
-  epicList.innerHTML = "";
-
-  const allButton = document.createElement("button");
-  allButton.type = "button";
-  allButton.className = `epic-tile ${state.selectedEpicId ? "" : "active"}`;
-  allButton.innerHTML = `
-    <strong>All project work</strong>
-    <div class="subtle">See every work item across the project.</div>
-  `;
-  allButton.addEventListener("click", async () => selectEpic(null));
-  epicList.appendChild(allButton);
-
-  if (state.epics.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "empty-note";
-    empty.textContent = "No epics yet. Create one to group delivery work and documents.";
-    epicList.appendChild(empty);
-    return;
-  }
-
-  for (const epic of state.epics) {
-    const itemCount = state.board.items.filter(item => item.epicId === epic.id).length;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `epic-tile ${epic.id === state.selectedEpicId ? "active" : ""}`;
-    button.innerHTML = `
-      <strong>${escapeHtml(epic.name)}</strong>
-      <div class="subtle">${escapeHtml(epic.description || "No epic description yet.")}</div>
-      <div class="subtle">${epic.isArchived ? "Archived epic" : "Active epic"}</div>
-      <div class="subtle">${itemCount} linked work items</div>
-    `;
-    button.addEventListener("click", async () => selectEpic(epic.id));
-    epicList.appendChild(button);
-  }
-}
-
-function renderEpicFocus() {
-  const selectedEpic = getSelectedEpic();
-  const visibleItems = getVisibleItems();
-  const openItems = visibleItems.filter(item => item.status !== "Done").length;
-
-  epicFocusTitle.textContent = selectedEpic ? selectedEpic.name : "All project work";
-  epicFocusBadge.textContent = selectedEpic ? "Epic Focus" : "All Work";
-  epicFocusDescription.textContent = selectedEpic
-    ? selectedEpic.description || "This epic groups related work and planning docs for one feature track."
-    : "Browse every work item in the project or narrow the board to a specific epic.";
-
-  epicFocusStats.innerHTML = "";
-  for (const stat of [
-    `${visibleItems.length} items`,
-    `${openItems} active`,
-    selectedEpic ? `${state.epicDocuments.length} docs` : `${state.epics.length} epics`
-  ]) {
-    const pill = document.createElement("span");
-    pill.className = "ghost-badge";
-    pill.textContent = stat;
-    epicFocusStats.appendChild(pill);
-  }
-
-  renderEpicDocuments(selectedEpic);
-  syncEpicArchiveControls(selectedEpic);
-}
-
-function renderEpicDocuments(selectedEpic) {
-  epicDocumentsList.innerHTML = "";
-
-  if (!selectedEpic) {
-    const note = document.createElement("div");
-    note.className = "empty-note";
-    note.textContent = "Select an epic to view its PRDs, plans, and working notes.";
-    epicDocumentsList.appendChild(note);
-    epicDocumentTitle.textContent = "Select an epic document";
-    epicDocumentBody.textContent = "Choose an epic first, then pick one of its documents to preview it here.";
-    epicDocumentBody.className = "document-body subtle";
-    return;
-  }
-
-  if (state.epicDocuments.length === 0) {
-    const note = document.createElement("div");
-    note.className = "empty-note";
-    note.textContent = "No documents have been added to this epic yet. Start with a PRD or implementation plan.";
-    epicDocumentsList.appendChild(note);
-    epicDocumentTitle.textContent = "No epic documents";
-    epicDocumentBody.textContent = "This epic is ready for PRDs, implementation plans, and working notes.";
-    epicDocumentBody.className = "document-body subtle";
-    return;
-  }
-
-  for (const document of state.epicDocuments) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `document-tile ${document.id === state.selectedDocumentId ? "active" : ""}`;
-    button.innerHTML = `
-      <strong>${escapeHtml(document.title)}</strong>
-      <div class="subtle">${formatRelativeDocument(document)}</div>
-    `;
-    button.addEventListener("click", () => {
-      state.selectedDocumentId = document.id;
-      renderEpicDocuments(selectedEpic);
-      updateActionAvailability();
-    });
-    epicDocumentsList.appendChild(button);
-  }
-
-  const activeDocument = getSelectedDocument();
-  epicDocumentTitle.textContent = activeDocument.title;
-  epicDocumentBody.textContent = activeDocument.body;
-  epicDocumentBody.className = "document-body";
-}
-
-async function selectEpic(epicId) {
-  state.selectedEpicId = epicId;
-  await loadSelectedEpicDocuments();
-  renderEpicWorkspace();
-  renderBoard();
-}
-
-function getSelectedProject() {
-  return state.projects.find(project => project.id === state.selectedProjectId) ?? null;
-}
-
-function getSelectedEpic() {
-  return state.epics.find(epic => epic.id === state.selectedEpicId) ?? null;
-}
-
-function getSelectedDocument() {
-  return state.epicDocuments.find(document => document.id === state.selectedDocumentId) ?? state.epicDocuments[0] ?? null;
-}
-
-function getVisibleItems() {
-  if (!state.selectedEpicId) {
-    return state.board.items;
-  }
-
-  return state.board.items.filter(item => item.epicId === state.selectedEpicId);
-}
-
-function getStatusItems(status) {
-  return [...state.board.items]
-    .filter(item => item.status === status)
-    .sort(compareItems);
-}
-
-function getOrderedItemsByStatus(items, status) {
-  return [...items]
-    .filter(item => item.status === status)
-    .sort(compareItems);
-}
-
-function compareItems(left, right) {
-  if (left.order !== right.order) {
-    return left.order - right.order;
-  }
-
-  return new Date(left.createdAtUtc) - new Date(right.createdAtUtc);
-}
-
-function syncProjectArchiveControls(project) {
-  const archived = project?.isArchived ?? false;
-  projectArchiveBadge.hidden = !archived;
-  archiveProjectButton.hidden = !project || archived;
-  restoreProjectButton.hidden = !project || !archived;
-  deleteProjectButton.hidden = !project;
-}
-
-function syncEpicArchiveControls(epic) {
-  const archived = epic?.isArchived ?? false;
-  epicArchiveBadge.hidden = !archived;
-  archiveEpicButton.hidden = !epic || archived;
-  restoreEpicButton.hidden = !epic || !archived;
-  deleteEpicButton.hidden = !epic;
-}
-
-async function updateProjectArchiveState(isArchived) {
-  const selected = getSelectedProject();
-  if (!selected) {
-    showFeedback("Select a project first.", "error");
-    return;
-  }
-
-  try {
-    await fetchJson(`/api/projects/${selected.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: selected.name,
-        key: selected.key,
-        description: selected.description,
-        isArchived
-      })
-    });
-
-    if (isArchived && !state.showArchivedProjects) {
-      state.selectedProjectId = null;
-    }
-
-    await loadProjects();
-    showFeedback(isArchived ? "Project archived." : "Project restored.");
-  } catch (error) {
-    showFeedback(error.message || "Could not update project archive state.", "error");
-  }
-}
-
-async function deleteSelectedProject() {
-  const selected = getSelectedProject();
-  if (!selected) {
-    showFeedback("Select a project first.", "error");
-    return;
-  }
-
-  if (!window.confirm(`Delete project "${selected.name}" and all of its data?`)) {
-    return;
-  }
-
-  try {
-    await fetchJson(`/api/projects/${selected.id}`, { method: "DELETE" });
-    state.selectedProjectId = null;
-    await loadProjects();
-    showFeedback("Project deleted.");
-  } catch (error) {
-    showFeedback(error.message || "Could not delete project.", "error");
-  }
-}
-
-async function updateEpicArchiveState(isArchived) {
-  const selected = getSelectedEpic();
-  if (!selected) {
-    showFeedback("Select an epic first.", "error");
-    return;
-  }
-
-  try {
-    await fetchJson(`/api/epics/${selected.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: selected.name,
-        description: selected.description,
-        isArchived
-      })
-    });
-
-    if (isArchived && !state.showArchivedEpics) {
-      state.selectedEpicId = null;
-      state.selectedDocumentId = null;
-    }
-
-    await loadBoard(state.selectedProjectId);
-    showFeedback(isArchived ? "Epic archived." : "Epic restored.");
-  } catch (error) {
-    showFeedback(error.message || "Could not update epic archive state.", "error");
-  }
-}
-
-async function deleteSelectedEpic() {
-  const selected = getSelectedEpic();
-  if (!selected) {
-    showFeedback("Select an epic first.", "error");
-    return;
-  }
-
-  if (!window.confirm(`Delete epic "${selected.name}" and its documents? Work items will be kept and unlinked.`)) {
-    return;
-  }
-
-  try {
-    await fetchJson(`/api/epics/${selected.id}`, { method: "DELETE" });
-    state.selectedEpicId = null;
-    state.selectedDocumentId = null;
-    await loadBoard(state.selectedProjectId);
-    showFeedback("Epic deleted.");
-  } catch (error) {
-    showFeedback(error.message || "Could not delete epic.", "error");
-  }
-}
-
-async function loadSelectedEpicDocuments() {
-  if (!state.selectedEpicId) {
-    state.epicDocuments = [];
-    state.selectedDocumentId = null;
-    return;
-  }
-
-  state.epicDocuments = await fetchJson(`/api/epics/${state.selectedEpicId}/documents`);
-  if (!state.epicDocuments.some(document => document.id === state.selectedDocumentId)) {
-    state.selectedDocumentId = state.epicDocuments[0]?.id ?? null;
-  }
-}
-
-function openItemModal() {
-  if (!state.selectedProjectId) {
-    showFeedback("Create or select a project before adding work.", "error");
-    return;
-  }
-
-  syncEpicSelectOptions();
-  itemEpicSelect.value = state.selectedEpicId || "";
-  openModal(itemModal);
-  itemTitleInput.focus();
-}
-
-function openEpicModal(epic = null) {
-  if (!state.selectedProjectId) {
-    showFeedback("Select a project before working with epics.", "error");
-    return;
-  }
-
-  state.editingEpicId = epic?.id ?? null;
-  epicModalTitle.textContent = epic ? "Edit Epic" : "New Epic";
-  epicNameInput.value = epic?.name ?? "";
-  epicDescriptionInput.value = epic?.description ?? "";
-  epicFormError.hidden = true;
-  epicFormError.textContent = "";
-  openModal(epicModal);
-  epicNameInput.focus();
-}
-
-function openDocumentModal(document = null) {
-  if (!state.selectedEpicId) {
-    showFeedback("Select an epic before working with documents.", "error");
-    return;
-  }
-
-  state.editingDocumentId = document?.id ?? null;
-  documentModalTitle.textContent = document ? "Edit Document" : "New Document";
-  documentTitleInput.value = document?.title ?? "";
-  documentBodyInput.value = document?.body ?? "";
-  documentFormError.hidden = true;
-  documentFormError.textContent = "";
-  openModal(documentModal);
-  documentTitleInput.focus();
-}
-
-function openDetailModal(item) {
-  state.activeDetailItem = item;
-  populateDetailModal(item);
-  stopDetailEditMode();
-  detailEditError.hidden = true;
-  detailEditError.textContent = "";
-  openModal(detailModal);
-  closeDetailModalButton.focus();
-}
-
-function populateDetailModal(item) {
-  detailModalTitle.textContent = item.title || "Untitled item";
-  detailType.textContent = item.type;
-  detailPriority.textContent = item.priority;
-  detailPriority.className = "item-priority";
-  detailPriority.classList.add(`priority-${item.priority}`);
-  detailStatus.textContent = statusLabels[item.status] || item.status;
-  detailEpic.textContent = item.epic?.name || "No epic";
-  detailEstimate.textContent = item.estimate ? `${item.estimate} pts` : "No estimate";
-  detailLabels.textContent = item.labels || "No labels";
-  detailDescription.textContent = item.description || "No description";
-}
-
-function closeDetailModal() {
-  state.activeDetailItem = null;
-  stopDetailEditMode();
-  closeModal(detailModal, null);
-}
-
-function startDetailEditMode() {
-  if (!state.activeDetailItem) {
-    return;
-  }
-
-  detailEditTitle.value = state.activeDetailItem.title;
-  detailEditDescription.value = state.activeDetailItem.description || "";
-  detailEditType.value = state.activeDetailItem.type;
-  detailEditStatus.value = state.activeDetailItem.status;
-  detailEditPriority.value = state.activeDetailItem.priority;
-  syncEpicSelectOptions();
-  detailEditEpic.value = state.activeDetailItem.epicId || "";
-  detailEditEstimate.value = state.activeDetailItem.estimate ?? "";
-  detailEditLabels.value = state.activeDetailItem.labels || "";
-  detailEditError.hidden = true;
-  detailEditError.textContent = "";
-  detailViewMode.hidden = true;
-  detailEditForm.hidden = false;
-  editDetailButton.hidden = true;
-  detailEditTitle.focus();
-}
-
-function stopDetailEditMode() {
-  detailViewMode.hidden = false;
-  detailEditForm.hidden = true;
-  editDetailButton.hidden = false;
-  detailEditError.hidden = true;
-  detailEditError.textContent = "";
-}
-
-function syncEpicSelectOptions() {
-  populateEpicSelect(itemEpicSelect, state.epics);
-  populateEpicSelect(detailEditEpic, state.epics);
-}
-
-function populateEpicSelect(select, epics) {
-  const selectedValue = select.value;
-  select.innerHTML = '<option value="">No epic</option>';
-
-  for (const epic of epics) {
-    const option = document.createElement("option");
-    option.value = epic.id;
-    option.textContent = epic.name;
-    select.appendChild(option);
-  }
-
-  if (selectedValue && epics.some(epic => epic.id === selectedValue)) {
-    select.value = selectedValue;
-  }
-}
-
-function updateActionAvailability() {
-  const hasProject = Boolean(state.selectedProjectId);
-  const hasEpic = Boolean(getSelectedEpic());
-  const hasDocument = Boolean(getSelectedDocument());
-
-  openItemModalButton.disabled = !hasProject;
-  newEpicButton.disabled = !hasProject;
-  editEpicButton.disabled = !hasEpic;
-  archiveEpicButton.disabled = !hasEpic;
-  restoreEpicButton.disabled = !hasEpic;
-  deleteEpicButton.disabled = !hasEpic;
-  deleteProjectButton.disabled = !hasProject;
-  newDocumentButton.disabled = !hasEpic;
-  editDocumentButton.disabled = !hasDocument;
-}
-
-function openModal(modal) {
-  modal.hidden = false;
-  syncModalState();
-}
-
-function closeModal(modal, focusTarget) {
-  modal.hidden = true;
-
-  if (modal === epicModal) {
-    state.editingEpicId = null;
-    epicFormError.hidden = true;
-    epicFormError.textContent = "";
-  }
-
-  if (modal === documentModal) {
-    state.editingDocumentId = null;
-    documentFormError.hidden = true;
-    documentFormError.textContent = "";
-  }
-
-  syncModalState();
-  focusTarget?.focus();
-}
-
-function syncModalState() {
-  const modalOpen = [itemModal, epicModal, documentModal, detailModal].some(modal => !modal.hidden);
-  document.body.classList.toggle("modal-open", modalOpen);
-}
-
-function showFeedback(message, type = "success") {
-  feedbackBanner.hidden = false;
-  feedbackBanner.textContent = message;
-  feedbackBanner.className = `feedback-banner ${type}`;
-
-  if (state.feedbackTimeoutId) {
-    window.clearTimeout(state.feedbackTimeoutId);
-  }
-
-  state.feedbackTimeoutId = window.setTimeout(() => {
-    feedbackBanner.hidden = true;
-  }, 4000);
-}
-
-async function withFeedback(callback, errorMessage) {
-  try {
-    await callback();
-  } catch (error) {
-    showFeedback(error.message || errorMessage, "error");
-  }
-}
-
-function formatRelativeDocument(document) {
-  const updated = new Date(document.updatedAtUtc);
-  return `Updated ${updated.toLocaleDateString()}`;
-}
-
-async function fetchJson(url, options) {
-  const response = await fetch(url, options);
-  if (!response.ok) {
-    const body = await response.text();
-    let message = body;
-
+  }, [showArchivedProjects, currentProjectId, show]);
+
+  useEffect(() => {
+    (async () => {
+      await loadProjects();
+      setBootstrapped(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!bootstrapped) return;
+    loadProjects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchivedProjects]);
+
+  /* Fetch epics + board items + all docs when project changes */
+  const loadProjectDetail = useCallback(async (projectId) => {
+    if (!projectId) { setEpics([]); setItems([]); setDocs([]); return; }
     try {
-      const parsed = JSON.parse(body);
-      message = parsed.message ?? body;
-    } catch {
-      message = body;
-    }
+      const [board, epicList] = await Promise.all([
+        api.getProjectBoard(projectId, { includeArchivedEpics: true }),
+        api.listProjectEpics(projectId, true),
+      ]);
+      setEpics(epicList);
+      setItems(board.items || []);
 
-    throw new Error(message || `Request failed: ${response.status}`);
+      // Drop the current epic selection if it isn't valid for this project
+      // (e.g. a stale ?epic=... in the URL after reloading into another project).
+      setCurrentEpicId(eid => (eid && !epicList.some(e => e.id === eid)) ? null : eid);
+
+      // Load docs for all epics in the project (small N — fine).
+      const docLists = await Promise.all(epicList.map(e => api.listEpicDocuments(e.id).catch(() => [])));
+      setDocs(docLists.flat());
+    } catch (e) {
+      show(`Couldn't load project: ${e.message}`);
+    }
+  }, [show]);
+
+  useEffect(() => {
+    if (!currentProjectId) {
+      setEpics([]); setItems([]); setDocs([]); setCurrentEpicId(null);
+      skipEpicReset.current = false;
+      return;
+    }
+    if (skipEpicReset.current) {
+      // Initial mount or popstate — preserve the URL-provided epic.
+      skipEpicReset.current = false;
+    } else {
+      setCurrentEpicId(null);
+    }
+    loadProjectDetail(currentProjectId);
+  }, [currentProjectId, loadProjectDetail]);
+
+  /* Cmd+K / slash */
+  useEffect(() => {
+    const h = (e) => {
+      const tag = (document.activeElement?.tagName || "").toLowerCase();
+      const typing = tag === "input" || tag === "textarea" || tag === "select";
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen(v => !v);
+      }
+      if (e.key === "/" && !typing) {
+        e.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
+  /* Story mutations */
+  const moveStory = async (id, status) => {
+    const prev = items;
+    const current = prev.find(s => s.id === id);
+    if (!current || current.status === status) return;
+    // Optimistic
+    setItems(prev.map(s => s.id === id ? { ...s, status, updatedAtUtc: new Date().toISOString() } : s));
+    try {
+      const col = prev.filter(s => s.status === status);
+      const updated = await api.moveWorkItem(id, status, col.length);
+      setItems(cur => cur.map(s => s.id === id ? updated : s));
+    } catch (e) {
+      show(`Move failed: ${e.message}`);
+      setItems(prev);
+    }
+  };
+
+  const updateStory = async (next) => {
+    try {
+      const saved = await api.updateWorkItem(next.id, {
+        epicId: next.epicId || null,
+        title: next.title,
+        description: next.description || null,
+        type: next.type,
+        status: next.status,
+        priority: next.priority,
+        estimate: next.estimate ?? null,
+        labels: next.labels || null,
+      });
+      setItems(cur => cur.map(s => s.id === saved.id ? saved : s));
+      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+    } catch (e) {
+      show(`Save failed: ${e.message}`);
+    }
+  };
+
+  const deleteStory = async (id) => {
+    try {
+      await api.deleteWorkItem(id);
+      setItems(cur => cur.filter(s => s.id !== id));
+    } catch (e) {
+      show(`Delete failed: ${e.message}`);
+    }
+  };
+
+  const quickAdd = async (title) => {
+    if (!currentProject) return;
+    const epicId = currentEpicId || null;
+    try {
+      const created = await api.createWorkItem({
+        projectId: currentProject.id,
+        epicId,
+        title,
+        description: null,
+        type: "Story",
+        status: "Backlog",
+        priority: "Medium",
+        estimate: null,
+        labels: null,
+      });
+      setItems(cur => [...cur, created]);
+      setSelectedStory(created);
+    } catch (e) {
+      show(`Create failed: ${e.message}`);
+    }
+  };
+
+  /* Project CRUD */
+  const saveProject = async (payload) => {
+    if (projectModal.project) {
+      const saved = await api.updateProject(projectModal.project.id, payload);
+      setProjects(cur => cur.map(p => p.id === saved.id ? { ...p, ...saved } : p));
+      show("Project saved", "success");
+    } else {
+      const saved = await api.createProject(payload);
+      await loadProjects(saved.id);
+      show("Project created", "success");
+    }
+  };
+  const removeProject = async (id) => {
+    try {
+      await api.deleteProject(id);
+      await loadProjects();
+      show("Project deleted", "success");
+    } catch (e) {
+      show(`Delete failed: ${e.message}`);
+    }
+  };
+
+  /* Epic CRUD */
+  const saveEpic = async (payload) => {
+    if (epicModal.epic) {
+      const saved = await api.updateEpic(epicModal.epic.id, payload);
+      setEpics(cur => cur.map(e => e.id === saved.id ? saved : e));
+      show("Epic saved", "success");
+    } else {
+      const saved = await api.createEpic(currentProject.id, payload);
+      setEpics(cur => [...cur, saved]);
+      setCurrentEpicId(saved.id);
+      show("Epic created", "success");
+    }
+  };
+  const toggleEpicArchive = async () => {
+    if (!currentEpic) return;
+    try {
+      const saved = await api.updateEpic(currentEpic.id, {
+        name: currentEpic.name,
+        description: currentEpic.description || null,
+        isArchived: !currentEpic.isArchived,
+      });
+      setEpics(cur => cur.map(e => e.id === saved.id ? saved : e));
+      show(saved.isArchived ? "Epic archived" : "Epic restored", "success");
+    } catch (e) {
+      show(`Update failed: ${e.message}`);
+    }
+  };
+  const removeEpic = async () => {
+    if (!currentEpic) return;
+    if (!confirm(`Delete epic "${currentEpic.name}"? Its docs are removed; items unlink.`)) return;
+    try {
+      await api.deleteEpic(currentEpic.id);
+      setEpics(cur => cur.filter(e => e.id !== currentEpic.id));
+      setCurrentEpicId(null);
+      await loadProjectDetail(currentProjectId);
+      show("Epic deleted", "success");
+    } catch (e) {
+      show(`Delete failed: ${e.message}`);
+    }
+  };
+
+  /* Doc CRUD */
+  const openNewDoc = () => {
+    if (!currentEpicId) return;
+    setActiveDoc({ id: null, epicId: currentEpicId, title: "", body: "", __draft: true });
+  };
+  const saveDoc = async ({ id, epicId, title, body }) => {
+    try {
+      if (id) {
+        const saved = await api.updateEpicDocument(id, { title, body });
+        setDocs(cur => cur.map(d => d.id === saved.id ? saved : d));
+        setActiveDoc(saved);
+        show("Doc saved", "success");
+      } else {
+        const saved = await api.createEpicDocument(epicId, { title, body });
+        setDocs(cur => [...cur, saved]);
+        setActiveDoc(saved);
+        show("Doc created", "success");
+      }
+    } catch (e) {
+      show(`Save failed: ${e.message}`);
+      throw e;
+    }
+  };
+
+  /* Render gating */
+  if (!bootstrapped) {
+    return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  return response.status === 204 ? null : response.json();
+  if (projects.length === 0) {
+    return (
+      <div className="app-empty">
+        <div>
+          <h2>No projects yet</h2>
+          <p style={{maxWidth: 360, margin: "0 auto 18px"}}>Create your first project to start tracking epics, docs, and stories.</p>
+          <button className="btn primary" onClick={() => setProjectModal({ open: true, project: null })}>+ New project</button>
+        </div>
+        <ProjectModal
+          open={projectModal.open}
+          project={projectModal.project}
+          onClose={() => setProjectModal({ open: false, project: null })}
+          onSave={saveProject}
+          onDelete={removeProject}
+        />
+        <FeedbackBar msg={msg} onClose={clear}/>
+      </div>
+    );
+  }
+
+  const visibleEpics = epics.filter(e => !e.isArchived || currentEpicId === e.id);
+
+  return (
+    <div className="shell">
+      <Sidebar
+        projects={projects}
+        currentProjectId={currentProjectId}
+        setProjectId={(id) => setCurrentProjectId(id)}
+        onNewProject={() => setProjectModal({ open: true, project: null })}
+        showArchived={showArchivedProjects}
+        setShowArchived={setShowArchivedProjects}
+      />
+      <main className="content">
+        <Topbar
+          project={currentProject}
+          epic={currentEpic}
+          onOpenPalette={() => setPaletteOpen(true)}
+          onOpenTweaks={() => setTweaksOpen(v => !v)}
+          onNewItem={() => setPaletteOpen(true)}
+        />
+        <EpicStrip
+          epics={visibleEpics}
+          items={items}
+          currentEpicId={currentEpicId}
+          setEpicId={setCurrentEpicId}
+          onNewEpic={() => setEpicModal({ open: true, epic: null })}
+        />
+        <EpicDetail
+          epic={currentEpic}
+          project={currentProject}
+          items={boardItems}
+          docs={epicDocs}
+          onOpenDoc={(d) => setActiveDoc(d)}
+          onNewDoc={openNewDoc}
+          onEditEpic={() => setEpicModal({ open: true, epic: currentEpic })}
+          onArchiveEpic={toggleEpicArchive}
+          onDeleteEpic={removeEpic}
+        />
+        <Board
+          items={boardItems}
+          projectKey={currentProject?.key}
+          onOpen={(s) => setSelectedStory(s)}
+          onMove={moveStory}
+          showAging={tweaks.showAging}
+        />
+      </main>
+
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        items={items}
+        projects={projects}
+        epics={epics}
+        currentProject={currentProject}
+        onOpenStory={(s) => setSelectedStory(s)}
+        onQuickAdd={quickAdd}
+        setProjectId={setCurrentProjectId}
+        setEpicId={setCurrentEpicId}
+      />
+      <DetailSheet
+        story={selectedStory}
+        projectKey={currentProject?.key}
+        epics={epics.filter(e => !e.isArchived)}
+        onClose={() => setSelectedStory(null)}
+        onUpdate={updateStory}
+        onDelete={deleteStory}
+      />
+      <DocSheet
+        doc={activeDoc}
+        epicId={currentEpicId}
+        onClose={() => setActiveDoc(null)}
+        onSave={saveDoc}
+      />
+      <TweaksPanel
+        tweaks={tweaks}
+        setTweaks={setTweaks}
+        open={tweaksOpen}
+        onClose={() => setTweaksOpen(false)}
+      />
+      <ProjectModal
+        open={projectModal.open}
+        project={projectModal.project}
+        onClose={() => setProjectModal({ open: false, project: null })}
+        onSave={saveProject}
+        onDelete={removeProject}
+      />
+      <EpicModal
+        open={epicModal.open}
+        epic={epicModal.epic}
+        onClose={() => setEpicModal({ open: false, epic: null })}
+        onSave={saveEpic}
+      />
+      <FeedbackBar msg={msg} onClose={clear}/>
+    </div>
+  );
 }
 
-function escapeHtml(value) {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll("\"", "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-loadProjects().catch(error => {
-  boardTitle.textContent = "Could not load board";
-  boardDescription.textContent = error.message;
-  showFeedback(error.message || "Could not load board.", "error");
-});
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App/>);

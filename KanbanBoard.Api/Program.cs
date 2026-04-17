@@ -154,7 +154,7 @@ app.MapGet("/api/epic-documents/{documentId:guid}", async (Guid documentId, Kanb
 })
 .WithName("GetEpicDocument");
 
-app.MapGet("/api/items", async (Guid? projectId, WorkItemType? type, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? type, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
     var includeArchivedEpicItems = includeArchivedEpics ?? false;
     var query = dbContext.WorkItems
@@ -165,6 +165,11 @@ app.MapGet("/api/items", async (Guid? projectId, WorkItemType? type, WorkItemSta
     if (projectId is not null)
     {
         query = query.Where(item => item.ProjectId == projectId);
+    }
+
+    if (epicId is not null)
+    {
+        query = query.Where(item => item.EpicId == epicId);
     }
 
     if (type is not null)
