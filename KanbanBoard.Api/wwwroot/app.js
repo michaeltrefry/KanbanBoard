@@ -1114,15 +1114,22 @@ function App() {
     try {
       const list = await api.listProjects(showArchivedProjects);
       setProjects(list);
+      let nextProjectId = null;
       if (list.length === 0) {
         setCurrentProjectId(null);
       } else if (preferredId && list.some(p => p.id === preferredId)) {
+        nextProjectId = preferredId;
         setCurrentProjectId(preferredId);
       } else if (!currentProjectId || !list.some(p => p.id === currentProjectId)) {
+        nextProjectId = list[0].id;
         setCurrentProjectId(list[0].id);
+      } else {
+        nextProjectId = currentProjectId;
       }
+      return nextProjectId;
     } catch (e) {
       show(`Couldn't load projects: ${e.message}`);
+      return null;
     }
   }, [showArchivedProjects, currentProjectId, show]);
 
@@ -1149,19 +1156,30 @@ function App() {
         api.listProjectEpics(projectId, true),
       ]);
       setEpics(epicList);
-      setItems(board.items || []);
+      const nextItems = board.items || [];
+      setItems(nextItems);
+      setSelectedStory(current => current ? nextItems.find(item => item.id === current.id) || null : current);
 
       // Drop the current epic selection if it isn't valid for this project
       // (e.g. a stale ?epic=... in the URL after reloading into another project).
       setCurrentEpicId(eid => (eid && !epicList.some(e => e.id === eid)) ? null : eid);
 
       // Load docs for all epics in the project (small N — fine).
-      const docLists = await Promise.all(epicList.map(e => api.listEpicDocuments(e.id).catch(() => [])));
-      setDocs(docLists.flat());
+      const nextDocs = (await Promise.all(epicList.map(e => api.listEpicDocuments(e.id).catch(() => [])))).flat();
+      setDocs(nextDocs);
+      setActiveDoc(current => current ? nextDocs.find(doc => doc.id === current.id) || null : current);
     } catch (e) {
       show(`Couldn't load project: ${e.message}`);
     }
   }, [show]);
+
+  const refreshLiveView = useCallback(async () => {
+    const activeProjectId = currentProjectId;
+    const resolvedProjectId = await loadProjects(activeProjectId);
+    if (resolvedProjectId && resolvedProjectId === activeProjectId) {
+      await loadProjectDetail(resolvedProjectId);
+    }
+  }, [currentProjectId, loadProjectDetail, loadProjects]);
 
   useEffect(() => {
     if (!currentProjectId) {
@@ -1177,6 +1195,48 @@ function App() {
     }
     loadProjectDetail(currentProjectId);
   }, [currentProjectId, loadProjectDetail]);
+
+  useEffect(() => {
+    if (!bootstrapped || typeof window.EventSource === "undefined") return undefined;
+
+    let disposed = false;
+    let eventSource = null;
+    let reconnectTimer = null;
+    let refreshTimer = null;
+
+    const scheduleRefresh = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (!disposed) {
+          void refreshLiveView();
+        }
+      }, 150);
+    };
+
+    const connect = () => {
+      if (disposed) return;
+
+      eventSource = new window.EventSource("/api/changes");
+      eventSource.addEventListener("changed", scheduleRefresh);
+      eventSource.onerror = () => {
+        eventSource?.close();
+        eventSource = null;
+
+        if (!disposed) {
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(refreshTimer);
+      window.clearTimeout(reconnectTimer);
+      eventSource?.close();
+    };
+  }, [bootstrapped, refreshLiveView]);
 
   /* Cmd+K / slash */
   useEffect(() => {

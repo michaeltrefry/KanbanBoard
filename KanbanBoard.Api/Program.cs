@@ -18,6 +18,7 @@ var connectionString = builder.Configuration.GetConnectionString("Kanban")
 
 builder.Services.AddDbContext<KanbanDbContext>(options => options.UseSqlite(connectionString));
 builder.Services.AddOpenApi();
+builder.Services.AddSingleton<BoardChangeNotifier>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -35,6 +36,44 @@ app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
 app.UseStaticFiles();
+
+app.MapGet("/api/changes", async (HttpContext httpContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+{
+    httpContext.Response.Headers.CacheControl = "no-cache";
+    httpContext.Response.Headers.Append("X-Accel-Buffering", "no");
+    httpContext.Response.ContentType = "text/event-stream";
+
+    await httpContext.Response.WriteAsync(": connected\n\n", cancellationToken);
+    await httpContext.Response.Body.FlushAsync(cancellationToken);
+
+    using var subscription = changeNotifier.Subscribe();
+
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+
+            var hasChange = await subscription.Reader.WaitToReadAsync(timeout.Token);
+            if (!hasChange)
+            {
+                break;
+            }
+
+            while (subscription.Reader.TryRead(out var change))
+            {
+                await WriteServerSentChangeAsync(httpContext.Response, change, cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            await httpContext.Response.WriteAsync(": ping\n\n", cancellationToken);
+        }
+
+        await httpContext.Response.Body.FlushAsync(cancellationToken);
+    }
+});
 
 app.MapGet("/api/projects", async (bool? includeArchived, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
@@ -202,7 +241,7 @@ app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? typ
 })
 .WithName("ListWorkItems");
 
-app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var normalizedName = request.Name.Trim();
     var normalizedKey = request.Key.Trim().ToUpperInvariant();
@@ -233,11 +272,12 @@ app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContex
         return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
     }
 
+    changeNotifier.Publish();
     return Results.Created($"/api/projects/{project.Id}", ToSummaryDto(project));
 })
 .WithName("CreateProject");
 
-app.MapPut("/api/projects/{projectId:guid}", async (Guid projectId, UpdateProjectRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPut("/api/projects/{projectId:guid}", async (Guid projectId, UpdateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var project = await dbContext.Projects.FirstOrDefaultAsync(project => project.Id == projectId, cancellationToken);
     if (project is null)
@@ -272,11 +312,12 @@ app.MapPut("/api/projects/{projectId:guid}", async (Guid projectId, UpdateProjec
         return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
     }
 
+    changeNotifier.Publish();
     return Results.Ok(ToSummaryDto(project));
 })
 .WithName("UpdateProject");
 
-app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var project = await dbContext.Projects.FirstOrDefaultAsync(candidate => candidate.Id == projectId, cancellationToken);
     if (project is null)
@@ -286,11 +327,12 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, KanbanDbC
 
     dbContext.Projects.Remove(project);
     await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
     return Results.NoContent();
 })
 .WithName("DeleteProject");
 
-app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, CreateEpicRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, CreateEpicRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var normalizedName = request.Name.Trim();
     var validationError = ValidateRequiredText(("name", normalizedName));
@@ -317,11 +359,12 @@ app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, Creat
     dbContext.Epics.Add(epic);
     await dbContext.SaveChangesAsync(cancellationToken);
 
+    changeNotifier.Publish();
     return Results.Created($"/api/epics/{epic.Id}", ToEpicDto(epic));
 })
 .WithName("CreateEpic");
 
-app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
@@ -355,11 +398,12 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
     return Results.Ok(ToEpicDto(epic));
 })
 .WithName("UpdateEpic");
 
-app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
@@ -369,11 +413,12 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext db
 
     dbContext.Epics.Remove(epic);
     await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
     return Results.NoContent();
 })
 .WithName("DeleteEpic");
 
-app.MapPost("/api/epics/{epicId:guid}/documents", async (Guid epicId, CreateEpicDocumentRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPost("/api/epics/{epicId:guid}/documents", async (Guid epicId, CreateEpicDocumentRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var normalizedTitle = request.Title.Trim();
     var validationError = ValidateRequiredText(("title", normalizedTitle), ("body", request.Body));
@@ -399,11 +444,12 @@ app.MapPost("/api/epics/{epicId:guid}/documents", async (Guid epicId, CreateEpic
     dbContext.EpicDocuments.Add(document);
     await dbContext.SaveChangesAsync(cancellationToken);
 
+    changeNotifier.Publish();
     return Results.Created($"/api/epic-documents/{document.Id}", ToEpicDocumentDto(document));
 })
 .WithName("CreateEpicDocument");
 
-app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, UpdateEpicDocumentRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, UpdateEpicDocumentRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var document = await dbContext.EpicDocuments.FirstOrDefaultAsync(candidate => candidate.Id == documentId, cancellationToken);
     if (document is null)
@@ -423,11 +469,12 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
     document.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
     return Results.Ok(ToEpicDocumentDto(document));
 })
 .WithName("UpdateEpicDocument");
 
-app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var normalizedTitle = request.Title.Trim();
     var validationError = ValidateRequiredText(("title", normalizedTitle));
@@ -478,11 +525,12 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
         await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
     }
 
+    changeNotifier.Publish();
     return Results.Created($"/api/items/{item.Id}", ToWorkItemDto(item));
 })
 .WithName("CreateWorkItem");
 
-app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
@@ -573,11 +621,12 @@ app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, 
         await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
     }
 
+    changeNotifier.Publish();
     return Results.Ok(ToWorkItemDto(item));
 })
 .WithName("UpdateWorkItem");
 
-app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
@@ -594,11 +643,12 @@ app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemReq
     await NormalizeColumnOrderingAsync(dbContext, item.ProjectId, request.Status, item.Id, request.Order, cancellationToken);
     await dbContext.SaveChangesAsync(cancellationToken);
 
+    changeNotifier.Publish();
     return Results.Ok(ToWorkItemDto(item));
 })
 .WithName("MoveWorkItem");
 
-app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
     var item = await dbContext.WorkItems.FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
@@ -608,6 +658,7 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext db
 
     dbContext.WorkItems.Remove(item);
     await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
     return Results.NoContent();
 })
 .WithName("DeleteWorkItem");
@@ -682,6 +733,9 @@ static string? NormalizeLabels(string? labels) =>
     string.IsNullOrWhiteSpace(labels)
         ? null
         : string.Join(',', labels.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.OrdinalIgnoreCase));
+
+static Task WriteServerSentChangeAsync(HttpResponse response, BoardChangeEvent change, CancellationToken cancellationToken) =>
+    response.WriteAsync($"event: changed\ndata: {change.Sequence}\n\n", cancellationToken);
 
 static async Task<int> GetNextOrderAsync(KanbanDbContext dbContext, Guid projectId, WorkItemStatus status, CancellationToken cancellationToken)
 {
