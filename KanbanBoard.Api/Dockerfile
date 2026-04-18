@@ -13,5 +13,6 @@ RUN dotnet publish ./KanbanBoard.Api/KanbanBoard.Api.csproj -c Release -o /app/p
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app/publish .
+EXPOSE 8443
 EXPOSE 8080
 ENTRYPOINT ["dotnet", "KanbanBoard.Api.dll"]

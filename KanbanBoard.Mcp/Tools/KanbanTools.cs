@@ -317,15 +317,17 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
             throw new InvalidOperationException($"Work item {itemId} was not found.");
         }
 
+        // MCP optional parameters collapse "omitted" and "null" into the same value,
+        // so we preserve the current optional fields unless the caller provided a value.
         var response = await client.PutAsJsonAsync($"/api/items/{itemId}", new UpdateWorkItemRequest(
-            epicId,
+            epicId ?? item.EpicId,
             title,
-            description,
+            description ?? item.Description,
             type,
             status,
             priority,
-            estimate,
-            labels));
+            estimate ?? item.Estimate,
+            labels ?? item.Labels));
 
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);

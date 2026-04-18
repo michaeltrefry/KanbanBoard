@@ -4,6 +4,7 @@ using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Scalar.AspNetCore;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -337,6 +338,19 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
 
     epic.Name = normalizedName;
     epic.Description = request.Description?.Trim();
+    if (request.IsArchived && !epic.IsArchived)
+    {
+        var unfinishedItems = await dbContext.WorkItems
+            .Where(item => item.EpicId == epicId && item.Status != WorkItemStatus.Done)
+            .ToListAsync(cancellationToken);
+
+        foreach (var item in unfinishedItems)
+        {
+            item.EpicId = null;
+            item.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
     epic.IsArchived = request.IsArchived;
     epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
@@ -468,7 +482,7 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
 })
 .WithName("CreateWorkItem");
 
-app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, UpdateWorkItemRequest request, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
@@ -478,17 +492,28 @@ app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, UpdateWorkItemRequest
         return Results.NotFound();
     }
 
-    var normalizedTitle = request.Title.Trim();
+    if (!UpdateWorkItemPatch.TryParse(payload, out var patch, out var parseError))
+    {
+        return Results.BadRequest(new { message = parseError });
+    }
+
+    var normalizedTitle = patch!.HasTitle
+        ? patch.Title?.Trim()
+        : item.Title;
     var validationError = ValidateRequiredText(("title", normalizedTitle));
     if (validationError is not null)
     {
         return Results.BadRequest(new { message = validationError });
     }
 
-    if (request.EpicId is not null)
+    var nextEpicId = patch.HasEpicId
+        ? patch.EpicId
+        : item.EpicId;
+
+    if (nextEpicId is not null)
     {
         var epicExists = await dbContext.Epics.AnyAsync(
-            epic => epic.Id == request.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived,
+            epic => epic.Id == nextEpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived,
             cancellationToken);
 
         if (!epicExists)
@@ -497,15 +522,39 @@ app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, UpdateWorkItemRequest
         }
     }
 
-    var statusChanged = item.Status != request.Status;
-    item.EpicId = request.EpicId;
-    item.Title = normalizedTitle;
-    item.Description = request.Description?.Trim();
-    item.Type = request.Type;
-    item.Status = request.Status;
-    item.Priority = request.Priority;
-    item.Estimate = request.Estimate;
-    item.Labels = NormalizeLabels(request.Labels);
+    var nextType = patch.HasType ? patch.Type : item.Type;
+    if (nextType is null)
+    {
+        return Results.BadRequest(new { message = "Field 'type' is required." });
+    }
+
+    var nextStatus = patch.HasStatus ? patch.Status : item.Status;
+    if (nextStatus is null)
+    {
+        return Results.BadRequest(new { message = "Field 'status' is required." });
+    }
+
+    var nextPriority = patch.HasPriority ? patch.Priority : item.Priority;
+    if (nextPriority is null)
+    {
+        return Results.BadRequest(new { message = "Field 'priority' is required." });
+    }
+
+    var statusChanged = item.Status != nextStatus;
+    item.EpicId = nextEpicId;
+    item.Title = normalizedTitle!;
+    item.Description = patch.HasDescription
+        ? patch.Description?.Trim()
+        : item.Description;
+    item.Type = nextType.Value;
+    item.Status = nextStatus.Value;
+    item.Priority = nextPriority.Value;
+    item.Estimate = patch.HasEstimate
+        ? patch.Estimate
+        : item.Estimate;
+    item.Labels = patch.HasLabels
+        ? NormalizeLabels(patch.Labels)
+        : item.Labels;
     item.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
     if (statusChanged)

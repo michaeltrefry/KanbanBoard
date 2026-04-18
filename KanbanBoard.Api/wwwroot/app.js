@@ -1307,7 +1307,11 @@ function App() {
         isArchived: !currentEpic.isArchived,
       });
       setEpics(cur => cur.map(e => e.id === saved.id ? saved : e));
-      show(saved.isArchived ? "Epic archived" : "Epic restored", "success");
+      if (saved.isArchived) {
+        setCurrentEpicId(null);
+      }
+      await loadProjectDetail(currentProject.id);
+      show(saved.isArchived ? "Epic archived; unfinished items moved to the product backlog" : "Epic restored", "success");
     } catch (e) {
       show(`Update failed: ${e.message}`);
     }

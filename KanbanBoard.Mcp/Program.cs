@@ -2,7 +2,10 @@ using KanbanBoard.Mcp.Tools;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var apiBaseUrl = builder.Configuration["KANBAN_API_BASE_URL"] ?? "http://api:8080";
+var apiBaseUrl = builder.Configuration["KANBAN_API_BASE_URL"]
+    ?? (builder.Environment.IsDevelopment()
+        ? "https://localhost:7256"
+        : "http://api:8080");
 
 builder.Services.AddHttpClient("kanban-api", client =>
 {

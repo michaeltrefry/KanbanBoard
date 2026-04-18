@@ -4,37 +4,60 @@ A lightweight single-developer kanban board with:
 
 - .NET 10 API and static web UI
 - SQLite persistence
-- HTTP MCP server for agent tooling
+- HTTPS-ready MCP server for agent tooling
 - Docker Compose for the whole stack
 
 ## Run locally
 
-```bash
-dotnet run --project ./KanbanBoard.Api
-```
-
-The API and UI will be available at [http://localhost:5157](http://localhost:5157) unless you override `ASPNETCORE_URLS`.
-
-To run the MCP server locally:
+Generate local certificates once with mkcert:
 
 ```bash
-ASPNETCORE_URLS=http://+:3001 KANBAN_API_BASE_URL=http://localhost:5157 dotnet run --project ./KanbanBoard.Mcp
+./scripts/create-local-certs.sh
 ```
 
-The MCP endpoint is exposed at [http://localhost:3001/mcp](http://localhost:3001/mcp).
+This creates `./certs/localhost.pem` and `./certs/localhost-key.pem`, which both ASP.NET Core hosts use in development.
+
+Run the web app and API over HTTPS:
+
+```bash
+dotnet run --launch-profile https --project ./KanbanBoard.Api
+```
+
+The API and UI will be available at [https://localhost:7256](https://localhost:7256).
+
+To run the MCP server locally over HTTPS:
+
+```bash
+dotnet run --launch-profile https --project ./KanbanBoard.Mcp
+```
+
+The MCP endpoint is exposed at [https://localhost:3001/mcp](https://localhost:3001/mcp).
 
 ## Run with Docker Compose
+
+Generate local certificates first:
+
+```bash
+./scripts/create-local-certs.sh
+```
 
 ```bash
 docker compose up --build
 ```
 
+You can override the default host ports if they conflict with another local stack:
+
+```bash
+KANBAN_DOCKER_HTTPS_PORT=9443 KANBAN_MCP_HTTPS_PORT=3002 docker compose up --build
+```
+
 Services:
 
-- Web UI and API: [http://localhost:8080](http://localhost:8080)
-- MCP server: [http://localhost:3001/mcp](http://localhost:3001/mcp)
+- Web UI and API: [https://localhost:8444](https://localhost:8444)
+- MCP server: [https://localhost:3001/mcp](https://localhost:3001/mcp)
 
 SQLite data persists in the `kanban_data` named volume.
+The API container still listens on internal HTTP port `8080` so the MCP container can call it as `http://api:8080` without certificate hostname mismatches on the Docker network.
 
 ## MCP tools
 
