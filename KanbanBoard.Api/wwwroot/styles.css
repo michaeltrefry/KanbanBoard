@@ -302,6 +302,7 @@ body::before {
   color: var(--muted); font-weight: 600;
 }
 .epic-strip-actions { display: flex; gap: 6px; align-items: center; }
+.epic-toggle { padding: 0 4px; }
 
 .epic-rail {
   display: flex; gap: 10px;

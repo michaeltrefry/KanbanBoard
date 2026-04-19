@@ -239,7 +239,7 @@ function Topbar({ project, epic, onOpenPalette, onOpenTweaks, onNewItem }) {
 }
 
 /* ============ Epic strip ============ */
-function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic }) {
+function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic, showArchived, setShowArchived }) {
   const byEpic = useMemo(() => {
     const m = {};
     for (const it of items) {
@@ -258,6 +258,10 @@ function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic }) {
           <span className="epic-strip-eyebrow">Epics</span>
         </div>
         <div className="epic-strip-actions">
+          <label className="side-toggle epic-toggle">
+            <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} />
+            Show archived
+          </label>
           <button className="btn small ghost" onClick={onNewEpic}>+ New epic</button>
         </div>
       </div>
@@ -1098,6 +1102,7 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
 
   const [showArchivedProjects, setShowArchivedProjects] = useState(false);
+  const [showArchivedEpics, setShowArchivedEpics] = useState(false);
 
   const [projectModal, setProjectModal] = useState({ open: false, project: null });
   const [epicModal, setEpicModal] = useState({ open: false, epic: null });
@@ -1527,7 +1532,7 @@ function App() {
     );
   }
 
-  const visibleEpics = epics.filter(e => !e.isArchived || currentEpicId === e.id);
+  const visibleEpics = epics.filter(e => showArchivedEpics || !e.isArchived || currentEpicId === e.id);
 
   return (
     <div className="shell">
@@ -1553,6 +1558,8 @@ function App() {
           currentEpicId={currentEpicId}
           setEpicId={setCurrentEpicId}
           onNewEpic={() => setEpicModal({ open: true, epic: null })}
+          showArchived={showArchivedEpics}
+          setShowArchived={setShowArchivedEpics}
         />
         <EpicDetail
           epic={currentEpic}

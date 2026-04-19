@@ -671,7 +671,6 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
-        .Include(workItem => workItem.Comments)
         .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
     {
@@ -695,12 +694,21 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
         CreatedAtUtc = createdAtUtc
     };
 
-    item.Comments.Add(comment);
-    item.UpdatedAtUtc = createdAtUtc;
-
+    dbContext.WorkItemComments.Add(comment);
     await dbContext.SaveChangesAsync(cancellationToken);
+
+    var refreshedItem = await dbContext.WorkItems
+        .AsNoTracking()
+        .Include(workItem => workItem.Epic)
+        .Include(workItem => workItem.Comments)
+        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
+    if (refreshedItem is null)
+    {
+        return Results.NotFound();
+    }
+
     changeNotifier.Publish();
-    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", ToWorkItemDto(item));
+    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", ToWorkItemDto(refreshedItem));
 })
 .WithName("CreateWorkItemComment");
 
