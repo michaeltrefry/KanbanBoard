@@ -769,6 +769,102 @@ body::before {
   margin: 0 0 6px;
 }
 
+.comments-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.comments-empty {
+  padding: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  background: var(--panel-2);
+}
+
+.comment-item {
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+}
+
+.comment-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.comment-author {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.comment-date {
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.comment-body {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.comment-compose {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.comment-compose-head {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.comment-compose input,
+.comment-compose textarea {
+  font: inherit;
+  font-size: 13px;
+  background: var(--panel-sunk);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.comment-compose textarea {
+  min-height: 110px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.comment-compose input:focus,
+.comment-compose textarea:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: 0;
+  border-color: var(--accent);
+}
+
+.comment-compose-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* ---------- Tweaks panel ---------- */
 .tweaks {
   position: fixed; bottom: 18px; right: 18px;
@@ -930,4 +1026,3 @@ body::before {
   cursor: pointer; user-select: none;
 }
 .side-toggle input { accent-color: var(--accent); }
-

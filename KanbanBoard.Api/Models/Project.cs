@@ -54,6 +54,17 @@ public sealed class WorkItem
     public int Order { get; set; }
     public int? Estimate { get; set; }
     public string? Labels { get; set; }
+    public List<WorkItemComment> Comments { get; set; } = [];
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
+public sealed class WorkItemComment
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid WorkItemId { get; set; }
+    public WorkItem? WorkItem { get; set; }
+    public string Author { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

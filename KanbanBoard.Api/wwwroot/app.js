@@ -62,6 +62,18 @@ function formatDate(iso) {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 /* ============ API Client ============ */
 async function fetchJson(input, init) {
   const res = await fetch(input, {
@@ -115,6 +127,8 @@ const api = {
     fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
   updateWorkItem: (id, payload) =>
     fetchJson(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+  addWorkItemComment: (id, payload) =>
+    fetchJson(`/api/items/${id}/comments`, { method: "POST", body: JSON.stringify(payload) }),
   moveWorkItem: (id, status, order) =>
     fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
@@ -610,12 +624,21 @@ function CommandPalette({ open, onClose, items, projects, epics, currentProject,
 }
 
 /* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete }) {
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment }) {
   const [local, setLocal] = useState(story);
   const [saving, setSaving] = useState(false);
+  const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem("kanban-comment-author") || "");
+  const [commentBody, setCommentBody] = useState("");
+  const [commenting, setCommenting] = useState(false);
   const saveTimer = useRef(null);
 
   useEffect(() => { setLocal(story); }, [story?.id]);
+  useEffect(() => { setCommentBody(""); }, [story?.id]);
+
+  const comments = useMemo(() => (
+    [...(local?.comments || [])]
+      .sort((a, b) => new Date(a.createdAtUtc).getTime() - new Date(b.createdAtUtc).getTime())
+  ), [local?.comments]);
 
   const patch = (p) => {
     const next = { ...local, ...p };
@@ -625,6 +648,22 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete }) 
       setSaving(true);
       onUpdate(next).finally(() => setSaving(false));
     }, 400);
+  };
+
+  const submitComment = async () => {
+    const author = commentAuthor.trim();
+    const body = commentBody.trim();
+    if (!author || !body) return;
+
+    setCommenting(true);
+    try {
+      localStorage.setItem("kanban-comment-author", author);
+      const saved = await onAddComment(story.id, { author, body });
+      setLocal(saved);
+      setCommentBody("");
+    } finally {
+      setCommenting(false);
+    }
   };
 
   if (!story || !local) return null;
@@ -693,6 +732,43 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete }) 
                 value={local.description || ""}
                 onChange={e => patch({ description: e.target.value })}
               />
+            </div>
+            <div className="sheet-section-title" style={{marginTop: 18}}>Comments</div>
+            <div className="comments-panel">
+              {comments.length === 0 && (
+                <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
+              )}
+              {comments.map(comment => (
+                <article key={comment.id} className="comment-item">
+                  <div className="comment-meta">
+                    <span className="comment-author">{comment.author}</span>
+                    <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
+                  </div>
+                  <p className="comment-body">{comment.body}</p>
+                </article>
+              ))}
+              <div className="comment-compose">
+                <div className="comment-compose-head">Add Comment</div>
+                <input
+                  value={commentAuthor}
+                  onChange={e => setCommentAuthor(e.target.value)}
+                  placeholder="Author"
+                />
+                <textarea
+                  value={commentBody}
+                  onChange={e => setCommentBody(e.target.value)}
+                  placeholder="Add Comment"
+                />
+                <div className="comment-compose-actions">
+                  <button
+                    className="btn primary"
+                    onClick={submitComment}
+                    disabled={commenting || !commentAuthor.trim() || !commentBody.trim()}
+                  >
+                    {commenting ? "Adding…" : "Add Comment"}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -1301,6 +1377,18 @@ function App() {
     }
   };
 
+  const addComment = async (id, payload) => {
+    try {
+      const saved = await api.addWorkItemComment(id, payload);
+      setItems(cur => cur.map(item => item.id === saved.id ? saved : item));
+      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      return saved;
+    } catch (e) {
+      show(`Comment failed: ${e.message}`);
+      throw e;
+    }
+  };
+
   const quickAdd = async (title) => {
     if (!currentProject) return;
     const epicId = currentEpicId || null;
@@ -1505,6 +1593,7 @@ function App() {
         onClose={() => setSelectedStory(null)}
         onUpdate={updateStory}
         onDelete={deleteStory}
+        onAddComment={addComment}
       />
       <DocSheet
         doc={activeDoc}

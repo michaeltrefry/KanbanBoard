@@ -227,6 +227,25 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         return await ListWorkItems(projectId: projectId, type: WorkItemType.Issue, status: status);
     }
 
+    [McpServerTool, Description("Add a comment to any work item. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
+    public async Task<WorkItemDto?> AddWorkItemComment(
+        [Description("Work item id")] Guid itemId,
+        [Description("Comment author. For LLM-authored comments, use your assistant name like codex or claude.")] string author,
+        [Description("Comment text")] string body)
+    {
+        var client = httpClientFactory.CreateClient("kanban-api");
+        var response = await client.PostAsJsonAsync($"/api/items/{itemId}/comments", new CreateWorkItemCommentRequest(author, body));
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
+    }
+
+    [McpServerTool, Description("Add a comment to an issue. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
+    public Task<WorkItemDto?> AddIssueComment(
+        [Description("Issue work item id")] Guid itemId,
+        [Description("Comment author. For LLM-authored comments, use your assistant name like codex or claude.")] string author,
+        [Description("Comment text")] string body) =>
+        AddWorkItemComment(itemId, author, body);
+
     [McpServerTool, Description("Create a story, issue, or task in a project backlog. Pass epicId to attach it to a specific epic backlog.")]
     public async Task<WorkItemDto?> CreateWorkItem(
         [Description("Project id")] Guid projectId,

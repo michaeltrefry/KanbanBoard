@@ -9,6 +9,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<Epic> Epics => Set<Epic>();
     public DbSet<EpicDocument> EpicDocuments => Set<EpicDocument>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
+    public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -58,6 +59,18 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
                 .WithMany(epic => epic.Items)
                 .HasForeignKey(item => item.EpicId)
                 .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        modelBuilder.Entity<WorkItemComment>(entity =>
+        {
+            entity.HasKey(comment => comment.Id);
+            entity.Property(comment => comment.Author).HasMaxLength(80).IsRequired();
+            entity.Property(comment => comment.Body).IsRequired();
+            entity.HasIndex(comment => new { comment.WorkItemId, comment.CreatedAtUtc });
+            entity.HasOne(comment => comment.WorkItem)
+                .WithMany(item => item.Comments)
+                .HasForeignKey(comment => comment.WorkItemId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

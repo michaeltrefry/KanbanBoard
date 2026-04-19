@@ -115,6 +115,8 @@ app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStat
         .AsNoTracking()
         .Include(project => project.Items)
             .ThenInclude(item => item.Epic)
+        .Include(project => project.Items)
+            .ThenInclude(item => item.Comments)
         .FirstOrDefaultAsync(project => project.Id == projectId, cancellationToken);
 
     return project is null
@@ -200,6 +202,7 @@ app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? typ
     var query = dbContext.WorkItems
         .AsNoTracking()
         .Include(item => item.Epic)
+        .Include(item => item.Comments)
         .AsQueryable();
 
     if (projectId is not null)
@@ -240,6 +243,20 @@ app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? typ
         .ToList());
 })
 .WithName("ListWorkItems");
+
+app.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+{
+    var item = await dbContext.WorkItems
+        .AsNoTracking()
+        .Include(workItem => workItem.Epic)
+        .Include(workItem => workItem.Comments)
+        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
+
+    return item is null
+        ? Results.NotFound()
+        : Results.Ok(ToWorkItemDto(item));
+})
+.WithName("GetWorkItem");
 
 app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
@@ -534,6 +551,7 @@ app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, 
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
+        .Include(workItem => workItem.Comments)
         .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
     {
@@ -630,6 +648,7 @@ app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemReq
 {
     var item = await dbContext.WorkItems
         .Include(workItem => workItem.Epic)
+        .Include(workItem => workItem.Comments)
         .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
     {
@@ -647,6 +666,43 @@ app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemReq
     return Results.Ok(ToWorkItemDto(item));
 })
 .WithName("MoveWorkItem");
+
+app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkItemCommentRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+{
+    var item = await dbContext.WorkItems
+        .Include(workItem => workItem.Epic)
+        .Include(workItem => workItem.Comments)
+        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
+    if (item is null)
+    {
+        return Results.NotFound();
+    }
+
+    var normalizedAuthor = request.Author.Trim();
+    var normalizedBody = request.Body.Trim();
+    var validationError = ValidateRequiredText(("author", normalizedAuthor), ("body", normalizedBody));
+    if (validationError is not null)
+    {
+        return Results.BadRequest(new { message = validationError });
+    }
+
+    var createdAtUtc = DateTimeOffset.UtcNow;
+    var comment = new WorkItemComment
+    {
+        WorkItemId = itemId,
+        Author = normalizedAuthor,
+        Body = normalizedBody,
+        CreatedAtUtc = createdAtUtc
+    };
+
+    item.Comments.Add(comment);
+    item.UpdatedAtUtc = createdAtUtc;
+
+    await dbContext.SaveChangesAsync(cancellationToken);
+    changeNotifier.Publish();
+    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", ToWorkItemDto(item));
+})
+.WithName("CreateWorkItemComment");
 
 app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
@@ -726,8 +782,21 @@ static WorkItemDto ToWorkItemDto(WorkItem item) =>
         item.Order,
         item.Estimate,
         item.Labels,
+        item.Comments
+            .OrderBy(comment => comment.CreatedAtUtc)
+            .ThenBy(comment => comment.Id)
+            .Select(ToWorkItemCommentDto)
+            .ToList(),
         item.CreatedAtUtc,
         item.UpdatedAtUtc);
+
+static WorkItemCommentDto ToWorkItemCommentDto(WorkItemComment comment) =>
+    new(
+        comment.Id,
+        comment.WorkItemId,
+        comment.Author,
+        comment.Body,
+        comment.CreatedAtUtc);
 
 static string? NormalizeLabels(string? labels) =>
     string.IsNullOrWhiteSpace(labels)

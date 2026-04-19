@@ -15,6 +15,7 @@ public static class DbInitializer
         await EnsureEpicArchiveColumnAsync(dbContext, cancellationToken);
         await EnsureEpicDocumentsTableAsync(dbContext, cancellationToken);
         await EnsureWorkItemEpicColumnAsync(dbContext, cancellationToken);
+        await EnsureWorkItemCommentsTableAsync(dbContext, cancellationToken);
 
         if (await dbContext.Projects.AnyAsync(cancellationToken))
         {
@@ -212,5 +213,27 @@ public static class DbInitializer
         {
             await connection.CloseAsync();
         }
+    }
+
+    private static async Task EnsureWorkItemCommentsTableAsync(KanbanDbContext dbContext, CancellationToken cancellationToken)
+    {
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS WorkItemComments (
+                Id TEXT NOT NULL CONSTRAINT PK_WorkItemComments PRIMARY KEY,
+                WorkItemId TEXT NOT NULL,
+                Author TEXT NOT NULL,
+                Body TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                CONSTRAINT FK_WorkItemComments_WorkItems_WorkItemId FOREIGN KEY (WorkItemId) REFERENCES WorkItems (Id) ON DELETE CASCADE
+            );
+            """,
+            cancellationToken);
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE INDEX IF NOT EXISTS IX_WorkItemComments_WorkItemId_CreatedAtUtc ON WorkItemComments (WorkItemId, CreatedAtUtc);
+            """,
+            cancellationToken);
     }
 }

@@ -64,6 +64,13 @@ public sealed record EpicReferenceDto(
     Guid Id,
     string Name);
 
+public sealed record WorkItemCommentDto(
+    Guid Id,
+    Guid WorkItemId,
+    string Author,
+    string Body,
+    DateTimeOffset CreatedAtUtc);
+
 public sealed record WorkItemDto(
     Guid Id,
     Guid ProjectId,
@@ -77,6 +84,7 @@ public sealed record WorkItemDto(
     int Order,
     int? Estimate,
     string? Labels,
+    IReadOnlyList<WorkItemCommentDto> Comments,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
@@ -134,3 +142,7 @@ public sealed record UpdateWorkItemRequest(
 public sealed record MoveWorkItemRequest(
     WorkItemStatus Status,
     int Order);
+
+public sealed record CreateWorkItemCommentRequest(
+    string Author,
+    string Body);
