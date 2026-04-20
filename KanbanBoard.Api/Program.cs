@@ -90,7 +90,7 @@ app.MapGet("/api/projects", async (bool? includeArchived, KanbanDbContext dbCont
             project.IsArchived,
             project.CreatedAtUtc,
             TotalItems = project.Items.Count,
-            OpenItems = project.Items.Count(item => item.Status != WorkItemStatus.Done)
+            OpenItems = project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed)
         })
         .OrderBy(project => project.Name)
         .Select(project => new ProjectSummaryDto(
@@ -223,6 +223,10 @@ app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? typ
     if (status is not null)
     {
         query = query.Where(item => item.Status == status);
+    }
+    else
+    {
+        query = query.Where(item => item.Status != WorkItemStatus.Closed);
     }
 
     if (!includeArchivedEpicItems)
@@ -401,7 +405,7 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     if (request.IsArchived && !epic.IsArchived)
     {
         var unfinishedItems = await dbContext.WorkItems
-            .Where(item => item.EpicId == epicId && item.Status != WorkItemStatus.Done)
+            .Where(item => item.EpicId == epicId && item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed)
             .ToListAsync(cancellationToken);
 
         foreach (var item in unfinishedItems)
@@ -738,7 +742,7 @@ static ProjectSummaryDto ToSummaryDto(Project project) =>
         project.IsArchived,
         project.CreatedAtUtc,
         project.Items.Count,
-        project.Items.Count(item => item.Status != WorkItemStatus.Done));
+        project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed));
 
 static ProjectBoardDto ToBoardDto(Project project, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
     new(
@@ -750,7 +754,7 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemStatus? status = null
         project.CreatedAtUtc,
         project.Items
             .Where(item => includeArchivedEpics || item.Epic?.IsArchived != true)
-            .Where(item => status is null || item.Status == status)
+            .Where(item => status is null ? item.Status != WorkItemStatus.Closed : item.Status == status)
             .OrderBy(item => item.Status)
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)

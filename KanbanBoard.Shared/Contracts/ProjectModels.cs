@@ -13,7 +13,8 @@ public enum WorkItemStatus
     Ready,
     InProgress,
     Blocked,
-    Done
+    Done,
+    Closed
 }
 
 public enum WorkItemPriority

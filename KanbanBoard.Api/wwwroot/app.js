@@ -6,6 +6,8 @@ const { useState, useEffect, useMemo, useRef, useCallback } = React;
 /* ============ Constants ============ */
 const STATUS_ORDER = ["Backlog", "Ready", "InProgress", "Blocked", "Done"];
 const STATUS_LABEL = { Backlog: "Backlog", Ready: "Ready", InProgress: "In Progress", Blocked: "Blocked", Done: "Done" };
+const STATUS_OPTIONS = [...STATUS_ORDER, "Closed"];
+STATUS_LABEL.Closed = "Closed";
 const WORK_ITEM_TYPES = ["Story", "Issue", "Task"];
 const PRIORITY_ORDER = ["Low", "Medium", "High", "Critical"];
 
@@ -53,6 +55,10 @@ function parseLabels(str) {
 }
 function labelsToString(arr) {
   return (arr || []).map(s => s.trim()).filter(Boolean).join(",");
+}
+
+function isVisibleWorkItem(item) {
+  return item?.status !== "Closed";
 }
 
 function formatDate(iso) {
@@ -240,16 +246,18 @@ function Topbar({ project, epic, onOpenPalette, onOpenTweaks, onNewItem }) {
 
 /* ============ Epic strip ============ */
 function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic, showArchived, setShowArchived }) {
+  const visibleItems = useMemo(() => items.filter(isVisibleWorkItem), [items]);
+
   const byEpic = useMemo(() => {
     const m = {};
-    for (const it of items) {
+    for (const it of visibleItems) {
       const id = it.epicId || "__none";
       if (!m[id]) m[id] = { Done: 0, InProgress: 0, Blocked: 0, Ready: 0, Backlog: 0, total: 0 };
       m[id][it.status]++;
       m[id].total++;
     }
     return m;
-  }, [items]);
+  }, [visibleItems]);
 
   return (
     <section className="epic-strip">
@@ -275,7 +283,7 @@ function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic, showArch
             <div className="epic-card-name">All project work</div>
           </div>
           <div className="epic-card-foot">
-            <span>{items.length} stories total</span>
+            <span>{visibleItems.length} stories total</span>
           </div>
         </div>
         {epics.map(e => {
@@ -701,7 +709,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             <div className="sheet-row">
               <label>Status</label>
               <select value={local.status} onChange={e => patch({ status: e.target.value })}>
-                {STATUS_ORDER.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+                {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
               </select>
             </div>
             <div className="sheet-row">
@@ -1180,10 +1188,15 @@ function App() {
     [epics, currentEpicId]
   );
 
+  const visibleItems = useMemo(
+    () => items.filter(isVisibleWorkItem),
+    [items]
+  );
+
   const boardItems = useMemo(() => {
-    if (currentEpicId) return items.filter(s => s.epicId === currentEpicId);
-    return items;
-  }, [items, currentEpicId]);
+    if (currentEpicId) return visibleItems.filter(s => s.epicId === currentEpicId);
+    return visibleItems;
+  }, [visibleItems, currentEpicId]);
 
   const epicDocs = useMemo(() => {
     if (!currentEpicId) return [];
@@ -1584,7 +1597,7 @@ function App() {
       <CommandPalette
         open={paletteOpen}
         onClose={() => setPaletteOpen(false)}
-        items={items}
+        items={visibleItems}
         projects={projects}
         epics={epics}
         currentProject={currentProject}

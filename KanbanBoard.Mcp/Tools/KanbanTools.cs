@@ -38,7 +38,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         return await response.Content.ReadFromJsonAsync<ProjectSummaryDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Fetch a project board, optionally filtered to a single status.")]
+    [McpServerTool, Description("Fetch a project board, optionally filtered to a single status. Closed items stay persisted but are hidden unless status=Closed is requested.")]
     public async Task<ProjectBoardDto?> GetBoard(
         [Description("Project id")] Guid projectId,
         [Description("Optional status filter")] WorkItemStatus? status = null,
@@ -168,7 +168,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status.")]
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status. Closed items stay persisted but are hidden unless status=Closed is requested.")]
     public async Task<IReadOnlyList<WorkItemDto>> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
         [Description("Optional epic id")] Guid? epicId = null,
