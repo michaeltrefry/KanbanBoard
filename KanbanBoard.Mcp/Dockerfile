@@ -13,5 +13,6 @@ RUN dotnet publish ./KanbanBoard.Mcp/KanbanBoard.Mcp.csproj -c Release -o /app/p
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app/publish .
+EXPOSE 3000
 EXPOSE 3001
 ENTRYPOINT ["dotnet", "KanbanBoard.Mcp.dll"]

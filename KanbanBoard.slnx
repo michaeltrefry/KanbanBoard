@@ -1,4 +1,8 @@
 <Solution>
+  <Folder Name="/SolutionFolder/">
+    <File Path="docker-compose.yml" />
+    <File Path="README.md" />
+  </Folder>
   <Project Path="KanbanBoard.Api/KanbanBoard.Api.csproj" />
   <Project Path="KanbanBoard.Mcp/KanbanBoard.Mcp.csproj" />
   <Project Path="KanbanBoard.Shared/KanbanBoard.Shared.csproj" />

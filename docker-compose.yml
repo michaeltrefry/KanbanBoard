@@ -1,5 +1,8 @@
+networks:
+  mcp-shared:
+    external: true
 services:
-  api:
+  kanban-api:
     build:
       context: .
       dockerfile: ./KanbanBoard.Api/Dockerfile
@@ -13,22 +16,24 @@ services:
     volumes:
       - kanban_data:/data
       - ./certs:/https:ro
-
-  mcp:
+  kanban-mcp:
     build:
       context: .
       dockerfile: ./KanbanBoard.Mcp/Dockerfile
     ports:
       - "127.0.0.1:${KANBAN_MCP_HTTPS_PORT:-3001}:3001"
     depends_on:
-      - api
+      - kanban-api
     environment:
-      ASPNETCORE_URLS: https://+:3001
+      ASPNETCORE_URLS: https://+:3001;http://+:3000
       ASPNETCORE_Kestrel__Certificates__Default__Path: /https/localhost.pem
       ASPNETCORE_Kestrel__Certificates__Default__KeyPath: /https/localhost-key.pem
-      KANBAN_API_BASE_URL: http://api:8080
+      KANBAN_API_BASE_URL: http://kanban-api:8080
     volumes:
       - ./certs:/https:ro
+    networks:
+      - default
+      - mcp-shared
 
 volumes:
   kanban_data:

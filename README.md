@@ -54,7 +54,8 @@ KANBAN_DOCKER_HTTPS_PORT=9443 KANBAN_MCP_HTTPS_PORT=3002 docker compose up --bui
 Services:
 
 - Web UI and API: [https://localhost:8444](https://localhost:8444)
-- MCP server: [https://localhost:3001/mcp](https://localhost:3001/mcp)
+- MCP server from the host: [https://localhost:3001/mcp](https://localhost:3001/mcp)
+- MCP server from Docker containers on `mcp-shared`: `http://kanban-mcp:3000/mcp`
 
 SQLite data persists in the `kanban_data` named volume.
 The API container still listens on internal HTTP port `8080` so the MCP container can call it as `http://api:8080` without certificate hostname mismatches on the Docker network.
