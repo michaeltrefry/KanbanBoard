@@ -147,7 +147,7 @@ Required:
 
 - `LINODE_HOST`: Linode IPv4 address or DNS name. Variable or secret.
 - `LINODE_USER`: SSH user on the Linode. Variable or secret.
-- `LINODE_SSH_KEY`: private key for the deploy user. Secret.
+- `LINODE_SSH_KEY`: full private key for the deploy user, including the `BEGIN` and `END` lines. Secret.
 - `KANBAN_AUTH_AUTHORITY`: Keycloak realm authority, for example `https://identity.trefry.net/realms/YOUR_REALM`. Variable or secret.
 - `KANBAN_AUTH_CLIENT_SECRET`: Keycloak client secret for the `kanban-board` confidential client. Secret.
 - `KANBAN_PAT_ENCRYPTION_KEY`: 32-byte / 256-bit PAT encryption key encoded as base64 or 64 hex characters. Secret.
@@ -155,6 +155,7 @@ Required:
 Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
+- `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.
 - `GHCR_USERNAME`: GitHub username for pulling private GHCR images from the Linode. Variable or secret.
 - `GHCR_READ_TOKEN`: classic GitHub PAT with `read:packages`, only needed if the GHCR packages stay private. Secret.
