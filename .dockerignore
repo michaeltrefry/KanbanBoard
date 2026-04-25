@@ -1,0 +1,9 @@
+.git/
+.github/
+**/bin/
+**/obj/
+.DS_Store
+.kanban-data/
+KanbanBoard.Api/App_Data/
+certs/*
+!certs/.gitkeep

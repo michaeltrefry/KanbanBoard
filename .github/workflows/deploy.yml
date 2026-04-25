@@ -1,0 +1,210 @@
+name: Build and deploy
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  DOTNET_VERSION: 10.0.x
+  DEPLOY_PATH: /opt/kanban-board
+  APP_HOSTNAME: kanban.trefry.net
+  MCP_HOSTNAME: kanban-mcp.trefry.net
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore KanbanBoard.slnx
+
+      - name: Build
+        run: dotnet build KanbanBoard.slnx --configuration Release --no-restore
+
+      - name: Build API image
+        run: docker build --file KanbanBoard.Api/Dockerfile --tag kanbanboard-api:ci .
+
+      - name: Build MCP image
+        run: docker build --file KanbanBoard.Mcp/Dockerfile --tag kanbanboard-mcp:ci .
+
+  publish:
+    name: Publish images
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+
+    outputs:
+      api_image: ${{ steps.image_names.outputs.api_image }}
+      mcp_image: ${{ steps.image_names.outputs.mcp_image }}
+      image_tag: ${{ steps.image_names.outputs.image_tag }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve image names
+        id: image_names
+        shell: bash
+        run: |
+          repo="${GITHUB_REPOSITORY,,}"
+          echo "api_image=${REGISTRY}/${repo}-api" >> "$GITHUB_OUTPUT"
+          echo "mcp_image=${REGISTRY}/${repo}-mcp" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login "${REGISTRY}" --username "${{ github.actor }}" --password-stdin
+
+      - name: Build and push API image
+        run: |
+          docker build \
+            --file KanbanBoard.Api/Dockerfile \
+            --tag "${{ steps.image_names.outputs.api_image }}:${{ steps.image_names.outputs.image_tag }}" \
+            --tag "${{ steps.image_names.outputs.api_image }}:latest" \
+            .
+          docker push "${{ steps.image_names.outputs.api_image }}:${{ steps.image_names.outputs.image_tag }}"
+          docker push "${{ steps.image_names.outputs.api_image }}:latest"
+
+      - name: Build and push MCP image
+        run: |
+          docker build \
+            --file KanbanBoard.Mcp/Dockerfile \
+            --tag "${{ steps.image_names.outputs.mcp_image }}:${{ steps.image_names.outputs.image_tag }}" \
+            --tag "${{ steps.image_names.outputs.mcp_image }}:latest" \
+            .
+          docker push "${{ steps.image_names.outputs.mcp_image }}:${{ steps.image_names.outputs.image_tag }}"
+          docker push "${{ steps.image_names.outputs.mcp_image }}:latest"
+
+  deploy:
+    name: Deploy to Linode
+    runs-on: ubuntu-latest
+    needs: publish
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment: production
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Require deployment secrets
+        shell: bash
+        env:
+          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER }}
+          LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
+          KANBAN_TLS_EMAIL: ${{ secrets.KANBAN_TLS_EMAIL }}
+        run: |
+          : "${LINODE_HOST:?Set the LINODE_HOST repository secret.}"
+          : "${LINODE_USER:?Set the LINODE_USER repository secret.}"
+          : "${LINODE_SSH_KEY:?Set the LINODE_SSH_KEY repository secret.}"
+          : "${KANBAN_TLS_EMAIL:?Set the KANBAN_TLS_EMAIL repository secret.}"
+
+      - name: Prepare SSH
+        shell: bash
+        env:
+          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+        run: |
+          ssh_port="${LINODE_SSH_PORT:-22}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "${LINODE_SSH_KEY}" > ~/.ssh/linode_deploy
+          chmod 600 ~/.ssh/linode_deploy
+          ssh-keyscan -p "${ssh_port}" -H "${LINODE_HOST}" >> ~/.ssh/known_hosts
+
+      - name: Write production environment file
+        shell: bash
+        env:
+          KANBAN_TLS_EMAIL: ${{ secrets.KANBAN_TLS_EMAIL }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+        run: |
+          cat > deploy/.env.production <<EOF
+          KANBAN_API_IMAGE=${{ needs.publish.outputs.api_image }}:${{ needs.publish.outputs.image_tag }}
+          KANBAN_MCP_IMAGE=${{ needs.publish.outputs.mcp_image }}:${{ needs.publish.outputs.image_tag }}
+          KANBAN_APP_HOSTNAME=${APP_HOSTNAME}
+          KANBAN_MCP_HOSTNAME=${MCP_HOSTNAME}
+          KANBAN_TLS_EMAIL=${KANBAN_TLS_EMAIL}
+          GHCR_USERNAME=${GHCR_USERNAME}
+          EOF
+
+      - name: Copy deployment assets
+        shell: bash
+        env:
+          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+        run: |
+          ssh_port="${LINODE_SSH_PORT:-22}"
+          ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" \
+            "mkdir -p '${DEPLOY_PATH}/data'"
+          scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
+            deploy/docker-compose.prod.yml \
+            deploy/Caddyfile \
+            "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/"
+          scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
+            deploy/.env.production \
+            "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/.env"
+
+      - name: Copy optional GHCR read token
+        shell: bash
+        env:
+          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+          GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          if [ -z "${GHCR_READ_TOKEN:-}" ]; then
+            echo "GHCR_READ_TOKEN is not configured; assuming GHCR images are public."
+            exit 0
+          fi
+
+          ssh_port="${LINODE_SSH_PORT:-22}"
+          printf '%s' "${GHCR_READ_TOKEN}" | ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" \
+            "cat > '${DEPLOY_PATH}/.ghcr-token' && chmod 600 '${DEPLOY_PATH}/.ghcr-token'"
+
+      - name: Restart production stack
+        shell: bash
+        env:
+          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+        run: |
+          ssh_port="${LINODE_SSH_PORT:-22}"
+          ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          cd "${DEPLOY_PATH}"
+          set -a
+          . ./.env
+          set +a
+
+          if [ -s .ghcr-token ]; then
+            if [ -z "${GHCR_USERNAME:-}" ]; then
+              echo "GHCR_USERNAME is required when GHCR_READ_TOKEN is configured."
+              exit 1
+            fi
+
+            docker login ghcr.io --username "${GHCR_USERNAME}" --password-stdin < .ghcr-token
+            rm -f .ghcr-token
+          fi
+
+          docker compose -f docker-compose.prod.yml pull
+          docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          docker image prune -f
+          REMOTE

@@ -1,0 +1,13 @@
+{
+	email {$KANBAN_TLS_EMAIL}
+}
+
+{$KANBAN_APP_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy kanban-api:8080
+}
+
+{$KANBAN_MCP_HOSTNAME} {
+	encode zstd gzip
+	reverse_proxy kanban-mcp:3000
+}

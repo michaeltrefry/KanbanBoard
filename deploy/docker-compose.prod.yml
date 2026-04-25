@@ -1,0 +1,46 @@
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - kanban-api
+      - kanban-mcp
+    environment:
+      KANBAN_APP_HOSTNAME: ${KANBAN_APP_HOSTNAME:?KANBAN_APP_HOSTNAME is required}
+      KANBAN_MCP_HOSTNAME: ${KANBAN_MCP_HOSTNAME:?KANBAN_MCP_HOSTNAME is required}
+      KANBAN_TLS_EMAIL: ${KANBAN_TLS_EMAIL:?KANBAN_TLS_EMAIL is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  kanban-api:
+    image: ${KANBAN_API_IMAGE:?KANBAN_API_IMAGE is required}
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      KANBAN_DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    expose:
+      - "8080"
+
+  kanban-mcp:
+    image: ${KANBAN_MCP_IMAGE:?KANBAN_MCP_IMAGE is required}
+    restart: unless-stopped
+    depends_on:
+      - kanban-api
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:3000
+      KANBAN_API_BASE_URL: http://kanban-api:8080
+    expose:
+      - "3000"
+
+volumes:
+  caddy_data:
+  caddy_config:

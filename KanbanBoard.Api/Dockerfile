@@ -12,6 +12,8 @@ RUN dotnet publish ./KanbanBoard.Api/KanbanBoard.Api.csproj -c Release -o /app/p
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
+LABEL org.opencontainers.image.source="https://github.com/michaeltrefry/KanbanBoard"
+LABEL org.opencontainers.image.description="KanbanBoard ASP.NET Core API and static web UI"
 COPY --from=build /app/publish .
 EXPOSE 8443
 EXPOSE 8080

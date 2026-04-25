@@ -45,10 +45,18 @@ Generate local certificates first:
 docker compose up --build
 ```
 
+By default, the SQLite database is bind-mounted to `./.kanban-data` on your host machine, so it survives container rebuilds and Docker volume resets.
+
 You can override the default host ports if they conflict with another local stack:
 
 ```bash
 KANBAN_DOCKER_HTTPS_PORT=9443 KANBAN_MCP_HTTPS_PORT=3002 docker compose up --build
+```
+
+You can also move the database anywhere on your machine by overriding the host data path:
+
+```bash
+KANBAN_HOST_DATA_DIR=/absolute/path/to/kanban-data docker compose up --build
 ```
 
 Services:
@@ -57,7 +65,7 @@ Services:
 - MCP server from the host: [https://localhost:3001/mcp](https://localhost:3001/mcp)
 - MCP server from Docker containers on `mcp-shared`: `http://kanban-mcp:3000/mcp`
 
-SQLite data persists in the `kanban_data` named volume.
+SQLite data persists in the host directory configured by `KANBAN_HOST_DATA_DIR` or, by default, `./.kanban-data`.
 The API container still listens on internal HTTP port `8080` so the MCP container can call it as `http://api:8080` without certificate hostname mismatches on the Docker network.
 
 ## MCP tools
@@ -105,3 +113,11 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 - `UpdateWorkItem`
 - `MoveWorkItem`
 - `DeleteWorkItem`
+
+## Production deployment
+
+Production deployment is handled by GitHub Actions, GHCR, Docker Compose, and Caddy.
+
+- Web UI/API: `https://kanban.trefry.net`
+- MCP: `https://kanban-mcp.trefry.net/mcp`
+- Deployment guide: [docs/deployment.md](docs/deployment.md)

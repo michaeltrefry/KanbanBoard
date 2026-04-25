@@ -2,5 +2,6 @@ bin/
 obj/
 .DS_Store
 KanbanBoard.Api/App_Data/
+.kanban-data/
 certs/*
 !certs/.gitkeep

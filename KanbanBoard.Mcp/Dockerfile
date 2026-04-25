@@ -12,6 +12,8 @@ RUN dotnet publish ./KanbanBoard.Mcp/KanbanBoard.Mcp.csproj -c Release -o /app/p
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
+LABEL org.opencontainers.image.source="https://github.com/michaeltrefry/KanbanBoard"
+LABEL org.opencontainers.image.description="KanbanBoard MCP server"
 COPY --from=build /app/publish .
 EXPOSE 3000
 EXPOSE 3001

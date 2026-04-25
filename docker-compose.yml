@@ -14,7 +14,11 @@ services:
       ASPNETCORE_Kestrel__Certificates__Default__KeyPath: /https/localhost-key.pem
       KANBAN_DATA_DIR: /data
     volumes:
-      - kanban_data:/data
+      - type: bind
+        source: ${KANBAN_HOST_DATA_DIR:-./.kanban-data}
+        target: /data
+        bind:
+          create_host_path: true
       - ./certs:/https:ro
   kanban-mcp:
     build:
@@ -34,6 +38,3 @@ services:
     networks:
       - default
       - mcp-shared
-
-volumes:
-  kanban_data:
