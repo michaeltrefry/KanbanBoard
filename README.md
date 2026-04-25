@@ -59,11 +59,13 @@ You can also move the database anywhere on your machine by overriding the host d
 KANBAN_HOST_DATA_DIR=/absolute/path/to/kanban-data docker compose up --build
 ```
 
+For local auth testing with Docker Compose, put `Auth__*` and `PersonalAccessTokens__*` settings in a repo-root `.env`. The file is ignored by git. For `dotnet run`, export those variables in your shell first.
+
 Services:
 
 - Web UI and API: [https://localhost:8444](https://localhost:8444)
 - MCP server from the host: [https://localhost:3001/mcp](https://localhost:3001/mcp)
-- MCP server from Docker containers on `mcp-shared`: `http://kanban-mcp:3000/mcp`
+- MCP server from Docker containers on `trefry-network`: `http://kanban-mcp:3000/mcp`
 
 SQLite data persists in the host directory configured by `KANBAN_HOST_DATA_DIR` or, by default, `./.kanban-data`.
 The API container still listens on internal HTTP port `8080` so the MCP container can call it as `http://api:8080` without certificate hostname mismatches on the Docker network.
@@ -116,8 +118,10 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 
 ## Production deployment
 
-Production deployment is handled by GitHub Actions, GHCR, Docker Compose, and Caddy.
+Production deployment is handled by GitHub Actions, GHCR, and Docker Compose. Caddy is managed separately on the host.
 
 - Web UI/API: `https://kanban.trefry.net`
-- MCP: `https://kanban-mcp.trefry.net/mcp`
+- MCP: `https://kanban-mcp.trefry.net/mcp`, keep blocked in host Caddy until PAT authentication is implemented
 - Deployment guide: [docs/deployment.md](docs/deployment.md)
+
+Production auth secrets such as `Auth__ClientSecret` and `PersonalAccessTokens__EncryptionKey` are supplied through GitHub-managed Actions secrets and written to `/opt/kanban-board/.env.release` during deployment. Local `.env` files are ignored and are for local development only.

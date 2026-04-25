@@ -1,33 +1,32 @@
-services:
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    depends_on:
-      - kanban-api
-      - kanban-mcp
-    environment:
-      KANBAN_APP_HOSTNAME: ${KANBAN_APP_HOSTNAME:?KANBAN_APP_HOSTNAME is required}
-      KANBAN_MCP_HOSTNAME: ${KANBAN_MCP_HOSTNAME:?KANBAN_MCP_HOSTNAME is required}
-      KANBAN_TLS_EMAIL: ${KANBAN_TLS_EMAIL:?KANBAN_TLS_EMAIL is required}
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+networks:
+  trefry-network:
+    external: true
 
+services:
   kanban-api:
     image: ${KANBAN_API_IMAGE:?KANBAN_API_IMAGE is required}
     restart: unless-stopped
+    ports:
+      - "127.0.0.1:${KANBAN_API_HTTP_PORT:-8080}:8080"
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
       KANBAN_DATA_DIR: /data
+      Auth__Enabled: ${Auth__Enabled:-false}
+      Auth__Authority: ${Auth__Authority:-}
+      Auth__ClientId: ${Auth__ClientId:-}
+      Auth__ClientSecret: ${Auth__ClientSecret:-}
+      Auth__RequireHttpsMetadata: ${Auth__RequireHttpsMetadata:-true}
+      Auth__CallbackPath: ${Auth__CallbackPath:-/signin-oidc}
+      Auth__SignedOutCallbackPath: ${Auth__SignedOutCallbackPath:-/signout-callback-oidc}
+      PersonalAccessTokens__Enabled: ${PersonalAccessTokens__Enabled:-false}
+      PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
+      PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}
     volumes:
       - ./data:/data
-    expose:
-      - "8080"
+    networks:
+      - default
+      - trefry-network
 
   kanban-mcp:
     image: ${KANBAN_MCP_IMAGE:?KANBAN_MCP_IMAGE is required}
@@ -40,7 +39,6 @@ services:
       KANBAN_API_BASE_URL: http://kanban-api:8080
     expose:
       - "3000"
-
-volumes:
-  caddy_data:
-  caddy_config:
+    networks:
+      - default
+      - trefry-network

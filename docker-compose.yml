@@ -1,5 +1,5 @@
 networks:
-  mcp-shared:
+  trefry-network:
     external: true
 services:
   kanban-api:
@@ -13,6 +13,16 @@ services:
       ASPNETCORE_Kestrel__Certificates__Default__Path: /https/localhost.pem
       ASPNETCORE_Kestrel__Certificates__Default__KeyPath: /https/localhost-key.pem
       KANBAN_DATA_DIR: /data
+      Auth__Enabled: ${Auth__Enabled:-false}
+      Auth__Authority: ${Auth__Authority:-}
+      Auth__ClientId: ${Auth__ClientId:-}
+      Auth__ClientSecret: ${Auth__ClientSecret:-}
+      Auth__RequireHttpsMetadata: ${Auth__RequireHttpsMetadata:-false}
+      Auth__CallbackPath: ${Auth__CallbackPath:-/signin-oidc}
+      Auth__SignedOutCallbackPath: ${Auth__SignedOutCallbackPath:-/signout-callback-oidc}
+      PersonalAccessTokens__Enabled: ${PersonalAccessTokens__Enabled:-false}
+      PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
+      PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}
     volumes:
       - type: bind
         source: ${KANBAN_HOST_DATA_DIR:-./.kanban-data}
@@ -37,4 +47,4 @@ services:
       - ./certs:/https:ro
     networks:
       - default
-      - mcp-shared
+      - trefry-network

@@ -81,10 +81,35 @@ function formatDateTime(iso) {
 }
 
 /* ============ API Client ============ */
+let csrfTokenPromise = null;
+
+function isUnsafeMethod(method) {
+  return !["GET", "HEAD", "OPTIONS", "TRACE"].includes(String(method || "GET").toUpperCase());
+}
+
+async function getCsrfToken() {
+  csrfTokenPromise ||= fetchJson("/api/auth/antiforgery")
+    .then(result => result?.token || "")
+    .catch(error => {
+      csrfTokenPromise = null;
+      throw error;
+    });
+  return csrfTokenPromise;
+}
+
 async function fetchJson(input, init) {
+  const method = init?.method || "GET";
+  const headers = { "Content-Type": "application/json", ...(init?.headers || {}) };
+
+  if (isUnsafeMethod(method)) {
+    const token = await getCsrfToken();
+    if (token) headers["X-CSRF-TOKEN"] = token;
+  }
+
   const res = await fetch(input, {
-    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
     ...init,
+    headers,
   });
   if (!res.ok) {
     let message = `${res.status} ${res.statusText}`;

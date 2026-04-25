@@ -10,6 +10,8 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<EpicDocument> EpicDocuments => Set<EpicDocument>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
     public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
+    public DbSet<AppUser> AppUsers => Set<AppUser>();
+    public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -70,6 +72,32 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasOne(comment => comment.WorkItem)
                 .WithMany(item => item.Comments)
                 .HasForeignKey(comment => comment.WorkItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<AppUser>(entity =>
+        {
+            entity.HasKey(user => user.Id);
+            entity.Property(user => user.Issuer).HasMaxLength(512).IsRequired();
+            entity.Property(user => user.Subject).HasMaxLength(200).IsRequired();
+            entity.Property(user => user.DisplayName).HasMaxLength(200);
+            entity.Property(user => user.Email).HasMaxLength(320);
+            entity.HasIndex(user => new { user.Issuer, user.Subject }).IsUnique();
+        });
+
+        modelBuilder.Entity<PersonalAccessToken>(entity =>
+        {
+            entity.HasKey(token => token.Id);
+            entity.Property(token => token.Name).HasMaxLength(160).IsRequired();
+            entity.Property(token => token.TokenPrefix).HasMaxLength(32).IsRequired();
+            entity.Property(token => token.TokenHash).HasMaxLength(128).IsRequired();
+            entity.Property(token => token.EncryptedSecret).HasMaxLength(1024).IsRequired();
+            entity.HasIndex(token => token.AppUserId);
+            entity.HasIndex(token => token.TokenPrefix);
+            entity.HasIndex(token => token.TokenHash).IsUnique();
+            entity.HasOne(token => token.AppUser)
+                .WithMany(user => user.PersonalAccessTokens)
+                .HasForeignKey(token => token.AppUserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }
