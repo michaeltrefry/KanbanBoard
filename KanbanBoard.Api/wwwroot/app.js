@@ -164,6 +164,15 @@ const api = {
     fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
     fetchJson(`/api/items/${id}`, { method: "DELETE" }),
+
+  getCurrentUser: () =>
+    fetchJson(`/api/me`),
+  listPersonalAccessTokens: () =>
+    fetchJson(`/api/me/personal-access-tokens`),
+  createPersonalAccessToken: (payload) =>
+    fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
+  revokePersonalAccessToken: (id) =>
+    fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
 };
 
 /* ============ Feedback hook ============ */
@@ -244,25 +253,37 @@ function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showA
 }
 
 /* ============ Topbar ============ */
-function Topbar({ project, epic, onOpenPalette, onOpenTweaks, onNewItem }) {
+function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenBoard }) {
   return (
     <header className="topbar">
       <div className="crumbs">
-        {project && <>
+        {view === "settings" ? (
+          <>
+            <span className="crumb-key">USER</span>
+            <span className="crumb-title">Settings</span>
+          </>
+        ) : project && <>
           <span className="crumb-key">{project.key}</span>
           <span className="crumb-title">{project.name}</span>
         </>}
-        {epic && <>
+        {view !== "settings" && epic && <>
           <span className="sep">/</span>
           <span className="crumb-title" style={{fontSize:16, color:"var(--ink-2)"}}>{epic.name}</span>
         </>}
       </div>
       <div className="top-actions">
-        <button className="btn ghost" onClick={onOpenPalette} disabled={!project}>
-          <span>Search</span>
-          <span className="kbd">⌘K</span>
-        </button>
-        <button className="btn" onClick={onNewItem} disabled={!project}>+ Add story</button>
+        {view === "settings" ? (
+          <button className="btn ghost" onClick={onOpenBoard} disabled={!project}>Board</button>
+        ) : (
+          <>
+            <button className="btn ghost" onClick={onOpenPalette} disabled={!project}>
+              <span>Search</span>
+              <span className="kbd">⌘K</span>
+            </button>
+            <button className="btn" onClick={onNewItem} disabled={!project}>+ Add story</button>
+          </>
+        )}
+        <button className={clsx("btn ghost", view === "settings" && "active")} onClick={onOpenSettings}>Settings</button>
         <button className="btn ghost" onClick={onOpenTweaks} title="Tweaks">⚙</button>
       </div>
     </header>
@@ -951,6 +972,238 @@ function TweaksPanel({ tweaks, setTweaks, open, onClose }) {
   );
 }
 
+/* ============ User settings ============ */
+function tokenState(token) {
+  if (token.revokedAtUtc) return "Revoked";
+  if (token.expiresAtUtc && new Date(token.expiresAtUtc).getTime() <= Date.now()) return "Expired";
+  return token.isActive ? "Active" : "Inactive";
+}
+
+function formatTokenDate(iso) {
+  return iso ? formatDateTime(iso) : "Never";
+}
+
+function UserSettingsView({ show }) {
+  const [user, setUser] = useState(null);
+  const [tokens, setTokens] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [expiresAtLocal, setExpiresAtLocal] = useState("");
+  const [createdToken, setCreatedToken] = useState(null);
+  const [copyState, setCopyState] = useState("");
+
+  const loadSettings = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [nextUser, nextTokens] = await Promise.all([
+        api.getCurrentUser(),
+        api.listPersonalAccessTokens(),
+      ]);
+      setUser(nextUser);
+      setTokens(nextTokens || []);
+    } catch (e) {
+      setLoadError(e.message || "Settings unavailable");
+      show(`Couldn't load settings: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [show]);
+
+  useEffect(() => { loadSettings(); }, [loadSettings]);
+
+  const createToken = async (e) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    setCreating(true);
+    try {
+      const expiresAtUtc = expiresAtLocal
+        ? new Date(expiresAtLocal).toISOString()
+        : null;
+      const created = await api.createPersonalAccessToken({ name: trimmed, expiresAtUtc });
+      setCreatedToken(created);
+      setTokens(cur => [created.token, ...cur.filter(token => token.id !== created.token.id)]);
+      setName("");
+      setExpiresAtLocal("");
+      setCopyState("");
+      show("Personal access token created", "success");
+    } catch (e) {
+      show(`Token create failed: ${e.message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const copyToken = async () => {
+    if (!createdToken?.plaintextToken) return;
+    try {
+      await navigator.clipboard.writeText(createdToken.plaintextToken);
+      setCopyState("Copied");
+    } catch {
+      setCopyState("Select and copy");
+    }
+  };
+
+  const revokeToken = async (token) => {
+    if (!token?.id || !confirm(`Revoke "${token.name}"? Clients using this token will stop working.`)) return;
+    try {
+      await api.revokePersonalAccessToken(token.id);
+      await loadSettings();
+      if (createdToken?.token?.id === token.id) setCreatedToken(null);
+      show("Personal access token revoked", "success");
+    } catch (e) {
+      show(`Revoke failed: ${e.message}`);
+    }
+  };
+
+  if (loading) {
+    return <div className="settings-page"><div className="app-loading">Loading settings...</div></div>;
+  }
+
+  if (loadError) {
+    return (
+      <section className="settings-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">Settings unavailable</div>
+            <h2>Sign in to manage personal access tokens</h2>
+          </div>
+          <p>{loadError}</p>
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={loadSettings}>Retry</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-page">
+      <div className="settings-hero">
+        <div>
+          <div className="sheet-eyebrow">Signed in as</div>
+          <h1 className="settings-title">{user?.displayName || user?.email || "Authenticated user"}</h1>
+          <div className="settings-identity-grid">
+            <div>
+              <span>Email</span>
+              <b>{user?.email || "Not provided"}</b>
+            </div>
+            <div>
+              <span>Issuer</span>
+              <b>{user?.issuer || "Unknown"}</b>
+            </div>
+            <div>
+              <span>Subject</span>
+              <b>{user?.subject || "Unknown"}</b>
+            </div>
+            <div>
+              <span>Last seen</span>
+              <b>{formatTokenDate(user?.lastSeenAtUtc)}</b>
+            </div>
+          </div>
+        </div>
+        <a className="btn ghost" href="/auth/logout">Logout</a>
+      </div>
+
+      <div className="settings-layout">
+        <form className="settings-panel" onSubmit={createToken}>
+          <div className="settings-panel-head">
+            <div>
+              <div className="sheet-eyebrow">New token</div>
+              <h2>Personal access token</h2>
+            </div>
+          </div>
+          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+            <label>Name</label>
+            <input
+              value={name}
+              onChange={e => setName(e.target.value)}
+              placeholder="MCP desktop client"
+              maxLength={160}
+            />
+          </div>
+          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+            <label>Expires</label>
+            <input
+              type="datetime-local"
+              value={expiresAtLocal}
+              onChange={e => setExpiresAtLocal(e.target.value)}
+            />
+          </div>
+          <div className="settings-actions">
+            <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
+              {creating ? "Creating..." : "Create token"}
+            </button>
+          </div>
+
+          {createdToken && (
+            <div className="token-reveal" role="status">
+              <div>
+                <div className="sheet-eyebrow">Shown once</div>
+                <p>This token will not be visible after you leave or refresh this page.</p>
+              </div>
+              <div className="token-secret-row">
+                <code>{createdToken.plaintextToken}</code>
+                <button className="btn small" type="button" onClick={copyToken}>{copyState || "Copy"}</button>
+              </div>
+            </div>
+          )}
+        </form>
+
+        <div className="settings-panel">
+          <div className="settings-panel-head">
+            <div>
+              <div className="sheet-eyebrow">MCP credentials</div>
+              <h2>Personal access tokens</h2>
+            </div>
+            <button className="btn small ghost" type="button" onClick={loadSettings}>Refresh</button>
+          </div>
+
+          {tokens.length === 0 ? (
+            <div className="settings-empty">No personal access tokens yet.</div>
+          ) : (
+            <div className="token-list">
+              {tokens.map(token => {
+                const state = tokenState(token);
+                return (
+                  <article key={token.id} className={clsx("token-row", state !== "Active" && "inactive")}>
+                    <div className="token-main">
+                      <div className="token-name-row">
+                        <span className="token-name">{token.name}</span>
+                        <span className={clsx("token-state", state.toLowerCase())}>{state}</span>
+                      </div>
+                      <div className="token-prefix">{token.tokenPrefix}</div>
+                    </div>
+                    <div className="token-meta">
+                      <span>Created <b>{formatTokenDate(token.createdAtUtc)}</b></span>
+                      <span>Last used <b>{formatTokenDate(token.lastUsedAtUtc)}</b></span>
+                      <span>Expires <b>{token.expiresAtUtc ? formatTokenDate(token.expiresAtUtc) : "Never"}</b></span>
+                    </div>
+                    <div className="token-actions">
+                      <button
+                        className="btn small ghost"
+                        type="button"
+                        onClick={() => revokeToken(token)}
+                        disabled={state !== "Active"}
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /* ============ Project modal ============ */
 function ProjectModal({ open, project, onClose, onSave, onDelete }) {
   const isEdit = !!project;
@@ -1124,6 +1377,10 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get("epic") || null;
   });
+  const [currentView, setCurrentView] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("view") === "settings" ? "settings" : "board";
+  });
 
   /* URL <-> state routing plumbing */
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
@@ -1167,8 +1424,9 @@ function App() {
       return;
     }
     const params = new URLSearchParams();
+    if (currentView === "settings") params.set("view", "settings");
     if (currentProjectId) params.set("project", currentProjectId);
-    if (currentEpicId) params.set("epic", currentEpicId);
+    if (currentView !== "settings" && currentEpicId) params.set("epic", currentEpicId);
     const qs = params.toString();
     const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
@@ -1176,14 +1434,14 @@ function App() {
       initialUrlSyncDone.current = true;
       return;
     }
-    const state = { projectId: currentProjectId, epicId: currentEpicId };
+    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView };
     if (!initialUrlSyncDone.current) {
       window.history.replaceState(state, "", newUrl);
       initialUrlSyncDone.current = true;
     } else {
       window.history.pushState(state, "", newUrl);
     }
-  }, [bootstrapped, currentProjectId, currentEpicId]);
+  }, [bootstrapped, currentProjectId, currentEpicId, currentView]);
 
   /* Sync state <- URL on back/forward */
   useEffect(() => {
@@ -1191,6 +1449,7 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
+      const nextView = params.get("view") === "settings" ? "settings" : "board";
       skipUrlPush.current = true;
       setCurrentProjectId(prev => {
         // Only suppress the project-change effect's epic reset if we'd
@@ -1199,6 +1458,7 @@ function App() {
         return nextProject;
       });
       setCurrentEpicId(nextEpic);
+      setCurrentView(nextView);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -1550,7 +1810,7 @@ function App() {
     return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  if (projects.length === 0) {
+  if (projects.length === 0 && currentView !== "settings") {
     return (
       <div className="app-empty">
         <div>
@@ -1571,13 +1831,23 @@ function App() {
   }
 
   const visibleEpics = epics.filter(e => showArchivedEpics || !e.isArchived || currentEpicId === e.id);
+  const openSettings = () => {
+    setSelectedStory(null);
+    setActiveDoc(null);
+    setPaletteOpen(false);
+    setCurrentView("settings");
+  };
+  const openBoard = () => setCurrentView("board");
 
   return (
     <div className="shell">
       <Sidebar
         projects={projects}
         currentProjectId={currentProjectId}
-        setProjectId={(id) => setCurrentProjectId(id)}
+        setProjectId={(id) => {
+          setCurrentProjectId(id);
+          setCurrentView("board");
+        }}
         onNewProject={() => setProjectModal({ open: true, project: null })}
         showArchived={showArchivedProjects}
         setShowArchived={setShowArchivedProjects}
@@ -1586,37 +1856,46 @@ function App() {
         <Topbar
           project={currentProject}
           epic={currentEpic}
+          view={currentView}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenTweaks={() => setTweaksOpen(v => !v)}
           onNewItem={() => setPaletteOpen(true)}
+          onOpenSettings={openSettings}
+          onOpenBoard={openBoard}
         />
-        <EpicStrip
-          epics={visibleEpics}
-          items={items}
-          currentEpicId={currentEpicId}
-          setEpicId={setCurrentEpicId}
-          onNewEpic={() => setEpicModal({ open: true, epic: null })}
-          showArchived={showArchivedEpics}
-          setShowArchived={setShowArchivedEpics}
-        />
-        <EpicDetail
-          epic={currentEpic}
-          project={currentProject}
-          items={boardItems}
-          docs={epicDocs}
-          onOpenDoc={(d) => setActiveDoc(d)}
-          onNewDoc={openNewDoc}
-          onEditEpic={() => setEpicModal({ open: true, epic: currentEpic })}
-          onArchiveEpic={toggleEpicArchive}
-          onDeleteEpic={removeEpic}
-        />
-        <Board
-          items={boardItems}
-          projectKey={currentProject?.key}
-          onOpen={(s) => setSelectedStory(s)}
-          onMove={moveStory}
-          showAging={tweaks.showAging}
-        />
+        {currentView === "settings" ? (
+          <UserSettingsView show={show} />
+        ) : (
+          <>
+            <EpicStrip
+              epics={visibleEpics}
+              items={items}
+              currentEpicId={currentEpicId}
+              setEpicId={setCurrentEpicId}
+              onNewEpic={() => setEpicModal({ open: true, epic: null })}
+              showArchived={showArchivedEpics}
+              setShowArchived={setShowArchivedEpics}
+            />
+            <EpicDetail
+              epic={currentEpic}
+              project={currentProject}
+              items={boardItems}
+              docs={epicDocs}
+              onOpenDoc={(d) => setActiveDoc(d)}
+              onNewDoc={openNewDoc}
+              onEditEpic={() => setEpicModal({ open: true, epic: currentEpic })}
+              onArchiveEpic={toggleEpicArchive}
+              onDeleteEpic={removeEpic}
+            />
+            <Board
+              items={boardItems}
+              projectKey={currentProject?.key}
+              onOpen={(s) => setSelectedStory(s)}
+              onMove={moveStory}
+              showAging={tweaks.showAging}
+            />
+          </>
+        )}
       </main>
 
       <CommandPalette
