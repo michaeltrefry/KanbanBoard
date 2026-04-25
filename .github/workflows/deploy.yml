@@ -106,6 +106,7 @@ jobs:
           LINODE_HOST: ${{ vars.LINODE_HOST || secrets.LINODE_HOST }}
           LINODE_USER: ${{ vars.LINODE_USER || secrets.LINODE_USER }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
+          LINODE_SSH_KEY_B64: ${{ secrets.LINODE_SSH_KEY_B64 }}
           KANBAN_AUTH_AUTHORITY: ${{ vars.KANBAN_AUTH_AUTHORITY || secrets.KANBAN_AUTH_AUTHORITY }}
           KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
@@ -114,7 +115,6 @@ jobs:
           for name in \
             LINODE_HOST \
             LINODE_USER \
-            LINODE_SSH_KEY \
             KANBAN_AUTH_AUTHORITY \
             KANBAN_AUTH_CLIENT_SECRET \
             KANBAN_PAT_ENCRYPTION_KEY
@@ -123,6 +123,9 @@ jobs:
               missing+=("${name}")
             fi
           done
+          if [ -z "${LINODE_SSH_KEY:-}" ] && [ -z "${LINODE_SSH_KEY_B64:-}" ]; then
+            missing+=("LINODE_SSH_KEY or LINODE_SSH_KEY_B64")
+          fi
 
           if [ "${#missing[@]}" -gt 0 ]; then
             printf 'Missing required GitHub Actions settings:\n' >&2
@@ -135,13 +138,19 @@ jobs:
         shell: bash
         env:
           LINODE_HOST: ${{ vars.LINODE_HOST || secrets.LINODE_HOST }}
+          LINODE_USER: ${{ vars.LINODE_USER || secrets.LINODE_USER }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
+          LINODE_SSH_KEY_B64: ${{ secrets.LINODE_SSH_KEY_B64 }}
           LINODE_SSH_KEY_PASSPHRASE: ${{ secrets.LINODE_SSH_KEY_PASSPHRASE }}
           LINODE_SSH_PORT: ${{ vars.LINODE_SSH_PORT || secrets.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
           mkdir -p ~/.ssh
-          printf '%s\n' "${LINODE_SSH_KEY}" > ~/.ssh/linode_deploy
+          if [ -n "${LINODE_SSH_KEY_B64:-}" ]; then
+            printf '%s' "${LINODE_SSH_KEY_B64}" | base64 -d > ~/.ssh/linode_deploy
+          else
+            printf '%s\n' "${LINODE_SSH_KEY}" > ~/.ssh/linode_deploy
+          fi
           chmod 600 ~/.ssh/linode_deploy
 
           eval "$(ssh-agent -s)"
@@ -151,17 +160,47 @@ jobs:
           } >> "$GITHUB_ENV"
 
           if [ -n "${LINODE_SSH_KEY_PASSPHRASE:-}" ]; then
-            cat > ~/.ssh/askpass.sh <<'EOF'
-          #!/usr/bin/env bash
-          printf '%s\n' "${LINODE_SSH_KEY_PASSPHRASE}"
-          EOF
+            printf '%s\n' \
+              '#!/usr/bin/env bash' \
+              'printf "%s\n" "${LINODE_SSH_KEY_PASSPHRASE}"' \
+              > ~/.ssh/askpass.sh
             chmod 700 ~/.ssh/askpass.sh
-            DISPLAY=:0 SSH_ASKPASS="${HOME}/.ssh/askpass.sh" SSH_ASKPASS_REQUIRE=force ssh-add ~/.ssh/linode_deploy </dev/null
+            if ! DISPLAY=:0 SSH_ASKPASS="${HOME}/.ssh/askpass.sh" SSH_ASKPASS_REQUIRE=force ssh-add ~/.ssh/linode_deploy </dev/null; then
+              echo "Failed to load LINODE_SSH_KEY. Check that the private key is complete and that LINODE_SSH_KEY_PASSPHRASE is correct. If multiline secrets are awkward, set LINODE_SSH_KEY_B64 instead." >&2
+              exit 1
+            fi
           else
-            ssh-add ~/.ssh/linode_deploy
+            if ! ssh-add ~/.ssh/linode_deploy; then
+              echo "Failed to load LINODE_SSH_KEY. Check that the private key is complete. If multiline secrets are awkward, set LINODE_SSH_KEY_B64 instead." >&2
+              exit 1
+            fi
           fi
 
+          echo "Loaded SSH deploy key:"
+          ssh-add -l -E sha256
           ssh-keyscan -p "${ssh_port}" -H "${LINODE_HOST}" >> ~/.ssh/known_hosts
+          echo "Prepared SSH for ${LINODE_USER}@${LINODE_HOST}:${ssh_port}"
+
+      - name: Verify SSH access
+        shell: bash
+        env:
+          LINODE_HOST: ${{ vars.LINODE_HOST || secrets.LINODE_HOST }}
+          LINODE_USER: ${{ vars.LINODE_USER || secrets.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ vars.LINODE_SSH_PORT || secrets.LINODE_SSH_PORT }}
+        run: |
+          ssh_port="${LINODE_SSH_PORT:-22}"
+          ssh_opts=(
+            -i ~/.ssh/linode_deploy
+            -p "${ssh_port}"
+            -o BatchMode=yes
+            -o PreferredAuthentications=publickey
+            -o PasswordAuthentication=no
+            -o IdentitiesOnly=yes
+          )
+
+          echo "Verifying SSH access to ${LINODE_USER}@${LINODE_HOST}:${ssh_port}"
+          ssh "${ssh_opts[@]}" "${LINODE_USER}@${LINODE_HOST}" \
+            'printf "Connected as %s on %s\n" "$(whoami)" "$(hostname)"'
 
       - name: Write release environment file
         shell: bash
@@ -200,13 +239,30 @@ jobs:
           LINODE_SSH_PORT: ${{ vars.LINODE_SSH_PORT || secrets.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
+          ssh_opts=(
+            -i ~/.ssh/linode_deploy
+            -p "${ssh_port}"
+            -o BatchMode=yes
+            -o PreferredAuthentications=publickey
+            -o PasswordAuthentication=no
+            -o IdentitiesOnly=yes
+          )
+          scp_opts=(
+            -i ~/.ssh/linode_deploy
+            -P "${ssh_port}"
+            -o BatchMode=yes
+            -o PreferredAuthentications=publickey
+            -o PasswordAuthentication=no
+            -o IdentitiesOnly=yes
+          )
+
           echo "Deploying assets to ${LINODE_USER}@${LINODE_HOST}:${ssh_port}"
-          ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" \
+          ssh "${ssh_opts[@]}" "${LINODE_USER}@${LINODE_HOST}" \
             "mkdir -p '${DEPLOY_PATH}/data'"
-          scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
+          scp "${scp_opts[@]}" \
             deploy/docker-compose.prod.yml \
             "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/"
-          scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
+          scp "${scp_opts[@]}" \
             deploy/.env.release \
             "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/.env.release"
 
@@ -224,7 +280,15 @@ jobs:
           fi
 
           ssh_port="${LINODE_SSH_PORT:-22}"
-          printf '%s' "${GHCR_READ_TOKEN}" | ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" \
+          ssh_opts=(
+            -i ~/.ssh/linode_deploy
+            -p "${ssh_port}"
+            -o BatchMode=yes
+            -o PreferredAuthentications=publickey
+            -o PasswordAuthentication=no
+            -o IdentitiesOnly=yes
+          )
+          printf '%s' "${GHCR_READ_TOKEN}" | ssh "${ssh_opts[@]}" "${LINODE_USER}@${LINODE_HOST}" \
             "cat > '${DEPLOY_PATH}/.ghcr-token' && chmod 600 '${DEPLOY_PATH}/.ghcr-token'"
 
       - name: Restart production stack
@@ -235,8 +299,17 @@ jobs:
           LINODE_SSH_PORT: ${{ vars.LINODE_SSH_PORT || secrets.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
+          ssh_opts=(
+            -i ~/.ssh/linode_deploy
+            -p "${ssh_port}"
+            -o BatchMode=yes
+            -o PreferredAuthentications=publickey
+            -o PasswordAuthentication=no
+            -o IdentitiesOnly=yes
+          )
+
           echo "Restarting stack on ${LINODE_USER}@${LINODE_HOST}:${ssh_port}"
-          ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
+          ssh "${ssh_opts[@]}" "${LINODE_USER}@${LINODE_HOST}" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
           set -euo pipefail
 
           cd "${DEPLOY_PATH}"
