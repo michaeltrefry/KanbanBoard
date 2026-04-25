@@ -4,6 +4,7 @@ using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.HttpOverrides;
 using Scalar.AspNetCore;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -37,6 +38,15 @@ builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(K
 builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
 builder.Services.AddKanbanAuthentication(authOptions, builder.Environment);
 builder.Services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor |
+        ForwardedHeaders.XForwardedHost |
+        ForwardedHeaders.XForwardedProto;
+    options.KnownIPNetworks.Clear();
+    options.KnownProxies.Clear();
+    options.ForwardLimit = 1;
+});
 builder.Services.AddOpenApi();
 builder.Services.AddSingleton<BoardChangeNotifier>();
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -54,6 +64,7 @@ using (var scope = app.Services.CreateScope())
 
 if (authOptions.Enabled)
 {
+    app.UseForwardedHeaders();
     app.UseAuthentication();
     app.UseAuthorization();
     app.UseKanbanAuthenticationGate(authOptions);
