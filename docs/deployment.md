@@ -63,6 +63,8 @@ The production Compose stack binds the API to `127.0.0.1:8080` by default. Confi
 
 If that port is already taken, set `KANBAN_API_HTTP_PORT` in the GitHub workflow release env or directly in `/opt/kanban-board/.env.release`, then point Caddy at the same localhost port.
 
+The API trusts the forwarded host/proto headers from the reverse proxy so OIDC redirects are generated for `https://kanban.trefry.net` instead of the container's internal HTTP endpoint. Caddy's `reverse_proxy` sends the required `X-Forwarded-Host` and `X-Forwarded-Proto` headers by default.
+
 The production Compose stack also joins both containers to the external Docker network `trefry-network`. The deploy workflow creates it automatically if it does not already exist. If Caddy is running in Docker on the same host, attach that Caddy container to `trefry-network` and proxy the app to:
 
 ```text
