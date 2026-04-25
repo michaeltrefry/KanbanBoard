@@ -103,26 +103,40 @@ jobs:
       - name: Require deployment secrets
         shell: bash
         env:
-          LINODE_HOST: ${{ secrets.LINODE_HOST }}
-          LINODE_USER: ${{ secrets.LINODE_USER }}
+          LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER || vars.LINODE_USER }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
-          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY }}
+          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY || vars.KANBAN_AUTH_AUTHORITY }}
           KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
         run: |
-          : "${LINODE_HOST:?Set the LINODE_HOST repository secret.}"
-          : "${LINODE_USER:?Set the LINODE_USER repository secret.}"
-          : "${LINODE_SSH_KEY:?Set the LINODE_SSH_KEY repository secret.}"
-          : "${KANBAN_AUTH_AUTHORITY:?Set the KANBAN_AUTH_AUTHORITY repository secret.}"
-          : "${KANBAN_AUTH_CLIENT_SECRET:?Set the KANBAN_AUTH_CLIENT_SECRET repository secret.}"
-          : "${KANBAN_PAT_ENCRYPTION_KEY:?Set the KANBAN_PAT_ENCRYPTION_KEY repository secret.}"
+          missing=()
+          for name in \
+            LINODE_HOST \
+            LINODE_USER \
+            LINODE_SSH_KEY \
+            KANBAN_AUTH_AUTHORITY \
+            KANBAN_AUTH_CLIENT_SECRET \
+            KANBAN_PAT_ENCRYPTION_KEY
+          do
+            if [ -z "${!name:-}" ]; then
+              missing+=("${name}")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required GitHub Actions settings:\n' >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            printf '\nSet secrets for sensitive values. Non-sensitive values may be repository/environment variables or secrets.\n' >&2
+            exit 1
+          fi
 
       - name: Prepare SSH
         shell: bash
         env:
-          LINODE_HOST: ${{ secrets.LINODE_HOST }}
+          LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
-          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT || vars.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
           mkdir -p ~/.ssh
@@ -135,10 +149,10 @@ jobs:
         env:
           KANBAN_API_IMAGE: ${{ needs.publish.outputs.api_image }}:${{ needs.publish.outputs.image_tag }}
           KANBAN_MCP_IMAGE: ${{ needs.publish.outputs.mcp_image }}:${{ needs.publish.outputs.image_tag }}
-          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY }}
+          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY || vars.KANBAN_AUTH_AUTHORITY }}
           KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME || vars.GHCR_USERNAME }}
         run: |
           write_env() {
             printf '%s=' "$1" >> deploy/.env.release
@@ -162,9 +176,9 @@ jobs:
       - name: Copy deployment assets
         shell: bash
         env:
-          LINODE_HOST: ${{ secrets.LINODE_HOST }}
-          LINODE_USER: ${{ secrets.LINODE_USER }}
-          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+          LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER || vars.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT || vars.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
           ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" \
@@ -179,9 +193,9 @@ jobs:
       - name: Copy optional GHCR read token
         shell: bash
         env:
-          LINODE_HOST: ${{ secrets.LINODE_HOST }}
-          LINODE_USER: ${{ secrets.LINODE_USER }}
-          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+          LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER || vars.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT || vars.LINODE_SSH_PORT }}
           GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
         run: |
           if [ -z "${GHCR_READ_TOKEN:-}" ]; then
@@ -196,9 +210,9 @@ jobs:
       - name: Restart production stack
         shell: bash
         env:
-          LINODE_HOST: ${{ secrets.LINODE_HOST }}
-          LINODE_USER: ${{ secrets.LINODE_USER }}
-          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT }}
+          LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
+          LINODE_USER: ${{ secrets.LINODE_USER || vars.LINODE_USER }}
+          LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT || vars.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
           ssh -i ~/.ssh/linode_deploy -p "${ssh_port}" "${LINODE_USER}@${LINODE_HOST}" "DEPLOY_PATH='${DEPLOY_PATH}' bash -s" <<'REMOTE'
