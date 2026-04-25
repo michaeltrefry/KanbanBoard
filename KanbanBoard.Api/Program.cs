@@ -62,6 +62,7 @@ if (authOptions.Enabled)
 }
 
 app.MapKanbanAntiforgeryEndpoints();
+app.MapKanbanSettingsEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();

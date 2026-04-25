@@ -155,6 +155,7 @@ Required:
 Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
+- `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.
 - `GHCR_USERNAME`: GitHub username for pulling private GHCR images from the Linode. Variable or secret.
 - `GHCR_READ_TOKEN`: classic GitHub PAT with `read:packages`, only needed if the GHCR packages stay private. Secret.
 

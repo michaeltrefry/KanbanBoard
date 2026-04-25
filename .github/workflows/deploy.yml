@@ -136,12 +136,31 @@ jobs:
         env:
           LINODE_HOST: ${{ secrets.LINODE_HOST || vars.LINODE_HOST }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
+          LINODE_SSH_KEY_PASSPHRASE: ${{ secrets.LINODE_SSH_KEY_PASSPHRASE }}
           LINODE_SSH_PORT: ${{ secrets.LINODE_SSH_PORT || vars.LINODE_SSH_PORT }}
         run: |
           ssh_port="${LINODE_SSH_PORT:-22}"
           mkdir -p ~/.ssh
           printf '%s\n' "${LINODE_SSH_KEY}" > ~/.ssh/linode_deploy
           chmod 600 ~/.ssh/linode_deploy
+
+          eval "$(ssh-agent -s)"
+          {
+            echo "SSH_AUTH_SOCK=${SSH_AUTH_SOCK}"
+            echo "SSH_AGENT_PID=${SSH_AGENT_PID}"
+          } >> "$GITHUB_ENV"
+
+          if [ -n "${LINODE_SSH_KEY_PASSPHRASE:-}" ]; then
+            cat > ~/.ssh/askpass.sh <<'EOF'
+          #!/usr/bin/env bash
+          printf '%s\n' "${LINODE_SSH_KEY_PASSPHRASE}"
+          EOF
+            chmod 700 ~/.ssh/askpass.sh
+            DISPLAY=:0 SSH_ASKPASS="${HOME}/.ssh/askpass.sh" SSH_ASKPASS_REQUIRE=force ssh-add ~/.ssh/linode_deploy </dev/null
+          else
+            ssh-add ~/.ssh/linode_deploy
+          fi
+
           ssh-keyscan -p "${ssh_port}" -H "${LINODE_HOST}" >> ~/.ssh/known_hosts
 
       - name: Write release environment file

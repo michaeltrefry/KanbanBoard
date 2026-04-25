@@ -89,6 +89,28 @@ public sealed record WorkItemDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
+public sealed record CurrentUserDto(
+    Guid Id,
+    string Issuer,
+    string Subject,
+    string? DisplayName,
+    string? Email,
+    DateTimeOffset? LastSeenAtUtc);
+
+public sealed record PersonalAccessTokenMetadataDto(
+    Guid Id,
+    string Name,
+    string TokenPrefix,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? ExpiresAtUtc,
+    DateTimeOffset? LastUsedAtUtc,
+    DateTimeOffset? RevokedAtUtc,
+    bool IsActive);
+
+public sealed record CreatedPersonalAccessTokenDto(
+    PersonalAccessTokenMetadataDto Token,
+    string PlaintextToken);
+
 public sealed record CreateProjectRequest(
     string Name,
     string Key,
@@ -147,3 +169,7 @@ public sealed record MoveWorkItemRequest(
 public sealed record CreateWorkItemCommentRequest(
     string Author,
     string Body);
+
+public sealed record CreatePersonalAccessTokenRequest(
+    string Name,
+    DateTimeOffset? ExpiresAtUtc);
