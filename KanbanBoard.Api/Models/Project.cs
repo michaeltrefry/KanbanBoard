@@ -68,3 +68,31 @@ public sealed class WorkItemComment
     public string Body { get; set; } = string.Empty;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
+
+public sealed class AppUser
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string Issuer { get; set; } = string.Empty;
+    public string Subject { get; set; } = string.Empty;
+    public string? DisplayName { get; set; }
+    public string? Email { get; set; }
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? LastSeenAtUtc { get; set; }
+    public List<PersonalAccessToken> PersonalAccessTokens { get; set; } = [];
+}
+
+public sealed class PersonalAccessToken
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid AppUserId { get; set; }
+    public AppUser? AppUser { get; set; }
+    public string Name { get; set; } = string.Empty;
+    public string TokenPrefix { get; set; } = string.Empty;
+    public string TokenHash { get; set; } = string.Empty;
+    public string EncryptedSecret { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset? ExpiresAtUtc { get; set; }
+    public DateTimeOffset? LastUsedAtUtc { get; set; }
+    public DateTimeOffset? RevokedAtUtc { get; set; }
+}

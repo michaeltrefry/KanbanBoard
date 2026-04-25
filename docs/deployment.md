@@ -1,11 +1,13 @@
 # Production deployment
 
-This repo deploys to a Linode server with GitHub Actions, GHCR, Docker Compose, and Caddy.
+This repo deploys the Kanban containers to a Linode server with GitHub Actions, GHCR, and Docker Compose. Caddy is managed separately on the host.
 
 Production hostnames:
 
 - Web UI and API: `https://kanban.trefry.net`
 - MCP server: `https://kanban-mcp.trefry.net/mcp`
+
+Public MCP access should stay blocked in the host Caddy config until the MCP PAT authentication bridge is implemented. The MCP container can still run internally on Docker networks, including the external `trefry-network`, but it is not published to localhost by this Compose file.
 
 ## How deployment works
 
@@ -14,9 +16,12 @@ Production hostnames:
    - `ghcr.io/michaeltrefry/kanbanboard-api`
    - `ghcr.io/michaeltrefry/kanbanboard-mcp`
 3. GitHub Actions connects to the Linode over SSH.
-4. The workflow copies `deploy/docker-compose.prod.yml` and `deploy/Caddyfile` to `/opt/kanban-board`.
-5. The Linode pulls the new images and restarts the stack.
-6. Caddy obtains and renews public TLS certificates automatically.
+4. The workflow copies `deploy/docker-compose.prod.yml` to `/opt/kanban-board`.
+5. The workflow writes image tags and GitHub-managed production settings to `/opt/kanban-board/.env.release`.
+6. Local `.env` files remain ignored by git and are for local development only.
+7. The Linode pulls the new images and restarts the stack.
+8. The workflow ensures the external Docker network `trefry-network` exists before Compose starts the stack.
+9. The host-managed Caddy instance proxies `https://kanban.trefry.net` to the API container on localhost or to `kanban-api:8080` on `trefry-network`.
 
 GitHub currently says Container registry storage and bandwidth are free, but says it will provide at least one month of notice if that policy changes. Public container images can be pulled anonymously. See GitHub's docs for [GitHub Packages billing](https://docs.github.com/en/billing/concepts/product-billing/github-packages) and [working with the Container registry](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
@@ -50,11 +55,59 @@ sudo mkdir -p /opt/kanban-board/data
 sudo chown -R "$USER":"$USER" /opt/kanban-board
 ```
 
+The production Compose stack binds the API to `127.0.0.1:8080` by default. Configure the host-managed Caddy site for `kanban.trefry.net` to reverse proxy to:
+
+```text
+127.0.0.1:8080
+```
+
+If that port is already taken, set `KANBAN_API_HTTP_PORT` in the GitHub workflow release env or directly in `/opt/kanban-board/.env.release`, then point Caddy at the same localhost port.
+
+The production Compose stack also joins both containers to the external Docker network `trefry-network`. The deploy workflow creates it automatically if it does not already exist. If Caddy is running in Docker on the same host, attach that Caddy container to `trefry-network` and proxy the app to:
+
+```text
+kanban-api:8080
+```
+
+Keep public MCP proxying disabled until Slice 7 is complete. After PAT authentication is in place, Caddy can proxy MCP to `kanban-mcp:3000` on `trefry-network`.
+
+For local Docker Compose development only, create a repo-root `.env`; Compose reads this file automatically and passes the values into `kanban-api`:
+
+```bash
+Auth__Enabled=true
+Auth__Authority=https://identity.trefry.net/realms/YOUR_REALM
+Auth__ClientId=kanban-board
+Auth__ClientSecret=KEYCLOAK_CLIENT_SECRET
+Auth__RequireHttpsMetadata=true
+
+PersonalAccessTokens__Enabled=true
+PersonalAccessTokens__EncryptionKey=32_BYTE_BASE64_OR_64_HEX_KEY
+PersonalAccessTokens__TokenPrefix=kbp
+```
+
+For `dotnet run`, export the same variables in your shell before starting the API because ASP.NET Core does not read `.env` files by itself.
+
+For Keycloak, configure the `kanban-board` OIDC client as a confidential client by turning **Client authentication** on. Use these URLs:
+
+- Valid redirect URI: `https://kanban.trefry.net/signin-oidc`
+- Valid post logout redirect URI: `https://kanban.trefry.net/signout-callback-oidc`
+- Web origin: `https://kanban.trefry.net`
+
+Production deployment uses GitHub-managed secrets and writes them into `/opt/kanban-board/.env.release` on the server during deploy. Required production auth secrets:
+
+- `KANBAN_AUTH_AUTHORITY`: Keycloak realm authority, for example `https://identity.trefry.net/realms/YOUR_REALM`.
+- `KANBAN_AUTH_CLIENT_SECRET`: Keycloak client secret for the `kanban-board` confidential client.
+- `KANBAN_PAT_ENCRYPTION_KEY`: 32-byte / 256-bit PAT encryption key encoded as base64 or 64 hex characters.
+
+Do not commit local `.env` files. They are ignored and should stay on your machine.
+
+The authenticated web login and browser API use cookie sessions. MCP clients will use Personal Access Tokens after the MCP bridge slice is implemented; at this stage, the production template already carries the PAT encryption key needed by PAT creation and validation. Keep public MCP blocked in the host Caddy config until that bridge is complete.
+
 Open inbound ports:
 
 - SSH: `22/tcp`, or your custom SSH port.
-- HTTP: `80/tcp`, required for Caddy/Let's Encrypt.
-- HTTPS: `443/tcp`, required for the app and MCP endpoint.
+- HTTP: `80/tcp`, if your host Caddy uses HTTP challenge/redirects.
+- HTTPS: `443/tcp`, required for the app.
 
 If you use `ufw`:
 
@@ -93,7 +146,9 @@ Required:
 - `LINODE_HOST`: Linode IPv4 address or DNS name.
 - `LINODE_USER`: SSH user on the Linode.
 - `LINODE_SSH_KEY`: private key for the deploy user.
-- `KANBAN_TLS_EMAIL`: email Caddy/Let's Encrypt can use for certificate notices.
+- `KANBAN_AUTH_AUTHORITY`: Keycloak realm authority, for example `https://identity.trefry.net/realms/YOUR_REALM`.
+- `KANBAN_AUTH_CLIENT_SECRET`: Keycloak client secret for the `kanban-board` confidential client.
+- `KANBAN_PAT_ENCRYPTION_KEY`: 32-byte / 256-bit PAT encryption key encoded as base64 or 64 hex characters.
 
 Optional:
 
@@ -137,7 +192,7 @@ dig +short kanban.trefry.net
 dig +short kanban-mcp.trefry.net
 ```
 
-Both should return the Linode IP before the first TLS certificate issuance can succeed.
+Both should return the Linode IP before public host routing can work.
 
 ## First deployment
 
@@ -150,20 +205,20 @@ After DNS, Docker, firewall rules, and GitHub secrets are ready:
 ```bash
 cd /opt/kanban-board
 docker compose -f docker-compose.prod.yml ps
-docker compose -f docker-compose.prod.yml logs -f caddy
+docker compose -f docker-compose.prod.yml logs -f kanban-api
 ```
 
 4. Open:
    - `https://kanban.trefry.net`
-   - `https://kanban-mcp.trefry.net/mcp`
+   - `https://kanban-mcp.trefry.net/mcp`, which should remain blocked by host Caddy until MCP PAT authentication is implemented.
 
 ## Manual rollback
 
-Each deployment writes the exact image tags into `/opt/kanban-board/.env`. To roll back manually, edit the image tags to an earlier `sha-...` tag and restart:
+Each deployment writes the exact image tags and GitHub-managed production settings into `/opt/kanban-board/.env.release`. To roll back manually, edit the image tags to an earlier `sha-...` tag and restart.
 
 ```bash
 cd /opt/kanban-board
-nano .env
+nano .env.release
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```

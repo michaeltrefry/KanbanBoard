@@ -16,6 +16,8 @@ public static class DbInitializer
         await EnsureEpicDocumentsTableAsync(dbContext, cancellationToken);
         await EnsureWorkItemEpicColumnAsync(dbContext, cancellationToken);
         await EnsureWorkItemCommentsTableAsync(dbContext, cancellationToken);
+        await EnsureAppUsersTableAsync(dbContext, cancellationToken);
+        await EnsurePersonalAccessTokensTableAsync(dbContext, cancellationToken);
 
         if (await dbContext.Projects.AnyAsync(cancellationToken))
         {
@@ -233,6 +235,69 @@ public static class DbInitializer
         await dbContext.Database.ExecuteSqlRawAsync(
             """
             CREATE INDEX IF NOT EXISTS IX_WorkItemComments_WorkItemId_CreatedAtUtc ON WorkItemComments (WorkItemId, CreatedAtUtc);
+            """,
+            cancellationToken);
+    }
+
+    private static async Task EnsureAppUsersTableAsync(KanbanDbContext dbContext, CancellationToken cancellationToken)
+    {
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS AppUsers (
+                Id TEXT NOT NULL CONSTRAINT PK_AppUsers PRIMARY KEY,
+                Issuer TEXT NOT NULL,
+                Subject TEXT NOT NULL,
+                DisplayName TEXT NULL,
+                Email TEXT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                UpdatedAtUtc TEXT NOT NULL,
+                LastSeenAtUtc TEXT NULL
+            );
+            """,
+            cancellationToken);
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_AppUsers_Issuer_Subject ON AppUsers (Issuer, Subject);
+            """,
+            cancellationToken);
+    }
+
+    private static async Task EnsurePersonalAccessTokensTableAsync(KanbanDbContext dbContext, CancellationToken cancellationToken)
+    {
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE TABLE IF NOT EXISTS PersonalAccessTokens (
+                Id TEXT NOT NULL CONSTRAINT PK_PersonalAccessTokens PRIMARY KEY,
+                AppUserId TEXT NOT NULL,
+                Name TEXT NOT NULL,
+                TokenPrefix TEXT NOT NULL,
+                TokenHash TEXT NOT NULL,
+                EncryptedSecret TEXT NOT NULL,
+                CreatedAtUtc TEXT NOT NULL,
+                ExpiresAtUtc TEXT NULL,
+                LastUsedAtUtc TEXT NULL,
+                RevokedAtUtc TEXT NULL,
+                CONSTRAINT FK_PersonalAccessTokens_AppUsers_AppUserId FOREIGN KEY (AppUserId) REFERENCES AppUsers (Id) ON DELETE CASCADE
+            );
+            """,
+            cancellationToken);
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE INDEX IF NOT EXISTS IX_PersonalAccessTokens_AppUserId ON PersonalAccessTokens (AppUserId);
+            """,
+            cancellationToken);
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE INDEX IF NOT EXISTS IX_PersonalAccessTokens_TokenPrefix ON PersonalAccessTokens (TokenPrefix);
+            """,
+            cancellationToken);
+
+        await dbContext.Database.ExecuteSqlRawAsync(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_PersonalAccessTokens_TokenHash ON PersonalAccessTokens (TokenHash);
             """,
             cancellationToken);
     }

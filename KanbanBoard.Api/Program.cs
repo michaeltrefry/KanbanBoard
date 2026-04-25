@@ -1,3 +1,4 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
@@ -8,6 +9,21 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
+var authOptions = builder.Configuration
+    .GetSection(KanbanAuthOptions.SectionName)
+    .Get<KanbanAuthOptions>() ?? new KanbanAuthOptions();
+var patOptions = builder.Configuration
+    .GetSection(PersonalAccessTokenOptions.SectionName)
+    .Get<PersonalAccessTokenOptions>() ?? new PersonalAccessTokenOptions();
+
+var authConfigurationErrors = authOptions.Validate();
+var patConfigurationErrors = patOptions.Validate();
+var configurationErrors = authConfigurationErrors.Concat(patConfigurationErrors).ToList();
+if (configurationErrors.Count > 0)
+{
+    throw new InvalidOperationException(
+        "Authentication is enabled but configuration is invalid: " + string.Join(" ", configurationErrors));
+}
 
 var defaultDataDirectory = Path.Combine(builder.Environment.ContentRootPath, "App_Data");
 var dataDirectory = builder.Configuration["KANBAN_DATA_DIR"] ?? defaultDataDirectory;
@@ -17,6 +33,10 @@ var connectionString = builder.Configuration.GetConnectionString("Kanban")
     ?? $"Data Source={Path.Combine(dataDirectory, "kanban.db")}";
 
 builder.Services.AddDbContext<KanbanDbContext>(options => options.UseSqlite(connectionString));
+builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(KanbanAuthOptions.SectionName));
+builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
+builder.Services.AddKanbanAuthentication(authOptions, builder.Environment);
+builder.Services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
 builder.Services.AddOpenApi();
 builder.Services.AddSingleton<BoardChangeNotifier>();
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -32,6 +52,16 @@ using (var scope = app.Services.CreateScope())
     await DbInitializer.InitializeAsync(dbContext, CancellationToken.None);
 }
 
+if (authOptions.Enabled)
+{
+    app.UseAuthentication();
+    app.UseAuthorization();
+    app.UseKanbanAuthenticationGate(authOptions);
+    app.UseKanbanAntiforgeryProtection(authOptions);
+    app.MapKanbanAuthenticationEndpoints();
+}
+
+app.MapKanbanAntiforgeryEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();

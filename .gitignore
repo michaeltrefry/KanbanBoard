@@ -1,7 +1,10 @@
 bin/
 obj/
 .DS_Store
+.env
+.env.*
 KanbanBoard.Api/App_Data/
 .kanban-data/
 certs/*
 !certs/.gitkeep
+!deploy/.env.example

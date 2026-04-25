@@ -15,8 +15,6 @@ env:
   REGISTRY: ghcr.io
   DOTNET_VERSION: 10.0.x
   DEPLOY_PATH: /opt/kanban-board
-  APP_HOSTNAME: kanban.trefry.net
-  MCP_HOSTNAME: kanban-mcp.trefry.net
 
 jobs:
   validate:
@@ -108,12 +106,16 @@ jobs:
           LINODE_HOST: ${{ secrets.LINODE_HOST }}
           LINODE_USER: ${{ secrets.LINODE_USER }}
           LINODE_SSH_KEY: ${{ secrets.LINODE_SSH_KEY }}
-          KANBAN_TLS_EMAIL: ${{ secrets.KANBAN_TLS_EMAIL }}
+          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY }}
+          KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
+          KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
         run: |
           : "${LINODE_HOST:?Set the LINODE_HOST repository secret.}"
           : "${LINODE_USER:?Set the LINODE_USER repository secret.}"
           : "${LINODE_SSH_KEY:?Set the LINODE_SSH_KEY repository secret.}"
-          : "${KANBAN_TLS_EMAIL:?Set the KANBAN_TLS_EMAIL repository secret.}"
+          : "${KANBAN_AUTH_AUTHORITY:?Set the KANBAN_AUTH_AUTHORITY repository secret.}"
+          : "${KANBAN_AUTH_CLIENT_SECRET:?Set the KANBAN_AUTH_CLIENT_SECRET repository secret.}"
+          : "${KANBAN_PAT_ENCRYPTION_KEY:?Set the KANBAN_PAT_ENCRYPTION_KEY repository secret.}"
 
       - name: Prepare SSH
         shell: bash
@@ -128,20 +130,34 @@ jobs:
           chmod 600 ~/.ssh/linode_deploy
           ssh-keyscan -p "${ssh_port}" -H "${LINODE_HOST}" >> ~/.ssh/known_hosts
 
-      - name: Write production environment file
+      - name: Write release environment file
         shell: bash
         env:
-          KANBAN_TLS_EMAIL: ${{ secrets.KANBAN_TLS_EMAIL }}
+          KANBAN_API_IMAGE: ${{ needs.publish.outputs.api_image }}:${{ needs.publish.outputs.image_tag }}
+          KANBAN_MCP_IMAGE: ${{ needs.publish.outputs.mcp_image }}:${{ needs.publish.outputs.image_tag }}
+          KANBAN_AUTH_AUTHORITY: ${{ secrets.KANBAN_AUTH_AUTHORITY }}
+          KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
+          KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
         run: |
-          cat > deploy/.env.production <<EOF
-          KANBAN_API_IMAGE=${{ needs.publish.outputs.api_image }}:${{ needs.publish.outputs.image_tag }}
-          KANBAN_MCP_IMAGE=${{ needs.publish.outputs.mcp_image }}:${{ needs.publish.outputs.image_tag }}
-          KANBAN_APP_HOSTNAME=${APP_HOSTNAME}
-          KANBAN_MCP_HOSTNAME=${MCP_HOSTNAME}
-          KANBAN_TLS_EMAIL=${KANBAN_TLS_EMAIL}
-          GHCR_USERNAME=${GHCR_USERNAME}
-          EOF
+          write_env() {
+            printf '%s=' "$1" >> deploy/.env.release
+            printf '%q\n' "${2:-}" >> deploy/.env.release
+          }
+
+          : > deploy/.env.release
+          write_env KANBAN_API_IMAGE "${KANBAN_API_IMAGE}"
+          write_env KANBAN_MCP_IMAGE "${KANBAN_MCP_IMAGE}"
+          write_env KANBAN_API_HTTP_PORT 8080
+          write_env Auth__Enabled true
+          write_env Auth__Authority "${KANBAN_AUTH_AUTHORITY}"
+          write_env Auth__ClientId kanban-board
+          write_env Auth__ClientSecret "${KANBAN_AUTH_CLIENT_SECRET}"
+          write_env Auth__RequireHttpsMetadata true
+          write_env PersonalAccessTokens__Enabled true
+          write_env PersonalAccessTokens__EncryptionKey "${KANBAN_PAT_ENCRYPTION_KEY}"
+          write_env PersonalAccessTokens__TokenPrefix kbp
+          write_env GHCR_USERNAME "${GHCR_USERNAME}"
 
       - name: Copy deployment assets
         shell: bash
@@ -155,11 +171,10 @@ jobs:
             "mkdir -p '${DEPLOY_PATH}/data'"
           scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
             deploy/docker-compose.prod.yml \
-            deploy/Caddyfile \
             "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/"
           scp -i ~/.ssh/linode_deploy -P "${ssh_port}" \
-            deploy/.env.production \
-            "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/.env"
+            deploy/.env.release \
+            "${LINODE_USER}@${LINODE_HOST}:${DEPLOY_PATH}/.env.release"
 
       - name: Copy optional GHCR read token
         shell: bash
@@ -191,7 +206,10 @@ jobs:
 
           cd "${DEPLOY_PATH}"
           set -a
-          . ./.env
+          if [ -f ./.env ]; then
+            . ./.env
+          fi
+          . ./.env.release
           set +a
 
           if [ -s .ghcr-token ]; then
@@ -204,6 +222,7 @@ jobs:
             rm -f .ghcr-token
           fi
 
+          docker network inspect trefry-network >/dev/null 2>&1 || docker network create trefry-network
           docker compose -f docker-compose.prod.yml pull
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
           docker image prune -f
