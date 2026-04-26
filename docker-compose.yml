@@ -12,7 +12,8 @@ services:
       ASPNETCORE_URLS: https://+:8443;http://+:8080
       ASPNETCORE_Kestrel__Certificates__Default__Path: /https/localhost.pem
       ASPNETCORE_Kestrel__Certificates__Default__KeyPath: /https/localhost-key.pem
-      KANBAN_DATA_DIR: /data
+      ConnectionStrings__Kanban: ${ConnectionStrings__Kanban:?ConnectionStrings__Kanban is required}
+      Database__CommandTimeoutSeconds: ${Database__CommandTimeoutSeconds:-30}
       Auth__Enabled: ${Auth__Enabled:-false}
       Auth__Authority: ${Auth__Authority:-}
       Auth__ClientId: ${Auth__ClientId:-}
@@ -23,12 +24,8 @@ services:
       PersonalAccessTokens__Enabled: ${PersonalAccessTokens__Enabled:-false}
       PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
       PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}
+      InternalApi__SharedSecret: ${InternalApi__SharedSecret:-}
     volumes:
-      - type: bind
-        source: ${KANBAN_HOST_DATA_DIR:-./.kanban-data}
-        target: /data
-        bind:
-          create_host_path: true
       - ./certs:/https:ro
   kanban-mcp:
     build:
@@ -43,6 +40,9 @@ services:
       ASPNETCORE_Kestrel__Certificates__Default__Path: /https/localhost.pem
       ASPNETCORE_Kestrel__Certificates__Default__KeyPath: /https/localhost-key.pem
       KANBAN_API_BASE_URL: http://kanban-api:8080
+      InternalApi__SharedSecret: ${InternalApi__SharedSecret:-}
+      McpAuthentication__RequirePersonalAccessToken: ${McpAuthentication__RequirePersonalAccessToken:-true}
+      McpAuthentication__ValidationCacheSeconds: ${McpAuthentication__ValidationCacheSeconds:-30}
     volumes:
       - ./certs:/https:ro
     networks:

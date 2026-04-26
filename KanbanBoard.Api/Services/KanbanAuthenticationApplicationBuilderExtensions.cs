@@ -94,7 +94,7 @@ public static class KanbanAuthenticationApplicationBuilderExtensions
 
         return app.Use(async (context, next) =>
         {
-            if (!RequiresBrowserAntiforgery(context.Request))
+            if (!RequiresBrowserAntiforgery(context))
             {
                 await next(context);
                 return;
@@ -143,8 +143,14 @@ public static class KanbanAuthenticationApplicationBuilderExtensions
             path.StartsWithSegments("/openapi", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool RequiresBrowserAntiforgery(HttpRequest request)
+    private static bool RequiresBrowserAntiforgery(HttpContext context)
     {
+        if (KanbanInternalApiExtensions.IsInternalApiRequest(context))
+        {
+            return false;
+        }
+
+        var request = context.Request;
         if (!request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
         {
             return false;

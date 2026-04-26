@@ -110,6 +110,8 @@ jobs:
           KANBAN_AUTH_AUTHORITY: ${{ vars.KANBAN_AUTH_AUTHORITY || secrets.KANBAN_AUTH_AUTHORITY }}
           KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
+          KANBAN_INTERNAL_API_SHARED_SECRET: ${{ secrets.KANBAN_INTERNAL_API_SHARED_SECRET }}
+          KANBAN_MARIADB_CONNECTION: ${{ secrets.KANBAN_MARIADB_CONNECTION }}
         run: |
           missing=()
           for name in \
@@ -117,7 +119,9 @@ jobs:
             LINODE_USER \
             KANBAN_AUTH_AUTHORITY \
             KANBAN_AUTH_CLIENT_SECRET \
-            KANBAN_PAT_ENCRYPTION_KEY
+            KANBAN_PAT_ENCRYPTION_KEY \
+            KANBAN_INTERNAL_API_SHARED_SECRET \
+            KANBAN_MARIADB_CONNECTION
           do
             if [ -z "${!name:-}" ]; then
               missing+=("${name}")
@@ -210,6 +214,8 @@ jobs:
           KANBAN_AUTH_AUTHORITY: ${{ vars.KANBAN_AUTH_AUTHORITY || secrets.KANBAN_AUTH_AUTHORITY }}
           KANBAN_AUTH_CLIENT_SECRET: ${{ secrets.KANBAN_AUTH_CLIENT_SECRET }}
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
+          KANBAN_INTERNAL_API_SHARED_SECRET: ${{ secrets.KANBAN_INTERNAL_API_SHARED_SECRET }}
+          KANBAN_MARIADB_CONNECTION: ${{ secrets.KANBAN_MARIADB_CONNECTION }}
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME || secrets.GHCR_USERNAME }}
         run: |
           write_env() {
@@ -221,6 +227,8 @@ jobs:
           write_env KANBAN_API_IMAGE "${KANBAN_API_IMAGE}"
           write_env KANBAN_MCP_IMAGE "${KANBAN_MCP_IMAGE}"
           write_env KANBAN_API_HTTP_PORT 8080
+          write_env ConnectionStrings__Kanban "${KANBAN_MARIADB_CONNECTION}"
+          write_env Database__CommandTimeoutSeconds 30
           write_env Auth__Enabled true
           write_env Auth__Authority "${KANBAN_AUTH_AUTHORITY}"
           write_env Auth__ClientId kanban-board
@@ -229,6 +237,9 @@ jobs:
           write_env PersonalAccessTokens__Enabled true
           write_env PersonalAccessTokens__EncryptionKey "${KANBAN_PAT_ENCRYPTION_KEY}"
           write_env PersonalAccessTokens__TokenPrefix kbp
+          write_env InternalApi__SharedSecret "${KANBAN_INTERNAL_API_SHARED_SECRET}"
+          write_env McpAuthentication__RequirePersonalAccessToken true
+          write_env McpAuthentication__ValidationCacheSeconds 30
           write_env GHCR_USERNAME "${GHCR_USERNAME}"
 
       - name: Copy deployment assets

@@ -11,7 +11,8 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
-      KANBAN_DATA_DIR: /data
+      ConnectionStrings__Kanban: ${ConnectionStrings__Kanban:?ConnectionStrings__Kanban is required}
+      Database__CommandTimeoutSeconds: ${Database__CommandTimeoutSeconds:-30}
       Auth__Enabled: ${Auth__Enabled:-false}
       Auth__Authority: ${Auth__Authority:-}
       Auth__ClientId: ${Auth__ClientId:-}
@@ -22,8 +23,7 @@ services:
       PersonalAccessTokens__Enabled: ${PersonalAccessTokens__Enabled:-false}
       PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
       PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}
-    volumes:
-      - ./data:/data
+      InternalApi__SharedSecret: ${InternalApi__SharedSecret:-}
     networks:
       - default
       - trefry-network
@@ -37,6 +37,9 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:3000
       KANBAN_API_BASE_URL: http://kanban-api:8080
+      InternalApi__SharedSecret: ${InternalApi__SharedSecret:-}
+      McpAuthentication__RequirePersonalAccessToken: ${McpAuthentication__RequirePersonalAccessToken:-true}
+      McpAuthentication__ValidationCacheSeconds: ${McpAuthentication__ValidationCacheSeconds:-30}
     expose:
       - "3000"
     networks:
