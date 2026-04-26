@@ -55,23 +55,28 @@ sudo mkdir -p /opt/kanban-board
 sudo chown -R "$USER":"$USER" /opt/kanban-board
 ```
 
-The production Compose stack binds the API to `127.0.0.1:8080` by default. Configure the host-managed Caddy site for `kanban.trefry.net` to reverse proxy to:
+The production Compose stack binds the API to `127.0.0.1:8080` by default and the MCP server to `127.0.0.1:3000` by default. Configure the host-managed Caddy sites to reverse proxy to those loopback ports:
 
-```text
-127.0.0.1:8080
+```caddyfile
+kanban.trefry.net {
+    reverse_proxy 127.0.0.1:8080
+}
+
+kanban-mcp.trefry.net {
+    reverse_proxy 127.0.0.1:3000
+}
 ```
 
-If that port is already taken, set `KANBAN_API_HTTP_PORT` in the GitHub workflow release env or directly in `/opt/kanban-board/.env.release`, then point Caddy at the same localhost port.
+If either port is already taken, set `KANBAN_API_HTTP_PORT` or `KANBAN_MCP_HTTP_PORT` in the GitHub workflow release env or directly in `/opt/kanban-board/.env.release`, then point Caddy at the same localhost port.
 
 The API trusts the forwarded host/proto headers from the reverse proxy so OIDC redirects are generated for `https://kanban.trefry.net` instead of the container's internal HTTP endpoint. Caddy's `reverse_proxy` sends the required `X-Forwarded-Host` and `X-Forwarded-Proto` headers by default.
 
-The production Compose stack also joins both containers to the external Docker network `trefry-network`. The deploy workflow creates it automatically if it does not already exist. If Caddy is running in Docker on the same host, attach that Caddy container to `trefry-network` and proxy the app to:
+The production Compose stack also joins both containers to the external Docker network `trefry-network`. The deploy workflow creates it automatically if it does not already exist. If Caddy is running in Docker on the same host, attach that Caddy container to `trefry-network` and proxy the app and MCP server to:
 
 ```text
 kanban-api:8080
+kanban-mcp:3000
 ```
-
-With PAT authentication in place, Caddy can proxy MCP to `kanban-mcp:3000` on `trefry-network`.
 
 For local Docker Compose development only, create a repo-root `.env`; Compose reads this file automatically and passes the values into `kanban-api`:
 
@@ -223,6 +228,9 @@ After DNS, Docker, firewall rules, and GitHub secrets are ready:
 
 ```bash
 cd /opt/kanban-board
+set -a
+. ./.env.release
+set +a
 docker compose -f docker-compose.prod.yml ps
 docker compose -f docker-compose.prod.yml logs -f kanban-api
 ```
@@ -238,6 +246,9 @@ Each deployment writes the exact image tags and GitHub-managed production settin
 ```bash
 cd /opt/kanban-board
 nano .env.release
+set -a
+. ./.env.release
+set +a
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
