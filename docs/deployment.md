@@ -7,7 +7,7 @@ Production hostnames:
 - Web UI and API: `https://kanban.trefry.net`
 - MCP server: `https://kanban-mcp.trefry.net/mcp`
 
-Public MCP access should stay blocked in the host Caddy config until the MCP PAT authentication bridge is implemented. The MCP container can still run internally on Docker networks, including the external `trefry-network`, but it is not published to localhost by this Compose file.
+Public MCP access requires `Authorization: Bearer <personal-access-token>`. The MCP container validates PATs through the API over the internal Docker network using `InternalApi__SharedSecret`; the MCP service is not published to localhost by this Compose file.
 
 ## How deployment works
 
@@ -48,10 +48,10 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 sudo systemctl enable --now docker
 ```
 
-Create the deployment directory and data directory:
+Create the deployment directory:
 
 ```bash
-sudo mkdir -p /opt/kanban-board/data
+sudo mkdir -p /opt/kanban-board
 sudo chown -R "$USER":"$USER" /opt/kanban-board
 ```
 
@@ -71,11 +71,14 @@ The production Compose stack also joins both containers to the external Docker n
 kanban-api:8080
 ```
 
-Keep public MCP proxying disabled until Slice 7 is complete. After PAT authentication is in place, Caddy can proxy MCP to `kanban-mcp:3000` on `trefry-network`.
+With PAT authentication in place, Caddy can proxy MCP to `kanban-mcp:3000` on `trefry-network`.
 
 For local Docker Compose development only, create a repo-root `.env`; Compose reads this file automatically and passes the values into `kanban-api`:
 
 ```bash
+ConnectionStrings__Kanban="Server=127.0.0.1;Port=3306;Database=kanban;User ID=kanban;Password=SECRET;"
+Database__CommandTimeoutSeconds=30
+
 Auth__Enabled=true
 Auth__Authority=https://identity.trefry.net/realms/YOUR_REALM
 Auth__ClientId=kanban-board
@@ -85,6 +88,10 @@ Auth__RequireHttpsMetadata=true
 PersonalAccessTokens__Enabled=true
 PersonalAccessTokens__EncryptionKey=32_BYTE_BASE64_OR_64_HEX_KEY
 PersonalAccessTokens__TokenPrefix=kbp
+
+InternalApi__SharedSecret=RANDOM_32_PLUS_CHARACTER_SHARED_SECRET
+McpAuthentication__RequirePersonalAccessToken=true
+McpAuthentication__ValidationCacheSeconds=30
 ```
 
 For `dotnet run`, export the same variables in your shell before starting the API because ASP.NET Core does not read `.env` files by itself.
@@ -97,13 +104,17 @@ For Keycloak, configure the `kanban-board` OIDC client as a confidential client 
 
 Production deployment uses GitHub-managed secrets and writes them into `/opt/kanban-board/.env.release` on the server during deploy. Required production auth secrets:
 
+- `KANBAN_MARIADB_CONNECTION`: MariaDB connection string for the `kanban` database.
 - `KANBAN_AUTH_AUTHORITY`: Keycloak realm authority, for example `https://identity.trefry.net/realms/YOUR_REALM`.
 - `KANBAN_AUTH_CLIENT_SECRET`: Keycloak client secret for the `kanban-board` confidential client.
 - `KANBAN_PAT_ENCRYPTION_KEY`: 32-byte / 256-bit PAT encryption key encoded as base64 or 64 hex characters.
+- `KANBAN_INTERNAL_API_SHARED_SECRET`: random 32+ character secret shared only between `kanban-api` and `kanban-mcp`.
 
 Do not commit local `.env` files. They are ignored and should stay on your machine.
 
-The authenticated web login and browser API use cookie sessions. MCP clients will use Personal Access Tokens after the MCP bridge slice is implemented; at this stage, the production template already carries the PAT encryption key needed by PAT creation and validation. Keep public MCP blocked in the host Caddy config until that bridge is complete.
+The authenticated web login and browser API use cookie sessions. MCP clients use Personal Access Tokens from the user settings page and send them as bearer tokens to `/mcp`. The MCP server validates PATs through the API's internal validation endpoint, caches successful validation briefly, and forwards tool calls with the internal shared secret rather than exposing a public API bypass.
+
+Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
 
 Open inbound ports:
 
@@ -150,9 +161,11 @@ Required:
 - `LINODE_HOST`: Linode IPv4 address or DNS name. Variable or secret.
 - `LINODE_USER`: SSH user on the Linode. Variable or secret.
 - `LINODE_SSH_KEY`: full private key for the deploy user, including the `BEGIN` and `END` lines. Secret.
+- `KANBAN_MARIADB_CONNECTION`: MariaDB connection string for the `kanban` database. Secret.
 - `KANBAN_AUTH_AUTHORITY`: Keycloak realm authority, for example `https://identity.trefry.net/realms/YOUR_REALM`. Variable or secret.
 - `KANBAN_AUTH_CLIENT_SECRET`: Keycloak client secret for the `kanban-board` confidential client. Secret.
 - `KANBAN_PAT_ENCRYPTION_KEY`: 32-byte / 256-bit PAT encryption key encoded as base64 or 64 hex characters. Secret.
+- `KANBAN_INTERNAL_API_SHARED_SECRET`: random 32+ character secret shared only between `kanban-api` and `kanban-mcp`. Secret.
 
 Optional:
 
@@ -216,7 +229,7 @@ docker compose -f docker-compose.prod.yml logs -f kanban-api
 
 4. Open:
    - `https://kanban.trefry.net`
-   - `https://kanban-mcp.trefry.net/mcp`, which should remain blocked by host Caddy until MCP PAT authentication is implemented.
+   - `https://kanban-mcp.trefry.net/mcp`, which should return 401 without `Authorization: Bearer <personal-access-token>`.
 
 ## Manual rollback
 
@@ -229,4 +242,4 @@ docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-SQLite data lives in `/opt/kanban-board/data` and is not replaced by image updates.
+MariaDB data lives in the external MariaDB instance. The application container no longer stores the primary database in `/opt/kanban-board/data`.

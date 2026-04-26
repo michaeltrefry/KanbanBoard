@@ -16,26 +16,36 @@ var authOptions = builder.Configuration
 var patOptions = builder.Configuration
     .GetSection(PersonalAccessTokenOptions.SectionName)
     .Get<PersonalAccessTokenOptions>() ?? new PersonalAccessTokenOptions();
+var internalApiOptions = builder.Configuration
+    .GetSection(InternalApiOptions.SectionName)
+    .Get<InternalApiOptions>() ?? new InternalApiOptions();
+var databaseOptions = builder.Configuration
+    .GetSection(DatabaseOptions.SectionName)
+    .Get<DatabaseOptions>() ?? new DatabaseOptions();
+var connectionString = builder.Configuration.GetConnectionString("Kanban");
 
 var authConfigurationErrors = authOptions.Validate();
 var patConfigurationErrors = patOptions.Validate();
-var configurationErrors = authConfigurationErrors.Concat(patConfigurationErrors).ToList();
+var internalApiConfigurationErrors = internalApiOptions.Validate(required: false);
+var databaseConfigurationErrors = databaseOptions.Validate(connectionString);
+var configurationErrors = authConfigurationErrors
+    .Concat(patConfigurationErrors)
+    .Concat(internalApiConfigurationErrors)
+    .Concat(databaseConfigurationErrors)
+    .ToList();
 if (configurationErrors.Count > 0)
 {
     throw new InvalidOperationException(
         "Authentication is enabled but configuration is invalid: " + string.Join(" ", configurationErrors));
 }
 
-var defaultDataDirectory = Path.Combine(builder.Environment.ContentRootPath, "App_Data");
-var dataDirectory = builder.Configuration["KANBAN_DATA_DIR"] ?? defaultDataDirectory;
-Directory.CreateDirectory(dataDirectory);
-
-var connectionString = builder.Configuration.GetConnectionString("Kanban")
-    ?? $"Data Source={Path.Combine(dataDirectory, "kanban.db")}";
-
-builder.Services.AddDbContext<KanbanDbContext>(options => options.UseSqlite(connectionString));
+builder.Services.AddDbContext<KanbanDbContext>(options => options.UseMySQL(
+    connectionString!,
+    mySqlOptions => mySqlOptions.CommandTimeout(databaseOptions.CommandTimeoutSeconds)));
 builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(KanbanAuthOptions.SectionName));
 builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
+builder.Services.Configure<InternalApiOptions>(builder.Configuration.GetSection(InternalApiOptions.SectionName));
+builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection(DatabaseOptions.SectionName));
 builder.Services.AddKanbanAuthentication(authOptions, builder.Environment);
 builder.Services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -59,21 +69,30 @@ var app = builder.Build();
 using (var scope = app.Services.CreateScope())
 {
     var dbContext = scope.ServiceProvider.GetRequiredService<KanbanDbContext>();
-    await DbInitializer.InitializeAsync(dbContext, CancellationToken.None);
+    if (!await dbContext.Database.CanConnectAsync(CancellationToken.None))
+    {
+        throw new InvalidOperationException("Unable to connect to the configured MariaDB database.");
+    }
 }
 
 if (authOptions.Enabled)
 {
     app.UseForwardedHeaders();
     app.UseAuthentication();
+    app.UseKanbanInternalApiAuthentication(internalApiOptions);
     app.UseAuthorization();
     app.UseKanbanAuthenticationGate(authOptions);
     app.UseKanbanAntiforgeryProtection(authOptions);
     app.MapKanbanAuthenticationEndpoints();
 }
+else
+{
+    app.UseKanbanInternalApiAuthentication(internalApiOptions);
+}
 
 app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
+app.MapKanbanInternalApiEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
@@ -883,7 +902,7 @@ static async Task NormalizeColumnOrderingAsync(
         .OrderBy(item => item.Order)
         .ToListAsync(cancellationToken);
 
-    // SQLite cannot translate DateTimeOffset ORDER BY, so we apply the tie-breaker in memory.
+    // Keep column order deterministic before reassigning contiguous order values.
     items = items
         .OrderBy(item => item.Order)
         .ThenBy(item => item.CreatedAtUtc)

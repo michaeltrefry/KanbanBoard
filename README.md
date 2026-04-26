@@ -3,7 +3,7 @@
 A lightweight single-developer kanban board with:
 
 - .NET 10 API and static web UI
-- SQLite persistence
+- MariaDB persistence
 - HTTPS-ready MCP server for agent tooling
 - Docker Compose for the whole stack
 
@@ -20,14 +20,16 @@ This creates `./certs/localhost.pem` and `./certs/localhost-key.pem`, which both
 Run the web app and API over HTTPS:
 
 ```bash
+export ConnectionStrings__Kanban="Server=127.0.0.1;Port=3306;Database=kanban;User ID=kanban;Password=secret;"
 dotnet run --launch-profile https --project ./KanbanBoard.Api
 ```
 
 The API and UI will be available at [https://localhost:7256](https://localhost:7256).
 
-To run the MCP server locally over HTTPS:
+To run the MCP server locally over HTTPS, use the same `InternalApi__SharedSecret` value that the API is using:
 
 ```bash
+export InternalApi__SharedSecret=replace-with-random-32-plus-character-internal-secret
 dotnet run --launch-profile https --project ./KanbanBoard.Mcp
 ```
 
@@ -45,7 +47,7 @@ Generate local certificates first:
 docker compose up --build
 ```
 
-By default, the SQLite database is bind-mounted to `./.kanban-data` on your host machine, so it survives container rebuilds and Docker volume resets.
+The API expects `ConnectionStrings__Kanban` to point at an existing MariaDB database. The Compose file does not start a MariaDB service.
 
 You can override the default host ports if they conflict with another local stack:
 
@@ -53,13 +55,7 @@ You can override the default host ports if they conflict with another local stac
 KANBAN_DOCKER_HTTPS_PORT=9443 KANBAN_MCP_HTTPS_PORT=3002 docker compose up --build
 ```
 
-You can also move the database anywhere on your machine by overriding the host data path:
-
-```bash
-KANBAN_HOST_DATA_DIR=/absolute/path/to/kanban-data docker compose up --build
-```
-
-For local auth testing with Docker Compose, put `Auth__*` and `PersonalAccessTokens__*` settings in a repo-root `.env`. The file is ignored by git. For `dotnet run`, export those variables in your shell first.
+For local Docker Compose testing, put `ConnectionStrings__Kanban`, `Auth__*`, `PersonalAccessTokens__*`, and `InternalApi__SharedSecret` settings in a repo-root `.env`. The file is ignored by git. For `dotnet run`, export those variables in your shell first.
 
 Services:
 
@@ -67,10 +63,11 @@ Services:
 - MCP server from the host: [https://localhost:3001/mcp](https://localhost:3001/mcp)
 - MCP server from Docker containers on `trefry-network`: `http://kanban-mcp:3000/mcp`
 
-SQLite data persists in the host directory configured by `KANBAN_HOST_DATA_DIR` or, by default, `./.kanban-data`.
 The API container still listens on internal HTTP port `8080` so the MCP container can call it as `http://api:8080` without certificate hostname mismatches on the Docker network.
 
 ## MCP tools
+
+The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication.
 
 The MCP service exposes tools for:
 
@@ -121,7 +118,9 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 Production deployment is handled by GitHub Actions, GHCR, and Docker Compose. Caddy is managed separately on the host.
 
 - Web UI/API: `https://kanban.trefry.net`
-- MCP: `https://kanban-mcp.trefry.net/mcp`, keep blocked in host Caddy until PAT authentication is implemented
+- MCP: `https://kanban-mcp.trefry.net/mcp`
 - Deployment guide: [docs/deployment.md](docs/deployment.md)
+- MariaDB schema: [docs/mariadb-schema.md](docs/mariadb-schema.md)
+- SQLite to MariaDB data migration: [docs/sqlite-to-mariadb.md](docs/sqlite-to-mariadb.md)
 
-Production auth secrets such as `Auth__ClientSecret` and `PersonalAccessTokens__EncryptionKey` are supplied through GitHub-managed Actions secrets and written to `/opt/kanban-board/.env.release` during deployment. Local `.env` files are ignored and are for local development only.
+Production secrets such as `ConnectionStrings__Kanban`, `Auth__ClientSecret`, `PersonalAccessTokens__EncryptionKey`, and `InternalApi__SharedSecret` are supplied through GitHub-managed Actions secrets and written to `/opt/kanban-board/.env.release` during deployment. Local `.env` files are ignored and are for local development only.
