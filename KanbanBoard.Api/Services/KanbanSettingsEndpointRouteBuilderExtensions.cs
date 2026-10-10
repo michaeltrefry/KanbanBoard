@@ -79,6 +79,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
                 user,
                 request.Name,
                 request.ExpiresAtUtc,
+                NormalizeScope(request.Scope),
                 cancellationToken);
 
             return Results.Created(
@@ -143,8 +144,14 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             token.ExpiresAtUtc,
             token.LastUsedAtUtc,
             token.RevokedAtUtc,
-            token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now));
+            token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now),
+            token.Scope);
     }
+
+    private static string NormalizeScope(string? scope) =>
+        string.IsNullOrWhiteSpace(scope)
+            ? PersonalAccessTokenScopes.Full
+            : scope.Trim().ToLowerInvariant();
 
     private static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request)
     {
@@ -156,6 +163,11 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
         if (request.Name.Trim().Length > 160)
         {
             return "Field 'name' must be 160 characters or fewer.";
+        }
+
+        if (!PersonalAccessTokenScopes.IsValid(NormalizeScope(request.Scope)))
+        {
+            return $"Field 'scope' must be '{PersonalAccessTokenScopes.Read}' or '{PersonalAccessTokenScopes.Full}'.";
         }
 
         if (request.ExpiresAtUtc <= DateTimeOffset.UtcNow)

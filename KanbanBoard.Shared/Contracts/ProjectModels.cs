@@ -112,7 +112,8 @@ public sealed record PersonalAccessTokenMetadataDto(
     DateTimeOffset? ExpiresAtUtc,
     DateTimeOffset? LastUsedAtUtc,
     DateTimeOffset? RevokedAtUtc,
-    bool IsActive);
+    bool IsActive,
+    string Scope = PersonalAccessTokenScopes.Full);
 
 public sealed record CreatedPersonalAccessTokenDto(
     PersonalAccessTokenMetadataDto Token,
@@ -179,4 +180,5 @@ public sealed record CreateWorkItemCommentRequest(
 
 public sealed record CreatePersonalAccessTokenRequest(
     string Name,
-    DateTimeOffset? ExpiresAtUtc);
+    DateTimeOffset? ExpiresAtUtc,
+    string? Scope = null);

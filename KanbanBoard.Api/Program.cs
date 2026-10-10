@@ -39,9 +39,11 @@ if (configurationErrors.Count > 0)
         "Authentication is enabled but configuration is invalid: " + string.Join(" ", configurationErrors));
 }
 
-builder.Services.AddDbContext<KanbanDbContext>(options => options.UseMySQL(
-    connectionString!,
-    mySqlOptions => mySqlOptions.CommandTimeout(databaseOptions.CommandTimeoutSeconds)));
+builder.Services.AddDbContext<KanbanDbContext>(options => options
+    .UseMySQL(
+        connectionString!,
+        mySqlOptions => mySqlOptions.CommandTimeout(databaseOptions.CommandTimeoutSeconds))
+    .AddInterceptors(new MariaDbMigrationLockInterceptor(databaseOptions.MigrationLockTimeoutSeconds)));
 builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(KanbanAuthOptions.SectionName));
 builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
 builder.Services.Configure<InternalApiOptions>(builder.Configuration.GetSection(InternalApiOptions.SectionName));
@@ -73,6 +75,12 @@ using (var scope = app.Services.CreateScope())
     {
         throw new InvalidOperationException("Unable to connect to the configured MariaDB database.");
     }
+
+    await StartupMigrator.MigrateAsync(
+        dbContext,
+        databaseOptions,
+        app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(typeof(StartupMigrator)),
+        CancellationToken.None);
 }
 
 if (authOptions.Enabled)

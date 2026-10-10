@@ -36,6 +36,29 @@ public static class KanbanInternalApiExtensions
                 }
 
                 context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, KanbanInternalAuth.AuthenticationType));
+
+                if (IsWriteMethod(context.Request.Method) &&
+                    context.Request.Headers.ContainsKey(KanbanInternalAuth.PersonalAccessTokenIdHeaderName))
+                {
+                    // A forwarded PAT id must resolve to a stored token; an unknown or malformed id fails closed.
+                    var scope = Guid.TryParse(tokenId, out var personalAccessTokenId)
+                        ? await context.RequestServices.GetRequiredService<IPersonalAccessTokenService>()
+                            .GetScopeAsync(personalAccessTokenId, context.RequestAborted)
+                        : null;
+                    if (scope is null)
+                    {
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        await context.Response.WriteAsJsonAsync(new { message = UnknownTokenMessage });
+                        return;
+                    }
+
+                    if (!PersonalAccessTokenScopes.AllowsWrites(scope))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        await context.Response.WriteAsJsonAsync(new { message = ReadOnlyScopeMessage });
+                        return;
+                    }
+                }
             }
 
             await next(context);
@@ -76,13 +99,26 @@ public static class KanbanInternalApiExtensions
                     result.Token.Id,
                     result.User.DisplayName,
                     result.User.Email,
-                    result.Token.ExpiresAtUtc));
+                    result.Token.ExpiresAtUtc,
+                    result.Token.Scope));
         })
         .WithName("ValidateInternalPersonalAccessToken")
         .WithTags("Internal");
 
         return endpoints;
     }
+
+    public const string UnknownTokenMessage =
+        "The forwarded personal access token does not exist and cannot be used to change data.";
+
+    public const string ReadOnlyScopeMessage =
+        "This personal access token has the 'read' scope and cannot create, update, or delete data.";
+
+    private static bool IsWriteMethod(string method) =>
+        HttpMethods.IsPost(method) ||
+        HttpMethods.IsPut(method) ||
+        HttpMethods.IsPatch(method) ||
+        HttpMethods.IsDelete(method);
 
     public static bool IsInternalApiRequest(HttpContext context) =>
         context.Items[KanbanInternalAuth.InternalRequestItemKey] is true;

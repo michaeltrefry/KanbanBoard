@@ -91,6 +91,7 @@ public sealed class PersonalAccessToken
     public string TokenPrefix { get; set; } = string.Empty;
     public string TokenHash { get; set; } = string.Empty;
     public string EncryptedSecret { get; set; } = string.Empty;
+    public string Scope { get; set; } = PersonalAccessTokenScopes.Full;
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? ExpiresAtUtc { get; set; }
     public DateTimeOffset? LastUsedAtUtc { get; set; }

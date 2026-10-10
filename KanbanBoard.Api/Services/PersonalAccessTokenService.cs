@@ -3,6 +3,7 @@ using System.Text;
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
+using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -14,6 +15,7 @@ public interface IPersonalAccessTokenService
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
+        string scope,
         CancellationToken cancellationToken);
 
     Task<PersonalAccessTokenValidationResult?> ValidateAsync(
@@ -24,6 +26,9 @@ public interface IPersonalAccessTokenService
         Guid appUserId,
         Guid tokenId,
         CancellationToken cancellationToken);
+
+    /// <summary>Returns the stored scope of a token, or null when no such token exists.</summary>
+    Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken);
 }
 
 public sealed record CreatedPersonalAccessToken(
@@ -40,6 +45,8 @@ public sealed class PersonalAccessTokenService(
 {
     private const int SecretByteLength = 32;
     private const int DisplayPrefixByteLength = 8;
+    // Unpadded base64url length of DisplayPrefixByteLength bytes.
+    private const int DisplayPrefixLength = (DisplayPrefixByteLength * 4 + 2) / 3;
     private const int NonceByteLength = 12;
     private const int TagByteLength = 16;
     private readonly PersonalAccessTokenOptions options = options.Value;
@@ -48,9 +55,17 @@ public sealed class PersonalAccessTokenService(
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
+        string scope,
         CancellationToken cancellationToken)
     {
         EnsureEnabled();
+
+        if (!PersonalAccessTokenScopes.IsValid(scope))
+        {
+            throw new ArgumentException(
+                $"PAT scope must be '{PersonalAccessTokenScopes.Read}' or '{PersonalAccessTokenScopes.Full}'.",
+                nameof(scope));
+        }
 
         var normalizedName = name.Trim();
         if (string.IsNullOrWhiteSpace(normalizedName))
@@ -70,6 +85,7 @@ public sealed class PersonalAccessTokenService(
             TokenPrefix = tokenPrefix,
             TokenHash = ComputeLookupHash(plaintextToken),
             EncryptedSecret = EncryptSecret(secret),
+            Scope = scope,
             CreatedAtUtc = now,
             ExpiresAtUtc = expiresAtUtc
         };
@@ -135,6 +151,15 @@ public sealed class PersonalAccessTokenService(
         return true;
     }
 
+    public async Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        return await dbContext.PersonalAccessTokens
+            .AsNoTracking()
+            .Where(candidate => candidate.Id == tokenId)
+            .Select(candidate => candidate.Scope)
+            .FirstOrDefaultAsync(cancellationToken);
+    }
+
     private void EnsureEnabled()
     {
         if (!options.Enabled)
@@ -148,18 +173,23 @@ public sealed class PersonalAccessTokenService(
         tokenPrefix = string.Empty;
         secret = string.Empty;
 
-        var parts = token.Split('_', 3);
-        if (parts.Length != 3 ||
-            !string.Equals(parts[0], options.TokenPrefix, StringComparison.Ordinal) ||
-            string.IsNullOrWhiteSpace(parts[1]) ||
-            string.IsNullOrWhiteSpace(parts[2]))
+        // Format: {TokenPrefix}_{display prefix}_{secret}. The display prefix is fixed-length base64url,
+        // which may itself contain '_', so it is taken by length rather than by splitting on '_'.
+        var lead = options.TokenPrefix + "_";
+        if (!token.StartsWith(lead, StringComparison.Ordinal))
         {
             return false;
         }
 
-        tokenPrefix = parts[1];
-        secret = parts[2];
-        return true;
+        var separatorIndex = lead.Length + DisplayPrefixLength;
+        if (token.Length <= separatorIndex + 1 || token[separatorIndex] != '_')
+        {
+            return false;
+        }
+
+        tokenPrefix = token.Substring(lead.Length, DisplayPrefixLength);
+        secret = token[(separatorIndex + 1)..];
+        return !string.IsNullOrWhiteSpace(tokenPrefix) && !string.IsNullOrWhiteSpace(secret);
     }
 
     private string ComputeLookupHash(string token)

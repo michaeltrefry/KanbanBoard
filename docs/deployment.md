@@ -119,7 +119,26 @@ Do not commit local `.env` files. They are ignored and should stay on your machi
 
 The authenticated web login and browser API use cookie sessions. MCP clients use Personal Access Tokens from the user settings page and send them as bearer tokens to `/mcp`. The MCP server validates PATs through the API's internal validation endpoint, caches successful validation briefly, and forwards tool calls with the internal shared secret rather than exposing a public API bypass.
 
-Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
+Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql) and the later numbered scripts in `deploy/sql` (see [mariadb-schema.md](mariadb-schema.md)), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
+
+### Schema changes on deploy
+
+The API applies pending EF Core migrations itself when it starts (`Database:MigrateOnStartup`, default `true`; env `Database__MigrateOnStartup`). On each start it compares `__EFMigrationsHistory` with the migrations in the image, logs the ids it applies (`Applying N database migration(s): ...` / `Applied database migration(s): ...`), then starts serving. There is no manual pre-merge schema step: merging a change with a new migration to `main` deploys the image, and the new container migrates the schema before it accepts requests.
+
+Only one instance migrates at a time: each takes the MariaDB named lock `__EFMigrationsLock` first. A starting API waits for it for `Database:MigrationCommandTimeoutSeconds` (default `660`, allowed `90`-`7200`; env `Database__MigrationCommandTimeoutSeconds`) minus 60, so 600 s by default. Migration commands run under that longer command timeout, not `Database:CommandTimeoutSeconds`. If the lock is still held when the wait ends, the API exits with `TimeoutException: Could not acquire the '__EFMigrationsLock' migration lock ...` and applies nothing. Find the holder with `SELECT IS_USED_LOCK('__EFMigrationsLock')` (a connection id for `SHOW PROCESSLIST` / `KILL`).
+
+If a migration fails, the API exits with the exception instead of serving against a partly migrated schema. Compose (`restart: unless-stopped`) will keep restarting it, so check `docker compose -f docker-compose.prod.yml logs kanban-api`. MariaDB DDL is not transactional, so a failed migration can leave its earlier statements applied; fix the schema by hand (or with the matching `deploy/sql` script) before restarting.
+
+The database user in `KANBAN_MARIADB_CONNECTION` must be able to change the schema: `ALTER` (and `CREATE`, `INDEX`, `DROP`, `REFERENCES` for future migrations that add tables, indexes or foreign keys) on the `kanban` schema, plus `SELECT`/`INSERT` on `__EFMigrationsHistory`. The `GRANT ALL PRIVILEGES ON kanban.*` in [mariadb-schema.md](mariadb-schema.md) covers this. Migrations take a `GET_LOCK('__EFMigrationsLock', ...)` named lock, which needs no extra privilege.
+
+The numbered scripts in `deploy/sql` remain for bootstrapping a new database and for applying a change by hand. Each one records its migration id in `__EFMigrationsHistory`, so the API skips migrations an operator has already applied. To manage the schema only by hand, set the Actions variable `KANBAN_DB_MIGRATE_ON_STARTUP` to `false` (the workflow writes it to `/opt/kanban-board/.env.release` as `Database__MigrateOnStartup`; unset means `true`) and apply each new script before deploying the code that needs it.
+
+For the PAT scope change (sc-25712) the API adds `PersonalAccessTokens.Scope` on its first start; existing tokens become `full`. Running `deploy/sql/002_personal_access_token_scope.sql` beforehand is optional and harmless. To verify after deploy:
+
+```bash
+mariadb -h HOST -P 3306 -u kanban -p kanban -e "SELECT MigrationId FROM __EFMigrationsHistory"
+# lists 20261010161942_AddPersonalAccessTokenScope
+```
 
 Open inbound ports:
 
@@ -175,6 +194,7 @@ Required:
 Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
+- `KANBAN_DB_MIGRATE_ON_STARTUP`: `false` stops the API from applying EF Core migrations on startup. Defaults to `true` if omitted. Only the lowercase values `true` and `false` are accepted; the deploy fails before touching the server on any other value. Variable.
 - `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.
 - `GHCR_USERNAME`: GitHub username for pulling private GHCR images from the Linode. Variable or secret.

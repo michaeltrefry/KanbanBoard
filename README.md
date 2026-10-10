@@ -67,7 +67,7 @@ The API container still listens on internal HTTP port `8080` so the MCP containe
 
 ## MCP tools
 
-The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication.
+The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, comment, delete) return a scope error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
 
 The MCP service exposes tools for:
 

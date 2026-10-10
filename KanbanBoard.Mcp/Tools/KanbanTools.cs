@@ -2,14 +2,28 @@ using System.ComponentModel;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KanbanBoard.Mcp.Configuration;
+using KanbanBoard.Mcp.Services;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.Extensions.Options;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace KanbanBoard.Mcp.Tools;
 
 [McpServerToolType]
-public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
+public sealed class KanbanTools(
+    IHttpClientFactory httpClientFactory,
+    IHttpContextAccessor httpContextAccessor,
+    IOptions<McpAuthenticationOptions> authenticationOptions)
 {
+    public const string MissingTokenErrorMessage =
+        "This request has no authenticated personal access token, so write tools are unavailable.";
+
+    public const string ReadOnlyScopeErrorMessage =
+        "This personal access token has the 'read' scope and cannot create, update, move, comment on, or delete data. " +
+        "Create a token with the 'full' scope in Kanban settings to use write tools.";
+
     public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
@@ -32,6 +46,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Short uppercase key")] string key,
         [Description("Optional description")] string? description = null)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync("/api/projects", new CreateProjectRequest(name, key, description, false));
         response.EnsureSuccessStatusCode();
@@ -89,6 +104,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Optional description")] string? description = null,
         [Description("Whether the epic starts archived")] bool isArchived = false)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync($"/api/projects/{projectId}/epics", new CreateEpicRequest(name, description, isArchived));
         response.EnsureSuccessStatusCode();
@@ -102,6 +118,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Optional description")] string? description = null,
         [Description("Whether the epic is archived")] bool isArchived = false)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PutAsJsonAsync($"/api/epics/{epicId}", new UpdateEpicRequest(name, description, isArchived));
         response.EnsureSuccessStatusCode();
@@ -112,6 +129,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
     public async Task<DeleteResultDto> DeleteProject(
         [Description("Project id")] Guid projectId)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/projects/{projectId}");
         response.EnsureSuccessStatusCode();
@@ -122,6 +140,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
     public async Task<DeleteResultDto> DeleteEpic(
         [Description("Epic id")] Guid epicId)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/epics/{epicId}");
         response.EnsureSuccessStatusCode();
@@ -150,6 +169,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Document title")] string title,
         [Description("Document body")] string body)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync($"/api/epics/{epicId}/documents", new CreateEpicDocumentRequest(title, body));
         response.EnsureSuccessStatusCode();
@@ -162,6 +182,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Document title")] string title,
         [Description("Document body")] string body)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PutAsJsonAsync($"/api/epic-documents/{documentId}", new UpdateEpicDocumentRequest(title, body));
         response.EnsureSuccessStatusCode();
@@ -277,6 +298,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Comment author. For LLM-authored comments, use your assistant name like codex or claude.")] string author,
         [Description("Comment text")] string body)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync($"/api/items/{itemId}/comments", new CreateWorkItemCommentRequest(author, body));
         response.EnsureSuccessStatusCode();
@@ -302,6 +324,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Optional estimate")] int? estimate = null,
         [Description("Optional comma-separated labels")] string? labels = null)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             projectId,
@@ -329,6 +352,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Optional estimate")] int? estimate = null,
         [Description("Optional comma-separated labels")] string? labels = null)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var epic = await GetRequiredEpicAsync(client, epicId);
 
@@ -353,6 +377,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Target status")] WorkItemStatus status,
         [Description("Zero-based order in the target column")] int order = 0)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.PostAsJsonAsync($"/api/items/{itemId}/move", new MoveWorkItemRequest(status, order));
         response.EnsureSuccessStatusCode();
@@ -371,6 +396,7 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         [Description("Optional estimate")] int? estimate = null,
         [Description("Optional comma-separated labels")] string? labels = null)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var board = await FindBoardForItemAsync(client, itemId);
         var item = board?.Items.FirstOrDefault(candidate => candidate.Id == itemId);
@@ -400,10 +426,33 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
     public async Task<DeleteResultDto> DeleteWorkItem(
         [Description("Work item id")] Guid itemId)
     {
+        EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var response = await client.DeleteAsync($"/api/items/{itemId}");
         response.EnsureSuccessStatusCode();
         return new DeleteResultDto(itemId, "work_item", true);
+    }
+
+    // Write tools call this before touching the API. Tools that do not call it are read tools
+    // and stay available to 'read' scope tokens without any change.
+    private void EnsureWriteScope()
+    {
+        var token = httpContextAccessor.HttpContext?.Items[typeof(McpAuthenticatedToken)] as McpAuthenticatedToken;
+        if (token is null)
+        {
+            // PAT auth is required but no token reached this request: fail closed rather than allow writes.
+            if (authenticationOptions.Value.RequirePersonalAccessToken)
+            {
+                throw new McpException(MissingTokenErrorMessage);
+            }
+
+            return;
+        }
+
+        if (!token.AllowsWrites)
+        {
+            throw new McpException(ReadOnlyScopeErrorMessage);
+        }
     }
 
     private async Task<EpicDto> GetRequiredEpicAsync(HttpClient client, Guid epicId)

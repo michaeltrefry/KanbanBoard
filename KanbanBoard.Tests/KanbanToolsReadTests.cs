@@ -2,8 +2,11 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KanbanBoard.Mcp.Configuration;
 using KanbanBoard.Mcp.Tools;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 
 namespace KanbanBoard.Tests;
@@ -38,7 +41,7 @@ public sealed class KanbanToolsReadTests
             now,
             now);
         var handler = new StubHandler(_ => JsonResponse(item));
-        var tools = new KanbanTools(new StubHttpClientFactory(handler));
+        var tools = CreateTools(handler);
 
         var result = await tools.GetWorkItem(itemId);
 
@@ -55,7 +58,7 @@ public sealed class KanbanToolsReadTests
     {
         var itemId = Guid.NewGuid();
         var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
-        var tools = new KanbanTools(new StubHttpClientFactory(handler));
+        var tools = CreateTools(handler);
 
         var exception = await Assert.ThrowsAsync<McpException>(() => tools.GetWorkItem(itemId));
 
@@ -69,7 +72,7 @@ public sealed class KanbanToolsReadTests
         var projectId = Guid.NewGuid();
         var hit = new WorkItemSearchResultDto(Guid.NewGuid(), projectId, "foo bar", WorkItemType.Story, WorkItemStatus.Ready);
         var handler = new StubHandler(_ => JsonResponse(new[] { hit }));
-        var tools = new KanbanTools(new StubHttpClientFactory(handler));
+        var tools = CreateTools(handler);
 
         var results = await tools.SearchWorkItems("foo & bar", projectId, 10);
 
@@ -86,7 +89,7 @@ public sealed class KanbanToolsReadTests
     public async Task SearchWorkItems_omits_optional_parameters()
     {
         var handler = new StubHandler(_ => JsonResponse(Array.Empty<WorkItemSearchResultDto>()));
-        var tools = new KanbanTools(new StubHttpClientFactory(handler));
+        var tools = CreateTools(handler);
 
         var results = await tools.SearchWorkItems("foo");
 
@@ -100,11 +103,17 @@ public sealed class KanbanToolsReadTests
     public async Task SearchWorkItems_rejects_blank_query_without_calling_api(string query)
     {
         var handler = new StubHandler(_ => JsonResponse(Array.Empty<WorkItemSearchResultDto>()));
-        var tools = new KanbanTools(new StubHttpClientFactory(handler));
+        var tools = CreateTools(handler);
 
         await Assert.ThrowsAsync<McpException>(() => tools.SearchWorkItems(query));
         Assert.Empty(handler.Requests);
     }
+
+    private static KanbanTools CreateTools(HttpMessageHandler handler) =>
+        new(
+            new StubHttpClientFactory(handler),
+            new HttpContextAccessor(),
+            Options.Create(new McpAuthenticationOptions()));
 
     private static HttpResponseMessage JsonResponse<T>(T value) =>
         new(HttpStatusCode.OK) { Content = JsonContent.Create(value, options: JsonOptions) };
