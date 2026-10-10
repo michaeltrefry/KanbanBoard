@@ -356,5 +356,69 @@ jobs:
           docker network inspect trefry-network >/dev/null 2>&1 || docker network create trefry-network
           docker compose -f docker-compose.prod.yml pull
           docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+          # Readiness: both containers must stay running without restarting and
+          # the API must answer HTTP on its host-published port. The API runs
+          # migrations on startup and exits on failure, so a crash loop under
+          # `restart: unless-stopped` would otherwise go unnoticed.
+          services=(kanban-api kanban-mcp)
+          declare -A container_ids baseline_restarts
+          for service in "${services[@]}"; do
+            container_ids[${service}]="$(docker compose -f docker-compose.prod.yml ps -q "${service}")"
+            if [ -z "${container_ids[${service}]}" ]; then
+              echo "No container found for ${service}." >&2
+              docker compose -f docker-compose.prod.yml logs --tail=100 kanban-api || true
+              exit 1
+            fi
+            baseline_restarts[${service}]="$(docker inspect -f '{{.RestartCount}}' "${container_ids[${service}]}")"
+          done
+
+          check_containers() {
+            local service state restarts
+            for service in "${services[@]}"; do
+              read -r state restarts < <(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "${container_ids[${service}]}")
+              if [ "${restarts}" != "${baseline_restarts[${service}]}" ]; then
+                echo "${service} restarted during readiness check (restart count ${baseline_restarts[${service}]} -> ${restarts})." >&2
+                return 2
+              fi
+              if [ "${state}" != "running" ]; then
+                echo "${service} is ${state}."
+                return 1
+              fi
+            done
+          }
+
+          api_url="http://127.0.0.1:${KANBAN_API_HTTP_PORT:-8080}/"
+          deadline=$((SECONDS + 120))
+          ready=false
+          while [ "${SECONDS}" -lt "${deadline}" ]; do
+            rc=0
+            check_containers || rc=$?
+            if [ "${rc}" -eq 2 ]; then
+              break
+            fi
+            if [ "${rc}" -eq 0 ]; then
+              http_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${api_url}" || true)"
+              if [[ "${http_code}" =~ ^[234][0-9][0-9]$ ]]; then
+                # Confirm nothing restarted while the API was coming up.
+                sleep 5
+                if check_containers; then
+                  echo "Stack is ready (API answered HTTP ${http_code})."
+                  ready=true
+                fi
+                break
+              fi
+              echo "API not answering yet (HTTP ${http_code:-none})."
+            fi
+            sleep 5
+          done
+
+          if [ "${ready}" != "true" ]; then
+            echo "Production stack failed readiness check." >&2
+            docker compose -f docker-compose.prod.yml ps || true
+            docker compose -f docker-compose.prod.yml logs --tail=100 kanban-api || true
+            exit 1
+          fi
+
           docker image prune -f
           REMOTE
