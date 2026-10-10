@@ -43,7 +43,7 @@ builder.Services.AddDbContext<KanbanDbContext>(options => options
     .UseMySQL(
         connectionString!,
         mySqlOptions => mySqlOptions.CommandTimeout(databaseOptions.CommandTimeoutSeconds))
-    .AddInterceptors(new MariaDbMigrationLockInterceptor()));
+    .AddInterceptors(new MariaDbMigrationLockInterceptor(databaseOptions.MigrationLockTimeoutSeconds)));
 builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(KanbanAuthOptions.SectionName));
 builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
 builder.Services.Configure<InternalApiOptions>(builder.Configuration.GetSection(InternalApiOptions.SectionName));

@@ -33,7 +33,20 @@ public static class StartupMigrator
         }
 
         logger.LogInformation("Applying {Count} database migration(s): {Migrations}", pending.Count, string.Join(", ", pending));
-        await dbContext.Database.MigrateAsync(cancellationToken);
+        // The normal command timeout is shorter than the migration lock wait. If the client timed out first,
+        // the server would keep the lock and the provider would hang instead of throwing, so migrate under a
+        // longer timeout and restore the normal one afterwards.
+        var previousTimeout = dbContext.Database.GetCommandTimeout();
+        dbContext.Database.SetCommandTimeout(options.MigrationCommandTimeoutSeconds);
+        try
+        {
+            await dbContext.Database.MigrateAsync(cancellationToken);
+        }
+        finally
+        {
+            dbContext.Database.SetCommandTimeout(previousTimeout);
+        }
+
         logger.LogInformation("Applied database migration(s): {Migrations}", string.Join(", ", pending));
         return pending;
     }

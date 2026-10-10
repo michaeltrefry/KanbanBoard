@@ -14,6 +14,7 @@ services:
       ConnectionStrings__Kanban: ${ConnectionStrings__Kanban:?ConnectionStrings__Kanban is required}
       Database__CommandTimeoutSeconds: ${Database__CommandTimeoutSeconds:-30}
       Database__MigrateOnStartup: ${Database__MigrateOnStartup:-true}
+      Database__MigrationCommandTimeoutSeconds: ${Database__MigrationCommandTimeoutSeconds:-660}
       Auth__Enabled: ${Auth__Enabled:-false}
       Auth__Authority: ${Auth__Authority:-}
       Auth__ClientId: ${Auth__ClientId:-}

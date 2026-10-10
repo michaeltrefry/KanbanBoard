@@ -227,6 +227,12 @@ jobs:
             printf '%q\n' "${2:-}" >> deploy/.env.release
           }
 
+          migrate_on_startup="${KANBAN_DB_MIGRATE_ON_STARTUP:-true}"
+          if [[ "${migrate_on_startup}" != "true" && "${migrate_on_startup}" != "false" ]]; then
+            echo "::error::KANBAN_DB_MIGRATE_ON_STARTUP must be 'true' or 'false' (or unset for true); got '${migrate_on_startup}'."
+            exit 1
+          fi
+
           : > deploy/.env.release
           write_env KANBAN_API_IMAGE "${KANBAN_API_IMAGE}"
           write_env KANBAN_MCP_IMAGE "${KANBAN_MCP_IMAGE}"
@@ -234,7 +240,7 @@ jobs:
           write_env KANBAN_MCP_HTTP_PORT 3000
           write_env ConnectionStrings__Kanban "${KANBAN_MARIADB_CONNECTION}"
           write_env Database__CommandTimeoutSeconds 30
-          write_env Database__MigrateOnStartup "${KANBAN_DB_MIGRATE_ON_STARTUP:-true}"
+          write_env Database__MigrateOnStartup "${migrate_on_startup}"
           write_env Auth__Enabled true
           write_env Auth__Authority "${KANBAN_AUTH_AUTHORITY}"
           write_env Auth__ClientId kanban-board
