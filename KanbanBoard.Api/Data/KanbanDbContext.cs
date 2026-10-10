@@ -1,3 +1,4 @@
+using KanbanBoard.Shared.Contracts;
 using KanbanBoard.Api.Models;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
@@ -117,6 +118,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(token => token.TokenPrefix).HasMaxLength(32).IsRequired();
             entity.Property(token => token.TokenHash).HasMaxLength(128).IsRequired();
             entity.Property(token => token.EncryptedSecret).HasMaxLength(1024).IsRequired();
+            entity.Property(token => token.Scope).HasMaxLength(16).IsRequired().HasDefaultValue(PersonalAccessTokenScopes.Full);
             entity.Property(token => token.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(token => token.ExpiresAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(token => token.LastUsedAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");

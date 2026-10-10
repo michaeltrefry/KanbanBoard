@@ -979,6 +979,10 @@ function tokenState(token) {
   return token.isActive ? "Active" : "Inactive";
 }
 
+function tokenScopeLabel(token) {
+  return token.scope === "read" ? "Read only" : "Full access";
+}
+
 function formatTokenDate(iso) {
   return iso ? formatDateTime(iso) : "Never";
 }
@@ -991,6 +995,7 @@ function UserSettingsView({ show }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [expiresAtLocal, setExpiresAtLocal] = useState("");
+  const [scope, setScope] = useState("full");
   const [createdToken, setCreatedToken] = useState(null);
   const [copyState, setCopyState] = useState("");
 
@@ -1024,11 +1029,12 @@ function UserSettingsView({ show }) {
       const expiresAtUtc = expiresAtLocal
         ? new Date(expiresAtLocal).toISOString()
         : null;
-      const created = await api.createPersonalAccessToken({ name: trimmed, expiresAtUtc });
+      const created = await api.createPersonalAccessToken({ name: trimmed, expiresAtUtc, scope });
       setCreatedToken(created);
       setTokens(cur => [created.token, ...cur.filter(token => token.id !== created.token.id)]);
       setName("");
       setExpiresAtLocal("");
+      setScope("full");
       setCopyState("");
       show("Personal access token created", "success");
     } catch (e) {
@@ -1134,6 +1140,13 @@ function UserSettingsView({ show }) {
               onChange={e => setExpiresAtLocal(e.target.value)}
             />
           </div>
+          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+            <label htmlFor="pat-scope">Scope</label>
+            <select id="pat-scope" value={scope} onChange={e => setScope(e.target.value)}>
+              <option value="full">Full access (read and write)</option>
+              <option value="read">Read only</option>
+            </select>
+          </div>
           <div className="settings-actions">
             <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
               {creating ? "Creating..." : "Create token"}
@@ -1175,6 +1188,7 @@ function UserSettingsView({ show }) {
                       <div className="token-name-row">
                         <span className="token-name">{token.name}</span>
                         <span className={clsx("token-state", state.toLowerCase())}>{state}</span>
+                        <span className="token-state">{tokenScopeLabel(token)}</span>
                       </div>
                       <div className="token-prefix">{token.tokenPrefix}</div>
                     </div>

@@ -14,7 +14,11 @@ public sealed record McpAuthenticatedToken(
     Guid PersonalAccessTokenId,
     string? DisplayName,
     string? Email,
-    DateTimeOffset? ExpiresAtUtc);
+    DateTimeOffset? ExpiresAtUtc,
+    string Scope = PersonalAccessTokenScopes.Full)
+{
+    public bool AllowsWrites => PersonalAccessTokenScopes.AllowsWrites(Scope);
+}
 
 public interface IMcpPersonalAccessTokenValidator
 {
@@ -65,7 +69,8 @@ public sealed class McpPersonalAccessTokenValidator(
             validatedToken.PersonalAccessTokenId,
             validatedToken.DisplayName,
             validatedToken.Email,
-            validatedToken.ExpiresAtUtc);
+            validatedToken.ExpiresAtUtc,
+            string.IsNullOrEmpty(validatedToken.Scope) ? PersonalAccessTokenScopes.Full : validatedToken.Scope);
 
         var cacheDuration = TimeSpan.FromSeconds(mcpAuthenticationOptions.ValidationCacheSeconds);
         if (validatedToken.ExpiresAtUtc is { } expiresAtUtc)

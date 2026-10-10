@@ -165,6 +165,13 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime?>("RevokedAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("Scope")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)")
+                        .HasDefaultValue("full");
+
                     b.Property<string>("TokenHash")
                         .IsRequired()
                         .HasMaxLength(128)

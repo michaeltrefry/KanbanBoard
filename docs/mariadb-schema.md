@@ -18,11 +18,15 @@ Restrict the host portion of the user if your MariaDB topology allows it.
 
 ## Apply Schema
 
-Run the checked-in schema script:
+Run the checked-in schema scripts in order:
 
 ```bash
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/001_initial_mariadb_schema.sql
+mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/002_personal_access_token_scope.sql
 ```
+
+Existing databases that already have `001` applied only need `002`. It adds the
+`PersonalAccessTokens.Scope` column (`read` or `full`); existing tokens default to `full`.
 
 The script creates the EF migrations history table and the current Kanban schema:
 

@@ -36,6 +36,19 @@ public static class KanbanInternalApiExtensions
                 }
 
                 context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, KanbanInternalAuth.AuthenticationType));
+
+                if (IsWriteMethod(context.Request.Method) &&
+                    Guid.TryParse(tokenId, out var personalAccessTokenId))
+                {
+                    var personalAccessTokenService = context.RequestServices.GetRequiredService<IPersonalAccessTokenService>();
+                    var scope = await personalAccessTokenService.GetScopeAsync(personalAccessTokenId, context.RequestAborted);
+                    if (scope is not null && !PersonalAccessTokenScopes.AllowsWrites(scope))
+                    {
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        await context.Response.WriteAsJsonAsync(new { message = ReadOnlyScopeMessage });
+                        return;
+                    }
+                }
             }
 
             await next(context);
@@ -76,13 +89,23 @@ public static class KanbanInternalApiExtensions
                     result.Token.Id,
                     result.User.DisplayName,
                     result.User.Email,
-                    result.Token.ExpiresAtUtc));
+                    result.Token.ExpiresAtUtc,
+                    result.Token.Scope));
         })
         .WithName("ValidateInternalPersonalAccessToken")
         .WithTags("Internal");
 
         return endpoints;
     }
+
+    public const string ReadOnlyScopeMessage =
+        "This personal access token has the 'read' scope and cannot create, update, or delete data.";
+
+    private static bool IsWriteMethod(string method) =>
+        HttpMethods.IsPost(method) ||
+        HttpMethods.IsPut(method) ||
+        HttpMethods.IsPatch(method) ||
+        HttpMethods.IsDelete(method);
 
     public static bool IsInternalApiRequest(HttpContext context) =>
         context.Items[KanbanInternalAuth.InternalRequestItemKey] is true;

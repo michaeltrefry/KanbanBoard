@@ -3,6 +3,7 @@ using System.Text;
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
+using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -14,6 +15,7 @@ public interface IPersonalAccessTokenService
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
+        string scope,
         CancellationToken cancellationToken);
 
     Task<PersonalAccessTokenValidationResult?> ValidateAsync(
@@ -24,6 +26,9 @@ public interface IPersonalAccessTokenService
         Guid appUserId,
         Guid tokenId,
         CancellationToken cancellationToken);
+
+    /// <summary>Returns the stored scope of a token, or null when no such token exists.</summary>
+    Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken);
 }
 
 public sealed record CreatedPersonalAccessToken(
@@ -48,9 +53,17 @@ public sealed class PersonalAccessTokenService(
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
+        string scope,
         CancellationToken cancellationToken)
     {
         EnsureEnabled();
+
+        if (!PersonalAccessTokenScopes.IsValid(scope))
+        {
+            throw new ArgumentException(
+                $"PAT scope must be '{PersonalAccessTokenScopes.Read}' or '{PersonalAccessTokenScopes.Full}'.",
+                nameof(scope));
+        }
 
         var normalizedName = name.Trim();
         if (string.IsNullOrWhiteSpace(normalizedName))
@@ -70,6 +83,7 @@ public sealed class PersonalAccessTokenService(
             TokenPrefix = tokenPrefix,
             TokenHash = ComputeLookupHash(plaintextToken),
             EncryptedSecret = EncryptSecret(secret),
+            Scope = scope,
             CreatedAtUtc = now,
             ExpiresAtUtc = expiresAtUtc
         };
@@ -133,6 +147,15 @@ public sealed class PersonalAccessTokenService(
         token.RevokedAtUtc ??= DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
         return true;
+    }
+
+    public async Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken)
+    {
+        return await dbContext.PersonalAccessTokens
+            .AsNoTracking()
+            .Where(candidate => candidate.Id == tokenId)
+            .Select(candidate => candidate.Scope)
+            .FirstOrDefaultAsync(cancellationToken);
     }
 
     private void EnsureEnabled()

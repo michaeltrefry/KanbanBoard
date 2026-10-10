@@ -1,6 +1,7 @@
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
+using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -15,7 +16,7 @@ public sealed class PersonalAccessTokenServiceTests
         var user = await AddUserAsync(dbContext);
         var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
 
-        var created = await service.CreateAsync(user, "  Codex MCP  ", null, CancellationToken.None);
+        var created = await service.CreateAsync(user, "  Codex MCP  ", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
 
         Assert.StartsWith("kbp_", created.PlaintextToken, StringComparison.Ordinal);
         Assert.Equal("Codex MCP", created.Token.Name);
@@ -32,7 +33,7 @@ public sealed class PersonalAccessTokenServiceTests
         await using var dbContext = TestDb.CreateContext();
         var user = await AddUserAsync(dbContext);
         var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
-        var created = await service.CreateAsync(user, "MCP", null, CancellationToken.None);
+        var created = await service.CreateAsync(user, "MCP", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
 
         var result = await service.ValidateAsync(created.PlaintextToken, CancellationToken.None);
 
@@ -48,14 +49,14 @@ public sealed class PersonalAccessTokenServiceTests
         await using var dbContext = TestDb.CreateContext();
         var user = await AddUserAsync(dbContext);
         var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
-        var created = await service.CreateAsync(user, "MCP", null, CancellationToken.None);
+        var created = await service.CreateAsync(user, "MCP", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
 
         Assert.Null(await service.ValidateAsync("not-a-token", CancellationToken.None));
 
         Assert.True(await service.RevokeAsync(user.Id, created.Token.Id, CancellationToken.None));
         Assert.Null(await service.ValidateAsync(created.PlaintextToken, CancellationToken.None));
 
-        var expiring = await service.CreateAsync(user, "Expired", DateTimeOffset.UtcNow.AddMinutes(5), CancellationToken.None);
+        var expiring = await service.CreateAsync(user, "Expired", DateTimeOffset.UtcNow.AddMinutes(5), PersonalAccessTokenScopes.Full, CancellationToken.None);
         expiring.Token.ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1);
         await dbContext.SaveChangesAsync();
 
@@ -69,7 +70,7 @@ public sealed class PersonalAccessTokenServiceTests
         var firstUser = await AddUserAsync(dbContext, subject: "user-1");
         var secondUser = await AddUserAsync(dbContext, subject: "user-2");
         var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
-        var created = await service.CreateAsync(firstUser, "MCP", null, CancellationToken.None);
+        var created = await service.CreateAsync(firstUser, "MCP", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
 
         Assert.False(await service.RevokeAsync(secondUser.Id, created.Token.Id, CancellationToken.None));
         Assert.Null(created.Token.RevokedAtUtc);

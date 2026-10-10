@@ -119,7 +119,7 @@ Do not commit local `.env` files. They are ignored and should stay on your machi
 
 The authenticated web login and browser API use cookie sessions. MCP clients use Personal Access Tokens from the user settings page and send them as bearer tokens to `/mcp`. The MCP server validates PATs through the API's internal validation endpoint, caches successful validation briefly, and forwards tool calls with the internal shared secret rather than exposing a public API bypass.
 
-Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
+Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql) and the later numbered scripts in `deploy/sql` (see [mariadb-schema.md](mariadb-schema.md)), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
 
 Open inbound ports:
 

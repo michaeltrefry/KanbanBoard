@@ -16,4 +16,20 @@ public sealed record ValidatedPersonalAccessTokenDto(
     Guid PersonalAccessTokenId,
     string? DisplayName,
     string? Email,
-    DateTimeOffset? ExpiresAtUtc);
+    DateTimeOffset? ExpiresAtUtc,
+    string Scope = PersonalAccessTokenScopes.Full);
+
+public static class PersonalAccessTokenScopes
+{
+    public const string Read = "read";
+    public const string Full = "full";
+
+    public static bool IsValid(string? scope) =>
+        string.Equals(scope, Read, StringComparison.Ordinal) ||
+        string.Equals(scope, Full, StringComparison.Ordinal);
+
+    // A missing scope means the token or payload predates scopes and keeps full access.
+    // Any other value than "full" (including "read" and unknown values) is denied writes.
+    public static bool AllowsWrites(string? scope) =>
+        string.IsNullOrEmpty(scope) || string.Equals(scope, Full, StringComparison.Ordinal);
+}
