@@ -309,6 +309,17 @@ app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? typ
 })
 .WithName("ListWorkItems");
 
+app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limit, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+{
+    if (!WorkItemSearch.TryNormalizeTerms(query, out _))
+    {
+        return Results.BadRequest(new { message = "Field 'query' is required." });
+    }
+
+    return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
+})
+.WithName("SearchWorkItems");
+
 app.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
     var item = await dbContext.WorkItems

@@ -78,6 +78,8 @@ The MCP service exposes tools for:
 - Deleting epics
 - Listing, creating, updating, and retrieving epic documents
 - Fetching issue items
+- Fetching a single work item with its description and comments
+- Searching work items by words in titles and descriptions
 - Creating work items
 - Updating work items
 - Moving work items
@@ -91,6 +93,8 @@ The MCP service exposes tools for:
 `GetBoard` accepts an optional `includeArchivedEpics` flag so callers can include items linked to archived epics.
 Epics can be managed through project-scoped list/create endpoints plus retrieve/update/delete endpoints for individual epics.
 Epic documents can be managed through epic-scoped list/create endpoints plus retrieve/update endpoints for individual documents.
+`GetWorkItem` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
+`SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
 
 ### Available tool names
 
@@ -107,8 +111,15 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 - `CreateEpicDocument`
 - `UpdateEpicDocument`
 - `DeleteProject`
+- `ListWorkItems`
+- `ListEpicWorkItems`
 - `GetIssues`
+- `GetWorkItem`
+- `SearchWorkItems`
+- `AddWorkItemComment`
+- `AddIssueComment`
 - `CreateWorkItem`
+- `CreateEpicWorkItem`
 - `UpdateWorkItem`
 - `MoveWorkItem`
 - `DeleteWorkItem`

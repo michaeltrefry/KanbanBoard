@@ -89,6 +89,13 @@ public sealed record WorkItemDto(
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc);
 
+public sealed record WorkItemSearchResultDto(
+    Guid Id,
+    Guid ProjectId,
+    string Title,
+    WorkItemType Type,
+    WorkItemStatus Status);
+
 public sealed record CurrentUserDto(
     Guid Id,
     string Issuer,
