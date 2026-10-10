@@ -219,6 +219,7 @@ jobs:
           KANBAN_PAT_ENCRYPTION_KEY: ${{ secrets.KANBAN_PAT_ENCRYPTION_KEY }}
           KANBAN_INTERNAL_API_SHARED_SECRET: ${{ secrets.KANBAN_INTERNAL_API_SHARED_SECRET }}
           KANBAN_MARIADB_CONNECTION: ${{ secrets.KANBAN_MARIADB_CONNECTION }}
+          KANBAN_DB_MIGRATE_ON_STARTUP: ${{ vars.KANBAN_DB_MIGRATE_ON_STARTUP }}
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME || secrets.GHCR_USERNAME }}
         run: |
           write_env() {
@@ -233,6 +234,7 @@ jobs:
           write_env KANBAN_MCP_HTTP_PORT 3000
           write_env ConnectionStrings__Kanban "${KANBAN_MARIADB_CONNECTION}"
           write_env Database__CommandTimeoutSeconds 30
+          write_env Database__MigrateOnStartup "${KANBAN_DB_MIGRATE_ON_STARTUP:-true}"
           write_env Auth__Enabled true
           write_env Auth__Authority "${KANBAN_AUTH_AUTHORITY}"
           write_env Auth__ClientId kanban-board

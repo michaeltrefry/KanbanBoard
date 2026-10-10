@@ -6,6 +6,9 @@ public sealed class DatabaseOptions
 
     public int CommandTimeoutSeconds { get; set; } = 30;
 
+    // Apply pending EF Core migrations when the API starts. Turn off to manage the schema by hand with deploy/sql.
+    public bool MigrateOnStartup { get; set; } = true;
+
     public IReadOnlyList<string> Validate(string? connectionString)
     {
         var errors = new List<string>();

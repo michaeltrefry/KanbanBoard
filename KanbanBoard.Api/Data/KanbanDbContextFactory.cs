@@ -13,6 +13,7 @@ public sealed class KanbanDbContextFactory : IDesignTimeDbContextFactory<KanbanD
 
         var options = new DbContextOptionsBuilder<KanbanDbContext>()
             .UseMySQL(connectionString)
+            .AddInterceptors(new MariaDbMigrationLockInterceptor())
             .Options;
 
         return new KanbanDbContext(options);

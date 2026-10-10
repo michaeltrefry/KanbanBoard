@@ -13,6 +13,7 @@ services:
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__Kanban: ${ConnectionStrings__Kanban:?ConnectionStrings__Kanban is required}
       Database__CommandTimeoutSeconds: ${Database__CommandTimeoutSeconds:-30}
+      Database__MigrateOnStartup: ${Database__MigrateOnStartup:-true}
       Auth__Enabled: ${Auth__Enabled:-false}
       Auth__Authority: ${Auth__Authority:-}
       Auth__ClientId: ${Auth__ClientId:-}
