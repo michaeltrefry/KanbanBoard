@@ -36,6 +36,9 @@ jobs:
       - name: Build
         run: dotnet build KanbanBoard.slnx --configuration Release --no-restore
 
+      - name: Test
+        run: dotnet test KanbanBoard.slnx --configuration Release --no-build
+
       - name: Build API image
         run: docker build --file KanbanBoard.Api/Dockerfile --tag kanbanboard-api:ci .
 

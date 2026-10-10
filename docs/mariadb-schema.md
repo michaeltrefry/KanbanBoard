@@ -27,6 +27,8 @@ mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/002_personal_access_tok
 
 Existing databases that already have `001` applied only need `002`. It adds the
 `PersonalAccessTokens.Scope` column (`read` or `full`); existing tokens default to `full`.
+Apply `002` to production before merging the code that reads `Scope` (see
+[deployment.md](deployment.md#schema-changes-before-deploy)). It is safe to re-run.
 
 The script creates the EF migrations history table and the current Kanban schema:
 

@@ -44,6 +44,34 @@ public sealed class PersonalAccessTokenServiceTests
     }
 
     [Fact]
+    public async Task ValidateAsync_accepts_every_minted_token_including_underscores_in_display_prefix()
+    {
+        await using var dbContext = TestDb.CreateContext();
+        var user = await AddUserAsync(dbContext);
+        var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
+
+        var successes = 0;
+        var prefixesWithUnderscore = 0;
+        for (var i = 0; i < 500; i++)
+        {
+            var created = await service.CreateAsync(user, $"token-{i}", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
+            if (created.Token.TokenPrefix.Contains('_'))
+            {
+                prefixesWithUnderscore++;
+            }
+
+            if ((await service.ValidateAsync(created.PlaintextToken, CancellationToken.None))?.Token.Id == created.Token.Id)
+            {
+                successes++;
+            }
+        }
+
+        Assert.Equal(500, successes);
+        // ~16% of 8-byte base64url prefixes contain '_'; make sure the loop actually exercised that case.
+        Assert.True(prefixesWithUnderscore > 0);
+    }
+
+    [Fact]
     public async Task ValidateAsync_rejects_malformed_revoked_and_expired_tokens()
     {
         await using var dbContext = TestDb.CreateContext();

@@ -86,7 +86,8 @@ public sealed class KanbanToolsScopeTests
     public async Task Write_tools_with_full_token_or_without_pat_reach_api(string? scope)
     {
         var api = new FakeApi();
-        var tools = CreateTools(api, scope);
+        // Without a token, writes are only allowed when PAT authentication is not required.
+        var tools = CreateTools(api, scope, requirePersonalAccessToken: scope is not null);
 
         await tools.CreateWorkItem(Guid.NewGuid(), "Title", WorkItemType.Story);
         await tools.MoveWorkItem(Guid.NewGuid(), WorkItemStatus.InProgress);
@@ -96,6 +97,19 @@ public sealed class KanbanToolsScopeTests
         Assert.Equal(
             [HttpMethod.Post, HttpMethod.Post, HttpMethod.Delete, HttpMethod.Post],
             api.Requests.Select(request => request.Method).ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(WriteToolNames))]
+    public async Task Write_tool_without_token_when_pat_required_fails_closed_without_calling_api(string toolName)
+    {
+        var api = new FakeApi();
+        var tools = CreateTools(api, scope: null, requirePersonalAccessToken: true);
+
+        var exception = await Assert.ThrowsAsync<McpException>(() => InvokeAsync(tools, toolName));
+
+        Assert.Equal(KanbanTools.MissingTokenErrorMessage, exception.Message);
+        Assert.Empty(api.Requests);
     }
 
     [Fact]
@@ -166,7 +180,7 @@ public sealed class KanbanToolsScopeTests
         return null;
     }
 
-    private static KanbanTools CreateTools(FakeApi api, string? scope)
+    private static KanbanTools CreateTools(FakeApi api, string? scope, bool requirePersonalAccessToken = true)
     {
         var httpContext = new DefaultHttpContext();
         if (scope is not null)
@@ -184,7 +198,8 @@ public sealed class KanbanToolsScopeTests
 
         return new KanbanTools(
             provider.GetRequiredService<IHttpClientFactory>(),
-            new HttpContextAccessor { HttpContext = httpContext });
+            new HttpContextAccessor { HttpContext = httpContext },
+            Options.Create(new McpAuthenticationOptions { RequirePersonalAccessToken = requirePersonalAccessToken }));
     }
 
     private static ServiceProvider CreateValidatorServices(Func<HttpRequestMessage, HttpResponseMessage> respond)

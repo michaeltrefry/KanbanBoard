@@ -121,6 +121,20 @@ The authenticated web login and browser API use cookie sessions. MCP clients use
 
 Before switching production from SQLite to MariaDB, create the MariaDB schema with [../deploy/sql/001_initial_mariadb_schema.sql](../deploy/sql/001_initial_mariadb_schema.sql) and the later numbered scripts in `deploy/sql` (see [mariadb-schema.md](mariadb-schema.md)), then preserve existing data with the migration utility documented in [sqlite-to-mariadb.md](sqlite-to-mariadb.md). The utility can connect directly to MariaDB or open a temporary SSH tunnel when the database is only reachable from the host.
 
+### Schema changes before deploy
+
+Production does not migrate the schema automatically, and every push to `main` deploys. Any new numbered script in `deploy/sql` must be applied to production MariaDB **before** the change that needs it is merged to `main`; new code against an old schema fails at runtime.
+
+Pre-merge / pre-deploy for the PAT scope change (sc-25712): run `deploy/sql/002_personal_access_token_scope.sql` against production MariaDB, then verify:
+
+```bash
+mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/002_personal_access_token_scope.sql
+mariadb -h HOST -P 3306 -u kanban -p kanban -e "SELECT MigrationId FROM __EFMigrationsHistory"
+# must list 20261010161942_AddPersonalAccessTokenScope
+```
+
+Running `002` before the merge is safe: the old code ignores the new `Scope` column, and existing tokens default to `full`. The script is guarded (`ADD COLUMN IF NOT EXISTS`, `INSERT IGNORE`), so re-running it is harmless.
+
 Open inbound ports:
 
 - SSH: `22/tcp`, or your custom SSH port.

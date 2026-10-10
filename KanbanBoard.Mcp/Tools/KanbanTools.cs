@@ -2,16 +2,24 @@ using System.ComponentModel;
 using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using KanbanBoard.Mcp.Configuration;
 using KanbanBoard.Mcp.Services;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace KanbanBoard.Mcp.Tools;
 
 [McpServerToolType]
-public sealed class KanbanTools(IHttpClientFactory httpClientFactory, IHttpContextAccessor httpContextAccessor)
+public sealed class KanbanTools(
+    IHttpClientFactory httpClientFactory,
+    IHttpContextAccessor httpContextAccessor,
+    IOptions<McpAuthenticationOptions> authenticationOptions)
 {
+    public const string MissingTokenErrorMessage =
+        "This request has no authenticated personal access token, so write tools are unavailable.";
+
     public const string ReadOnlyScopeErrorMessage =
         "This personal access token has the 'read' scope and cannot create, update, move, comment on, or delete data. " +
         "Create a token with the 'full' scope in Kanban settings to use write tools.";
@@ -429,7 +437,19 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory, IHttpConte
     // and stay available to 'read' scope tokens without any change.
     private void EnsureWriteScope()
     {
-        if (httpContextAccessor.HttpContext?.Items[typeof(McpAuthenticatedToken)] is McpAuthenticatedToken { AllowsWrites: false })
+        var token = httpContextAccessor.HttpContext?.Items[typeof(McpAuthenticatedToken)] as McpAuthenticatedToken;
+        if (token is null)
+        {
+            // PAT auth is required but no token reached this request: fail closed rather than allow writes.
+            if (authenticationOptions.Value.RequirePersonalAccessToken)
+            {
+                throw new McpException(MissingTokenErrorMessage);
+            }
+
+            return;
+        }
+
+        if (!token.AllowsWrites)
         {
             throw new McpException(ReadOnlyScopeErrorMessage);
         }

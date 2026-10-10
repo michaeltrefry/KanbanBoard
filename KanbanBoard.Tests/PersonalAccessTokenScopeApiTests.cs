@@ -77,7 +77,9 @@ public sealed class PersonalAccessTokenScopeApiTests
         Assert.Contains("ADD `Scope` varchar(16) NOT NULL DEFAULT 'full'", sql, StringComparison.Ordinal);
 
         var deployScript = File.ReadAllText(FindRepoFile("deploy/sql/002_personal_access_token_scope.sql"));
-        Assert.Contains("ADD `Scope` varchar(16) NOT NULL DEFAULT 'full'", deployScript, StringComparison.Ordinal);
+        Assert.Contains("ADD COLUMN IF NOT EXISTS `Scope` varchar(16) NOT NULL DEFAULT 'full'", deployScript, StringComparison.Ordinal);
+        // Re-running the script must be harmless: the history row is only inserted when missing.
+        Assert.Contains("INSERT IGNORE INTO `__EFMigrationsHistory`", deployScript, StringComparison.Ordinal);
         Assert.Contains(migration.GetType().GetCustomAttributes(typeof(MigrationAttribute), false)
             .Cast<MigrationAttribute>().Single().Id, deployScript, StringComparison.Ordinal);
     }
@@ -119,6 +121,24 @@ public sealed class PersonalAccessTokenScopeApiTests
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
         Assert.Contains("'read' scope", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        Assert.Equal(0, fixture.WriteHandlerCalls);
+    }
+
+    [Theory]
+    [InlineData("random-guid")]
+    [InlineData("not-a-guid")]
+    public async Task Internal_write_requests_for_unknown_token_id_are_refused(string tokenIdKind)
+    {
+        using var fixture = await ApiFixture.CreateAsync();
+        var request = fixture.InternalRequest(HttpMethod.Post, tokenId: null);
+        request.Headers.TryAddWithoutValidation(
+            KanbanInternalAuth.PersonalAccessTokenIdHeaderName,
+            tokenIdKind == "random-guid" ? Guid.NewGuid().ToString() : tokenIdKind);
+
+        var response = await fixture.Client.SendAsync(request);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Contains("does not exist", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
         Assert.Equal(0, fixture.WriteHandlerCalls);
     }
 
