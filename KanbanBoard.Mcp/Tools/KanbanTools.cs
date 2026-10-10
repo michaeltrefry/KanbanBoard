@@ -211,6 +211,50 @@ public sealed class KanbanTools(IHttpClientFactory httpClientFactory)
         return await client.GetFromJsonAsync<IReadOnlyList<WorkItemDto>>(path, JsonOptions) ?? [];
     }
 
+    [McpServerTool, Description("Fetch a single work item by id, including its description, status, and comments.")]
+    public async Task<WorkItemDto> GetWorkItem(
+        [Description("Work item id")] Guid itemId)
+    {
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.GetAsync($"/api/items/{itemId}");
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            throw new ModelContextProtocol.McpException($"Work item {itemId} was not found.");
+        }
+
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions)
+            ?? throw new ModelContextProtocol.McpException($"Work item {itemId} was not found.");
+    }
+
+    [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, titles, types, and statuses only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
+    public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(
+        [Description("Words to match in work item titles and descriptions")] string query,
+        [Description("Optional project id to limit the search to")] Guid? projectId = null,
+        [Description("Optional maximum number of results (default 25, max 100)")] int? limit = null)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            throw new ModelContextProtocol.McpException("Search query is required.");
+        }
+
+        var client = httpClientFactory.CreateClient("kanban-api");
+        var parameters = new List<string> { $"query={Uri.EscapeDataString(query)}" };
+        if (projectId is not null)
+        {
+            parameters.Add($"projectId={projectId}");
+        }
+
+        if (limit is not null)
+        {
+            parameters.Add($"limit={limit}");
+        }
+
+        return await client.GetFromJsonAsync<IReadOnlyList<WorkItemSearchResultDto>>(
+            $"/api/items/search?{string.Join('&', parameters)}",
+            JsonOptions) ?? [];
+    }
+
     [McpServerTool, Description("List work items that belong to a specific epic backlog.")]
     public Task<IReadOnlyList<WorkItemDto>> ListEpicWorkItems(
         [Description("Epic id")] Guid epicId,
