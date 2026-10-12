@@ -130,6 +130,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `conflict` | The entity is no longer in the state the call depends on; nothing was changed. |
 | `invalid_argument` | An argument is missing or out of range. |
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
+| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes); nothing was changed and the call can be retried. |
 
 Scope refusals from every write tool, unknown ids from `GetWorkItem`, and every refusal from the claim and dependency tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 

@@ -10,7 +10,9 @@ public enum WorkItemDependencyOutcome
     Succeeded,
     NotFound,
     // The edge would make an item block itself, directly or through other items.
-    Cycle
+    Cycle,
+    // Another caller held the dependency lock for the whole wait; nothing was read or written.
+    Busy
 }
 
 /// <summary>Blockers and dependents of a set of work items, keyed by work item id.</summary>
@@ -43,19 +45,21 @@ public static class WorkItemDependencies
         await dbContext.Database.OpenConnectionAsync(cancellationToken);
         try
         {
-            if (useNamedLock)
-            {
-                var acquired = await dbContext.Database
-                    .SqlQuery<long?>($"SELECT CAST(GET_LOCK({LockName}, {LockTimeoutSeconds}) AS SIGNED) AS `Value`")
-                    .ToListAsync(cancellationToken);
-                if (acquired.Single() != 1)
-                {
-                    throw new TimeoutException($"Could not acquire the '{LockName}' lock within {LockTimeoutSeconds} s.");
-                }
-            }
-
             try
             {
+                // Inside the try so that RELEASE_LOCK always follows: a request aborted after the server granted
+                // the lock but before the result was read must not return the pooled connection still holding it.
+                if (useNamedLock)
+                {
+                    var acquired = await dbContext.Database
+                        .SqlQuery<long?>($"SELECT CAST(GET_LOCK({LockName}, {LockTimeoutSeconds}) AS SIGNED) AS `Value`")
+                        .ToListAsync(cancellationToken);
+                    if (acquired.Single() != 1)
+                    {
+                        return WorkItemDependencyOutcome.Busy;
+                    }
+                }
+
                 await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
                 var outcome = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
                 if (outcome == WorkItemDependencyOutcome.Succeeded)
@@ -69,7 +73,8 @@ public static class WorkItemDependencies
             {
                 if (useNamedLock)
                 {
-                    // Not cancellable: the lock must go even when the request was aborted.
+                    // Not cancellable: the lock must go even when the request was aborted. Releasing a lock
+                    // this connection does not hold returns 0 or NULL and changes nothing.
                     await dbContext.Database
                         .SqlQuery<long?>($"SELECT CAST(RELEASE_LOCK({LockName}) AS SIGNED) AS `Value`")
                         .ToListAsync(CancellationToken.None);
@@ -143,9 +148,23 @@ public static class WorkItemDependencies
             return WorkItemDependencyOutcome.NotFound;
         }
 
-        await dbContext.WorkItemDependencies
-            .Where(dependency => dependency.BlockedItemId == blockedItemId && dependency.BlockerItemId == blockerItemId)
-            .ExecuteDeleteAsync(cancellationToken);
+        // A tracked delete, not ExecuteDelete: MySql.EntityFrameworkCore writes that as DELETE FROM ... AS `w`,
+        // which MariaDB rejects.
+        var edge = await dbContext.WorkItemDependencies.FindAsync([blockedItemId, blockerItemId], cancellationToken);
+        if (edge is not null)
+        {
+            dbContext.WorkItemDependencies.Remove(edge);
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+                // Another caller removed the edge first.
+                dbContext.ChangeTracker.Clear();
+            }
+        }
+
         return WorkItemDependencyOutcome.Succeeded;
     }
 

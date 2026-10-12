@@ -67,6 +67,7 @@ public sealed class KanbanToolsDependencyTests
     [Theory]
     [InlineData(HttpStatusCode.Conflict, """{"code":"cycle","message":"would form a cycle"}""", KanbanErrorCodes.Cycle)]
     [InlineData(HttpStatusCode.NotFound, """{"code":"not_found","message":"no such item"}""", KanbanErrorCodes.NotFound)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, """{"code":"busy","message":"Nothing was changed; try again."}""", KanbanErrorCodes.Busy)]
     public async Task Api_refusal_of_a_dependency_becomes_the_typed_error_envelope(HttpStatusCode status, string apiBody, string code)
     {
         await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(status, apiBody));
@@ -76,6 +77,18 @@ public sealed class KanbanToolsDependencyTests
 
         AssertError(added, code);
         AssertError(removed, code);
+    }
+
+    [Fact]
+    public async Task A_503_the_api_did_not_write_is_a_fault_without_a_code()
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(HttpStatusCode.ServiceUnavailable, "<html>proxy</html>"));
+
+        var result = await server.CallAsync("add_work_item_dependency", new() { ["id"] = ItemId, ["blocked_by_id"] = BlockerId });
+
+        Assert.True(result.IsError);
+        Assert.Null(result.StructuredContent);
+        Assert.DoesNotContain(KanbanErrorCodes.Busy, string.Concat(result.Content.OfType<TextContentBlock>().Select(block => block.Text)), StringComparison.Ordinal);
     }
 
     [Theory]

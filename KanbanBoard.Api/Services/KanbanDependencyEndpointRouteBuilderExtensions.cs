@@ -50,6 +50,12 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
                     : $"Work item {blockedByItemId} is already blocked, directly or through other items, by work item {itemId}, so the dependency would form a cycle. Nothing was changed.");
         }
 
+        if (outcome == WorkItemDependencyOutcome.Busy)
+        {
+            return Error(StatusCodes.Status503ServiceUnavailable, KanbanErrorCodes.Busy,
+                $"Other dependency changes were in progress for {WorkItemDependencies.LockTimeoutSeconds} s. Nothing was changed; try again.");
+        }
+
         var item = outcome == WorkItemDependencyOutcome.NotFound
             ? null
             : await dbContext.WorkItems

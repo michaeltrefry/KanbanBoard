@@ -183,6 +183,12 @@ public sealed class WorkItemDependencyApiTests
         Assert.Equal(new[] { b, other }.Order(), blockerDoneBacklogOnly);
         Assert.DoesNotContain(c, oneOfTwoDone);
         Assert.Contains(c, bothDone);
+
+        // Only Done unblocks: a Closed blocker still blocks. (Closed items are themselves left out of the default list.)
+        await SetStatusAsync(fixture, other, WorkItemStatus.Closed);
+        var oneClosed = await ListIdsAsync(fixture, "/api/items?unblockedOnly=true");
+        Assert.Equal(new[] { a, b }.Order(), oneClosed);
+        Assert.Contains(c, await ListIdsAsync(fixture, "/api/items"));
     }
 
     [Fact]
