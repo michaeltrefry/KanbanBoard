@@ -97,7 +97,26 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 Work item reads (`GetWorkItem`, `ListWorkItems`, `ListEpicWorkItems`, `GetIssues`, `GetBoard`) include the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are `null` when the item is unclaimed or its claim has expired.
 Work item reads also include `blockers` (the items this one is blocked by) and `dependents` (the items it blocks); each entry is `{id, title, status}` with the other item's current status, and both are `[]` when there are none.
 `ListWorkItems`, `ListEpicWorkItems` and `GetIssues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
+`ListWorkItems` also accepts the polling arguments described under [Polling work items](#polling-work-items).
 `SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
+
+### Polling work items
+
+`list_work_items` takes these optional arguments in addition to `projectId`, `epicId`, `type`, `status`, `includeArchivedEpics` and `unblocked_only`. A call without them returns what it always did: an array of every matching item in board order, with comments.
+
+| Argument | Meaning |
+| --- | --- |
+| `label` | Only items that carry this label. The whole label must match, ignoring case: `api` does not match an item labelled `rapid` or `api-v2`. |
+| `updated_since` | ISO 8601 timestamp (one without an offset is read as UTC). Only items whose `updatedAtUtc` is at or after it. |
+| `claim_state` | `unclaimed` (no live claim, which includes a claim that has expired), `claimed` (a live claim) or `expired` (a claim that expired and was neither released nor replaced). |
+| `limit` | Page size, 1 to 200. |
+| `cursor` | `next_cursor` of the previous page. Page size is 50 when `limit` is not passed. |
+| `include_comments` | `false` returns every item with `comments: []` and reads no comment. Default `true`. |
+
+- **Pages.** With `limit` or `cursor` the result is an object, `{"items": [...], "next_cursor": "..."}`, instead of an array. Pass `next_cursor` back unchanged as `cursor`, with the same filters, until a page comes without `next_cursor`. Pages are ordered oldest item first (creation time, then id), not in board order: that order never changes, so every matching item is returned exactly once even when items are moved, edited or added during the walk. An item that stops or starts matching the filters during a walk may or may not appear. The cursor is opaque; do not build or parse one.
+- **`updatedAtUtc` is the content timestamp.** It changes when the item's fields change (including a move to another column or position) and when a comment is added to it. It does not change when a sibling is moved or reordered around it, when it is claimed, renewed or released, when its claim expires, or when a dependency is added, removed or finished.
+- **Claim state is read from the clock on every call.** A claim that expires writes nothing, so `updated_since` cannot report it, and neither can it report an item that became unblocked. To find work that is ready to take, poll with `status`, `unblocked_only: true` and `claim_state: "unclaimed"` and no `updated_since`; use `updated_since` to follow content changes.
+- A malformed `label`, `updated_since`, `claim_state`, `limit` or `cursor` is refused `invalid_argument`.
 
 ### Claims
 
@@ -132,7 +151,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
 | `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes); nothing was changed and the call can be retried. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, and every refusal from the claim and dependency tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim and dependency tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 

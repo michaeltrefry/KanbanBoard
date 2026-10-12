@@ -191,14 +191,54 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status.")]
-    public async Task<IReadOnlyList<WorkItemDto>> ListWorkItems(
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, status, label, claim state and time of last change. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status. Without limit and cursor the result is an array of every matching item, in board order. With limit or cursor it is one page, oldest item first: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. A malformed argument is refused with code invalid_argument.")]
+    public async Task<object> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
         [Description("Optional epic id")] Guid? epicId = null,
         [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
         [Description("Optional status filter")] WorkItemStatus? status = null,
         [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false,
-        [Description(UnblockedOnlyDescription)] bool unblocked_only = false)
+        [Description(UnblockedOnlyDescription)] bool unblocked_only = false,
+        [Description("Return only items that carry this label. The whole label must match, ignoring case: 'api' does not match an item labelled 'rapid'.")] string? label = null,
+        [Description("ISO 8601 timestamp, for example 2026-10-12T12:00:00Z. Return only items whose updatedAtUtc is at or after it. updatedAtUtc changes when the item's fields change, when it is moved, or when a comment is added to it; it does not change when the item is claimed, renewed or released, when a claim expires, or when a dependency or another item changes.")] string? updated_since = null,
+        [Description("Claim state at the time of the call: 'unclaimed' (no live claim, including a claim that has expired), 'claimed' (a live claim), or 'expired' (a claim that expired and was not released or replaced)")] string? claim_state = null,
+        [Description("Page size, 1 to 200. Passing limit or cursor makes the result a page object instead of an array.")] int? limit = null,
+        [Description("next_cursor of the previous page, passed back unchanged together with the same filters. Each matching item is returned exactly once across the pages, also when items are moved or edited in between. Page size is 50 when limit is not passed.")] string? cursor = null,
+        [Description("When false, every item is returned with an empty comments list and no comment is read")] bool include_comments = true)
+    {
+        var added = new List<string>();
+        void Add(string name, string? value)
+        {
+            if (value is not null)
+            {
+                added.Add($"{name}={Uri.EscapeDataString(value)}");
+            }
+        }
+
+        Add("label", label);
+        Add("updatedSince", updated_since);
+        Add("claimState", claim_state);
+        Add("limit", limit?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        Add("cursor", cursor);
+        Add("includeComments", include_comments ? null : "false");
+
+        if (limit is null && cursor is null)
+        {
+            return await ListWorkItemsAsync<IReadOnlyList<WorkItemDto>>(projectId, epicId, type, status, includeArchivedEpics, unblocked_only, added) ?? [];
+        }
+
+        return await ListWorkItemsAsync<WorkItemPageDto>(projectId, epicId, type, status, includeArchivedEpics, unblocked_only, added)
+            ?? new WorkItemPageDto([], null);
+    }
+
+    private async Task<TResult?> ListWorkItemsAsync<TResult>(
+        Guid? projectId = null,
+        Guid? epicId = null,
+        WorkItemType? type = null,
+        WorkItemStatus? status = null,
+        bool includeArchivedEpics = false,
+        bool unblockedOnly = false,
+        IEnumerable<string>? added = null)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
         var parameters = new List<string>();
@@ -228,16 +268,21 @@ public sealed class KanbanTools(
             parameters.Add("includeArchivedEpics=true");
         }
 
-        if (unblocked_only)
+        if (unblockedOnly)
         {
             parameters.Add("unblockedOnly=true");
         }
+
+        // The arguments this tool gained after its first release, after the original ones.
+        parameters.AddRange(added ?? []);
 
         var path = parameters.Count == 0
             ? "/api/items"
             : $"/api/items?{string.Join('&', parameters)}";
 
-        return await client.GetFromJsonAsync<IReadOnlyList<WorkItemDto>>(path, JsonOptions) ?? [];
+        using var response = await client.GetAsync(path);
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<TResult>(JsonOptions);
     }
 
     [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, and its blockers and dependents with their current status.")]
@@ -317,13 +362,13 @@ public sealed class KanbanTools(
     }
 
     [McpServerTool, Description("List work items that belong to a specific epic backlog.")]
-    public Task<IReadOnlyList<WorkItemDto>> ListEpicWorkItems(
+    public async Task<IReadOnlyList<WorkItemDto>> ListEpicWorkItems(
         [Description("Epic id")] Guid epicId,
         [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
         [Description("Optional status filter")] WorkItemStatus? status = null,
         [Description("Whether to include items when the epic is archived")] bool includeArchivedEpics = false,
         [Description(UnblockedOnlyDescription)] bool unblocked_only = false) =>
-        ListWorkItems(epicId: epicId, type: type, status: status, includeArchivedEpics: includeArchivedEpics, unblocked_only: unblocked_only);
+        await ListWorkItemsAsync<IReadOnlyList<WorkItemDto>>(epicId: epicId, type: type, status: status, includeArchivedEpics: includeArchivedEpics, unblockedOnly: unblocked_only) ?? [];
 
     [McpServerTool, Description("Fetch issue work items, optionally filtered by project and status.")]
     public async Task<IReadOnlyList<WorkItemDto>> GetIssues(
@@ -331,7 +376,7 @@ public sealed class KanbanTools(
         [Description("Optional status filter")] WorkItemStatus? status = null,
         [Description(UnblockedOnlyDescription)] bool unblocked_only = false)
     {
-        return await ListWorkItems(projectId: projectId, type: WorkItemType.Issue, status: status, unblocked_only: unblocked_only);
+        return await ListWorkItemsAsync<IReadOnlyList<WorkItemDto>>(projectId: projectId, type: WorkItemType.Issue, status: status, unblockedOnly: unblocked_only) ?? [];
     }
 
     [McpServerTool, Description("Add a comment to any work item. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
