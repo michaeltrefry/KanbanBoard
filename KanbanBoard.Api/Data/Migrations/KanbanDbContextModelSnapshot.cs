@@ -333,6 +333,23 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.ToTable("WorkItemComments");
                 });
 
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemDependency", b =>
+                {
+                    b.Property<string>("BlockedItemId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("BlockerItemId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("BlockedItemId", "BlockerItemId");
+
+                    b.HasIndex("BlockerItemId");
+
+                    b.ToTable("WorkItemDependencies");
+                });
+
             modelBuilder.Entity("KanbanBoard.Api.Models.Epic", b =>
                 {
                     b.HasOne("KanbanBoard.Api.Models.Project", "Project")
@@ -393,6 +410,25 @@ namespace KanbanBoard.Api.Data.Migrations
                         .IsRequired();
 
                     b.Navigation("WorkItem");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemDependency", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "BlockedItem")
+                        .WithMany()
+                        .HasForeignKey("BlockedItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "BlockerItem")
+                        .WithMany()
+                        .HasForeignKey("BlockerItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("BlockedItem");
+
+                    b.Navigation("BlockerItem");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.AppUser", b =>

@@ -36,7 +36,9 @@ public sealed class KanbanToolsScopeTests
         nameof(KanbanTools.DeleteWorkItem),
         nameof(KanbanTools.ClaimWorkItem),
         nameof(KanbanTools.RenewWorkItemClaim),
-        nameof(KanbanTools.ReleaseWorkItemClaim)
+        nameof(KanbanTools.ReleaseWorkItemClaim),
+        nameof(KanbanTools.AddWorkItemDependency),
+        nameof(KanbanTools.RemoveWorkItemDependency)
     ];
 
     public static TheoryData<string> WriteToolNames => new(WriteTools);

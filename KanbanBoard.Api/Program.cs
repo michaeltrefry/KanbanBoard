@@ -117,6 +117,8 @@ app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
 app.MapKanbanClaimEndpoints();
+app.MapKanbanDependencyEndpoints();
+app.MapKanbanWorkItemReadEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
@@ -206,7 +208,11 @@ app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStat
 
     return project is null
         ? Results.NotFound()
-        : Results.Ok(ToBoardDto(project, status, includeArchivedEpicItems));
+        : Results.Ok(ToBoardDto(
+            project,
+            await WorkItemDependencies.LoadAsync(dbContext, dbContext.WorkItems.Where(item => item.ProjectId == projectId), cancellationToken),
+            status,
+            includeArchivedEpicItems));
 })
 .WithName("GetProjectBoard");
 
@@ -281,58 +287,6 @@ app.MapGet("/api/epic-documents/{documentId:guid}", async (Guid documentId, Kanb
 })
 .WithName("GetEpicDocument");
 
-app.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? type, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
-{
-    var includeArchivedEpicItems = includeArchivedEpics ?? false;
-    var query = dbContext.WorkItems
-        .AsNoTracking()
-        .Include(item => item.Epic)
-        .Include(item => item.Comments)
-        .AsQueryable();
-
-    if (projectId is not null)
-    {
-        query = query.Where(item => item.ProjectId == projectId);
-    }
-
-    if (epicId is not null)
-    {
-        query = query.Where(item => item.EpicId == epicId);
-    }
-
-    if (type is not null)
-    {
-        query = query.Where(item => item.Type == type);
-    }
-
-    if (status is not null)
-    {
-        query = query.Where(item => item.Status == status);
-    }
-    else
-    {
-        query = query.Where(item => item.Status != WorkItemStatus.Closed);
-    }
-
-    if (!includeArchivedEpicItems)
-    {
-        query = query.Where(item => item.Epic == null || !item.Epic.IsArchived);
-    }
-
-    var items = await query
-        .OrderBy(item => item.Status)
-        .ThenBy(item => item.Order)
-        .ToListAsync(cancellationToken);
-
-    return Results.Ok(items
-        .OrderBy(item => item.Status)
-        .ThenBy(item => item.Order)
-        .ThenBy(item => item.CreatedAtUtc)
-        .Select(ToWorkItemDto)
-        .ToList());
-})
-.WithName("ListWorkItems");
-
 app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limit, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
     if (!WorkItemSearch.TryNormalizeTerms(query, out _))
@@ -343,20 +297,6 @@ app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limi
     return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
 })
 .WithName("SearchWorkItems");
-
-app.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
-{
-    var item = await dbContext.WorkItems
-        .AsNoTracking()
-        .Include(workItem => workItem.Epic)
-        .Include(workItem => workItem.Comments)
-        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-
-    return item is null
-        ? Results.NotFound()
-        : Results.Ok(ToWorkItemDto(item));
-})
-.WithName("GetWorkItem");
 
 app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
@@ -740,7 +680,7 @@ app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, 
     }
 
     changeNotifier.Publish();
-    return Results.Ok(ToWorkItemDto(item));
+    return Results.Ok(await ToWorkItemDtoWithDependenciesAsync(dbContext, item, cancellationToken));
 })
 .WithName("UpdateWorkItem");
 
@@ -763,7 +703,7 @@ app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemReq
     await dbContext.SaveChangesAsync(cancellationToken);
 
     changeNotifier.Publish();
-    return Results.Ok(ToWorkItemDto(item));
+    return Results.Ok(await ToWorkItemDtoWithDependenciesAsync(dbContext, item, cancellationToken));
 })
 .WithName("MoveWorkItem");
 
@@ -808,7 +748,7 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
     }
 
     changeNotifier.Publish();
-    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", ToWorkItemDto(refreshedItem));
+    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", await ToWorkItemDtoWithDependenciesAsync(dbContext, refreshedItem, cancellationToken));
 })
 .WithName("CreateWorkItemComment");
 
@@ -840,7 +780,7 @@ static ProjectSummaryDto ToSummaryDto(Project project) =>
         project.Items.Count,
         project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed));
 
-static ProjectBoardDto ToBoardDto(Project project, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
+static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup dependencies, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
     new(
         project.Id,
         project.Name,
@@ -854,7 +794,7 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemStatus? status = null
             .OrderBy(item => item.Status)
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)
-            .Select(ToWorkItemDto)
+            .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies))
             .ToList());
 
 static EpicDto ToEpicDto(Epic epic) =>
@@ -876,8 +816,12 @@ static EpicDocumentDto ToEpicDocumentDto(EpicDocument document) =>
         document.CreatedAtUtc,
         document.UpdatedAtUtc);
 
+// For an item that was just created, which cannot have dependencies yet.
 static WorkItemDto ToWorkItemDto(WorkItem item) =>
     WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
+
+static async Task<WorkItemDto> ToWorkItemDtoWithDependenciesAsync(KanbanDbContext dbContext, WorkItem item, CancellationToken cancellationToken) =>
+    WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, await WorkItemDependencies.LoadAsync(dbContext, item.Id, cancellationToken));
 
 static string? NormalizeLabels(string? labels) =>
     string.IsNullOrWhiteSpace(labels)

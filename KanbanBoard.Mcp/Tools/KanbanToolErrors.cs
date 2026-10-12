@@ -29,7 +29,7 @@ public static class KanbanToolErrors
     public static KanbanToolException NotFound(string message) => new(KanbanErrorCodes.NotFound, message);
 
     /// <summary>
-    /// Throws a <see cref="KanbanToolException"/> when the API refused the call (400, 403, 404 or 409), using the
+    /// Throws a <see cref="KanbanToolException"/> when the API refused the call (400, 403, 404, 409, or 503 with an error body), using the
     /// API's own code when it sent one. Other failures throw as before: they are faults, not refusals.
     /// </summary>
     public static async Task EnsureSuccessAsync(HttpResponseMessage response, CancellationToken cancellationToken = default)
@@ -47,7 +47,8 @@ public static class KanbanToolErrors
             HttpStatusCode.Conflict => KanbanErrorCodes.Conflict,
             _ => null
         };
-        if (fallbackCode is null)
+        // A 503 is a refusal only when the API wrote the body: a proxy answers 503 as well.
+        if (fallbackCode is null && response.StatusCode != HttpStatusCode.ServiceUnavailable)
         {
             response.EnsureSuccessStatusCode();
         }
@@ -61,6 +62,11 @@ public static class KanbanToolErrors
         catch (JsonException)
         {
             // Not an error body the API wrote; fall back to the status code.
+        }
+
+        if (fallbackCode is null && string.IsNullOrWhiteSpace(error?.Code))
+        {
+            response.EnsureSuccessStatusCode();
         }
 
         throw new KanbanToolException(

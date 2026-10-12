@@ -217,7 +217,7 @@ public sealed class StartupMigrationTests
 
     // Same provider and interceptor registration as Program.cs, but every connection, command and transaction
     // is answered by FakeDatabase, so the real EF Core / MySql.EntityFrameworkCore pipeline runs without a server.
-    private static KanbanDbContext CreatePipelineContext(DatabaseOptions options, FakeDatabase database) =>
+    internal static KanbanDbContext CreatePipelineContext(DatabaseOptions options, FakeDatabase database) =>
         new(new DbContextOptionsBuilder<KanbanDbContext>()
             .UseMySQL(UnreachableConnection, mySqlOptions => mySqlOptions.CommandTimeout(options.CommandTimeoutSeconds))
             .AddInterceptors(new MariaDbMigrationLockInterceptor(options.MigrationLockTimeoutSeconds), database)
@@ -237,7 +237,9 @@ public sealed class StartupMigrationTests
         public override void Delete() => throw new NotSupportedException();
     }
 
-    private sealed class FakeDatabase(int lockResult) : IDbConnectionInterceptor, IDbCommandInterceptor, IDbTransactionInterceptor
+    // rows answers a reader command with a result set; without it (or when it returns null) the result is empty.
+    internal sealed class FakeDatabase(int lockResult, Func<DbCommand, DataTable?>? rows = null)
+        : IDbConnectionInterceptor, IDbCommandInterceptor, IDbTransactionInterceptor
     {
         public List<(string Text, int Timeout)> Commands { get; } = [];
 
@@ -245,6 +247,8 @@ public sealed class StartupMigrationTests
 
         private object? Scalar(DbCommand command) =>
             command.CommandText.Contains("GET_LOCK('__EFMigrationsLock'", StringComparison.Ordinal) ? lockResult : null;
+
+        private DbDataReader Rows(DbCommand command) => rows?.Invoke(command)?.CreateDataReader() ?? EmptyHistory();
 
         private static DbDataReader EmptyHistory()
         {
@@ -296,14 +300,14 @@ public sealed class StartupMigrationTests
         public InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
         {
             Record(command);
-            return InterceptionResult<DbDataReader>.SuppressWithResult(EmptyHistory());
+            return InterceptionResult<DbDataReader>.SuppressWithResult(Rows(command));
         }
 
         public ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
             DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Record(command);
-            return ValueTask.FromResult(InterceptionResult<DbDataReader>.SuppressWithResult(EmptyHistory()));
+            return ValueTask.FromResult(InterceptionResult<DbDataReader>.SuppressWithResult(Rows(command)));
         }
 
         // MySqlCommand only accepts a MySqlTransaction, whose constructor is internal. Commit and rollback are

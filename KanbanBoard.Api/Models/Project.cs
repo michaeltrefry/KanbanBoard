@@ -64,6 +64,15 @@ public sealed class WorkItem
     public DateTimeOffset? ClaimExpiresAtUtc { get; set; }
 }
 
+// One edge: BlockedItem cannot start until BlockerItem is Done. Written only by WorkItemDependencies.
+public sealed class WorkItemDependency
+{
+    public Guid BlockedItemId { get; set; }
+    public WorkItem? BlockedItem { get; set; }
+    public Guid BlockerItemId { get; set; }
+    public WorkItem? BlockerItem { get; set; }
+}
+
 public sealed class WorkItemComment
 {
     public Guid Id { get; set; } = Guid.NewGuid();
