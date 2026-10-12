@@ -6,7 +6,6 @@ using KanbanBoard.Mcp.Configuration;
 using KanbanBoard.Mcp.Services;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.Extensions.Options;
-using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace KanbanBoard.Mcp.Tools;
@@ -21,7 +20,7 @@ public sealed class KanbanTools(
         "This request has no authenticated personal access token, so write tools are unavailable.";
 
     public const string ReadOnlyScopeErrorMessage =
-        "This personal access token has the 'read' scope and cannot create, update, move, comment on, or delete data. " +
+        "This personal access token has the 'read' scope and cannot create, update, move, claim, comment on, or delete data. " +
         "Create a token with the 'full' scope in Kanban settings to use write tools.";
 
     public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
@@ -240,13 +239,33 @@ public sealed class KanbanTools(
         using var response = await client.GetAsync($"/api/items/{itemId}");
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
         {
-            throw new ModelContextProtocol.McpException($"Work item {itemId} was not found.");
+            throw KanbanToolErrors.NotFound($"Work item {itemId} was not found.");
         }
 
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions)
-            ?? throw new ModelContextProtocol.McpException($"Work item {itemId} was not found.");
+            ?? throw KanbanToolErrors.NotFound($"Work item {itemId} was not found.");
     }
+
+    [McpServerTool, Description("Claim a work item for the calling token's identity until ttl_seconds from now. Succeeds when the item is unclaimed, its claim has expired, or the caller already holds it under the same marker (which resets the expiry). Refused with code already_claimed when another identity or another marker holds a live claim.")]
+    public Task<WorkItemDto> ClaimWorkItem(
+        [Description("Work item id")] Guid id,
+        [Description("Caller-chosen id for this claim, such as a run id (max 200 characters, compared exactly). Renew and release must pass the same marker.")] string marker,
+        [Description("Seconds until the claim lapses unless renewed (1 to 86400)")] int ttl_seconds) =>
+        PostClaimAsync($"/api/items/{id}/claim", new ClaimWorkItemRequest(marker, ttl_seconds));
+
+    [McpServerTool, Description("Extend a live claim the caller holds under this marker to ttl_seconds from now. Refused with code conflict when the claim has lapsed or was released, and already_claimed when someone else now holds the item.")]
+    public Task<WorkItemDto> RenewWorkItemClaim(
+        [Description("Work item id")] Guid id,
+        [Description("Marker the claim was made with")] string marker,
+        [Description("Seconds until the claim lapses unless renewed again (1 to 86400)")] int ttl_seconds) =>
+        PostClaimAsync($"/api/items/{id}/claim/renew", new ClaimWorkItemRequest(marker, ttl_seconds));
+
+    [McpServerTool, Description("Release the caller's claim on a work item so others can claim it. Refused with code conflict when the caller holds no claim under this marker, and already_claimed when someone else holds the item.")]
+    public Task<WorkItemDto> ReleaseWorkItemClaim(
+        [Description("Work item id")] Guid id,
+        [Description("Marker the claim was made with")] string marker) =>
+        PostClaimAsync($"/api/items/{id}/claim/release", new ReleaseWorkItemClaimRequest(marker));
 
     [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, titles, types, and statuses only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
     public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(
@@ -433,6 +452,16 @@ public sealed class KanbanTools(
         return new DeleteResultDto(itemId, "work_item", true);
     }
 
+    private async Task<WorkItemDto> PostClaimAsync<TRequest>(string path, TRequest request)
+    {
+        EnsureWriteScope();
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.PostAsJsonAsync(path, request);
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions)
+            ?? throw new InvalidOperationException($"The Kanban API returned no work item for {path}.");
+    }
+
     // Write tools call this before touching the API. Tools that do not call it are read tools
     // and stay available to 'read' scope tokens without any change.
     private void EnsureWriteScope()
@@ -443,7 +472,7 @@ public sealed class KanbanTools(
             // PAT auth is required but no token reached this request: fail closed rather than allow writes.
             if (authenticationOptions.Value.RequirePersonalAccessToken)
             {
-                throw new McpException(MissingTokenErrorMessage);
+                throw KanbanToolErrors.ScopeDenied(MissingTokenErrorMessage);
             }
 
             return;
@@ -451,7 +480,7 @@ public sealed class KanbanTools(
 
         if (!token.AllowsWrites)
         {
-            throw new McpException(ReadOnlyScopeErrorMessage);
+            throw KanbanToolErrors.ScopeDenied(ReadOnlyScopeErrorMessage);
         }
     }
 

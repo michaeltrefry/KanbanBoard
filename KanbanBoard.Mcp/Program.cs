@@ -41,7 +41,8 @@ builder.Services.AddHttpClient("kanban-api", client =>
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()
-    .WithTools<KanbanTools>();
+    .WithTools<KanbanTools>()
+    .WithKanbanToolErrors();
 
 var app = builder.Build();
 

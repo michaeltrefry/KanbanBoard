@@ -68,6 +68,16 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(item => item.Labels).HasMaxLength(240);
             entity.Property(item => item.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(item => item.UpdatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
+            entity.Property(item => item.ClaimantUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
+            entity.Property(item => item.ClaimantName).HasMaxLength(WorkItemClaimLimits.MaxClaimantNameLength);
+            var claimMarker = entity.Property(item => item.ClaimMarker).HasMaxLength(WorkItemClaimLimits.MaxMarkerLength);
+            if (Database.ProviderName == "MySql.EntityFrameworkCore")
+            {
+                // Markers are opaque ids: compare them byte for byte, not under the database's case-insensitive default.
+                claimMarker.UseCollation("utf8mb4_bin");
+            }
+
+            entity.Property(item => item.ClaimExpiresAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(item => new { item.ProjectId, item.Status, item.Order });
             entity.HasIndex(item => item.EpicId);
             entity.HasOne(item => item.Project)

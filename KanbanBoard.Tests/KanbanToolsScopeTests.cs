@@ -33,7 +33,10 @@ public sealed class KanbanToolsScopeTests
         nameof(KanbanTools.CreateEpicWorkItem),
         nameof(KanbanTools.MoveWorkItem),
         nameof(KanbanTools.UpdateWorkItem),
-        nameof(KanbanTools.DeleteWorkItem)
+        nameof(KanbanTools.DeleteWorkItem),
+        nameof(KanbanTools.ClaimWorkItem),
+        nameof(KanbanTools.RenewWorkItemClaim),
+        nameof(KanbanTools.ReleaseWorkItemClaim)
     ];
 
     public static TheoryData<string> WriteToolNames => new(WriteTools);
@@ -63,8 +66,9 @@ public sealed class KanbanToolsScopeTests
         var api = new FakeApi();
         var tools = CreateTools(api, PersonalAccessTokenScopes.Read);
 
-        var exception = await Assert.ThrowsAsync<McpException>(() => InvokeAsync(tools, toolName));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => InvokeAsync(tools, toolName));
 
+        Assert.Equal(KanbanErrorCodes.ScopeDenied, exception.Code);
         Assert.Equal(KanbanTools.ReadOnlyScopeErrorMessage, exception.Message);
         Assert.Empty(api.Requests);
     }
@@ -108,8 +112,9 @@ public sealed class KanbanToolsScopeTests
         var api = new FakeApi();
         var tools = CreateTools(api, scope: null, requirePersonalAccessToken: true);
 
-        var exception = await Assert.ThrowsAsync<McpException>(() => InvokeAsync(tools, toolName));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => InvokeAsync(tools, toolName));
 
+        Assert.Equal(KanbanErrorCodes.ScopeDenied, exception.Code);
         Assert.Equal(KanbanTools.MissingTokenErrorMessage, exception.Message);
         Assert.Empty(api.Requests);
     }

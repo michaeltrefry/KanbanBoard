@@ -25,11 +25,14 @@ The checked-in scripts remain for bootstrapping a new database and for manual us
 ```bash
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/001_initial_mariadb_schema.sql
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/002_personal_access_token_scope.sql
+mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/003_work_item_claim.sql
 ```
 
 Each script records its migration id in `__EFMigrationsHistory`, so the API skips migrations already applied by hand. A test (`StartupMigrationTests.Deploy_sql_history_rows_match_every_ef_migration`) fails if the ids in `deploy/sql` drift from the migrations in `KanbanBoard.Api/Data/Migrations`; add a numbered script with each new migration.
 
 `002` adds the `PersonalAccessTokens.Scope` column (`read` or `full`); existing tokens default to `full`. It is safe to re-run.
+
+`003` adds the claim columns to `WorkItems`: `ClaimantUserId`, `ClaimantName`, `ClaimMarker` and `ClaimExpiresAtUtc`, all nullable, so existing items start unclaimed. `ClaimMarker` is `utf8mb4_bin` so markers compare byte for byte. `MySql.EntityFrameworkCore` leaves the collation out of the `ADD` it generates, so the migration (and the script) sets it with an explicit `MODIFY`. It is safe to re-run.
 
 `001` creates the EF migrations history table and the initial Kanban schema:
 

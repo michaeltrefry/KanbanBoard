@@ -29,6 +29,9 @@ public interface IPersonalAccessTokenService
 
     /// <summary>Returns the stored scope of a token, or null when no such token exists.</summary>
     Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken);
+
+    /// <summary>Throws <see cref="InvalidOperationException"/> when personal access tokens are disabled.</summary>
+    void EnsureEnabled();
 }
 
 public sealed record CreatedPersonalAccessToken(
@@ -160,7 +163,7 @@ public sealed class PersonalAccessTokenService(
             .FirstOrDefaultAsync(cancellationToken);
     }
 
-    private void EnsureEnabled()
+    public void EnsureEnabled()
     {
         if (!options.Enabled)
         {

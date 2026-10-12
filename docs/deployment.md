@@ -140,6 +140,37 @@ mariadb -h HOST -P 3306 -u kanban -p kanban -e "SELECT MigrationId FROM __EFMigr
 # lists 20261010161942_AddPersonalAccessTokenScope
 ```
 
+For the work item claim change (sc-25859) the API adds four nullable claim columns to `WorkItems` on its first start (`20261012211402_AddWorkItemClaim`); existing items start unclaimed. `deploy/sql/003_work_item_claim.sql` is the manual equivalent.
+
+### Factory service identity
+
+The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:
+
+```bash
+cd /opt/kanban-board
+set -a
+. ./.env.release
+set +a
+docker compose -f docker-compose.prod.yml exec \
+  -e Logging__LogLevel__Default=Warning \
+  kanban-api dotnet KanbanBoard.Api.dll create-service-identity --name factory
+```
+
+It prints the identity and two tokens, once:
+
+```text
+Service identity 'factory' (GUID) created.
+full-scope token: kbp_...
+read-scope token: kbp_...
+Store both now. They are not shown again.
+```
+
+Give the orchestrator the full-scope token (and the read-scope token where it only reads) as `Authorization: Bearer <token>` on `https://kanban-mcp.trefry.net/mcp`. Items it claims show `factory` as `claimant`. The command exits without serving HTTP; the output of an `exec` is not written to the container log.
+
+- Running it again with the same name (case-insensitive) adds a new token pair to the same identity and leaves the old tokens valid.
+- Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so a revoked token can still be accepted for that long.
+- `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
+
 Open inbound ports:
 
 - SSH: `22/tcp`, or your custom SSH port.
