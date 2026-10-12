@@ -742,7 +742,16 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
     // waiting for the other to let go, and MariaDB ended one of them as a deadlock.
     await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
     item.UpdatedAtUtc = createdAtUtc;
-    await dbContext.SaveChangesAsync(cancellationToken);
+    try
+    {
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        // The item was deleted after it was loaded.
+        return Results.NotFound();
+    }
+
     dbContext.WorkItemComments.Add(comment);
     await dbContext.SaveChangesAsync(cancellationToken);
     await transaction.CommitAsync(cancellationToken);

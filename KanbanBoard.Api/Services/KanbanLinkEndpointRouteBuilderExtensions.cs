@@ -28,7 +28,9 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
             if (!WorkItemLinks.TryNormalizeUrl(request.Url, out var url))
             {
                 return InvalidArgument(
-                    $"Argument 'url' must be an absolute http or https URL of at most {WorkItemLinkLimits.MaxUrlLength} characters.");
+                    $"Argument 'url' must be an absolute http or https URL of at most {WorkItemLinkLimits.MaxUrlLength} characters " +
+                    $"and at most {WorkItemLinkLimits.MaxEscapedUrlLength} characters when percent-encoded, " +
+                    "without whitespace, control characters or credentials.");
             }
 
             return await RespondAsync(
@@ -59,6 +61,11 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
             if (linkId is null && !WorkItemLinks.TryNormalizeKind(kind, out normalizedKind))
             {
                 return InvalidArgument($"Argument 'kind' {KindMessage}");
+            }
+
+            if (linkId is null && !WorkItemLinkLimits.FitsLookup(normalizedUrl!))
+            {
+                return InvalidArgument(WorkItemLinkLimits.LookupUrlTooLongMessage);
             }
 
             return await RespondAsync(
@@ -93,7 +100,11 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
                 statusCode: StatusCodes.Status404NotFound);
         }
 
-        changeNotifier.Publish();
+        if (outcome == WorkItemLinkOutcome.Succeeded)
+        {
+            changeNotifier.Publish();
+        }
+
         return Results.Ok(WorkItemDtoMapper.ToDto(
             item,
             timeProvider.GetUtcNow(),

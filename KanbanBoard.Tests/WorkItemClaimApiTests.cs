@@ -480,6 +480,9 @@ public sealed class WorkItemClaimApiTests
                 await services.GetRequiredService<IPersonalAccessTokenService>().ValidateAsync(plaintextToken, CancellationToken.None)
                 ?? throw new InvalidOperationException("The token did not validate."));
 
+        public BoardChangeSubscription SubscribeToBoardChanges() =>
+            host.Services.GetRequiredService<BoardChangeNotifier>().Subscribe();
+
         public Task<Guid> AddItemAsync(string title = "Item", string projectKey = "PRJ") =>
             WithServicesAsync(async services =>
             {

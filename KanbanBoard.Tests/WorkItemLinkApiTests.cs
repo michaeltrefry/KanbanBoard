@@ -64,6 +64,14 @@ public sealed class WorkItemLinkApiTests
     [InlineData("ftp://example.com/file")]
     [InlineData("javascript:alert(1)")]
     [InlineData("https://")]
+    // Whitespace and control characters inside the URL.
+    [InlineData("http://a.com/a\nb")]
+    [InlineData("http://a.com/\tb")]
+    [InlineData("http://a.com/a b")]
+    [InlineData("http://a.com/\u0000x")]
+    // Credentials would be stored in clear and returned to every reader.
+    [InlineData("https://user:pw@host/x")]
+    [InlineData("https://user@host/x")]
     public async Task Add_with_a_url_that_is_not_absolute_http_or_https_is_refused_invalid_argument(string? url)
     {
         using var fixture = await ApiFixture.CreateAsync();
@@ -90,6 +98,79 @@ public sealed class WorkItemLinkApiTests
         Assert.Equal([item], await FindIdsAsync(fixture, longest));
         // One character less is another URL.
         Assert.Empty(await FindIdsAsync(fixture, longest[..^1]));
+    }
+
+    // Find and remove carry the URL percent-encoded in the query string, where a real server limits the request line
+    // (Kestrel: 8 KB; the test server has no limit). A URL that could not be looked up again is not accepted.
+    [Fact]
+    public async Task A_url_too_long_to_look_up_when_percent_encoded_is_refused_by_add_find_and_remove()
+    {
+        using var fixture = await ApiFixture.CreateAsync();
+        var item = await fixture.AddItemAsync();
+        const string prefix = "https://x.example/";
+        var checks = (WorkItemLinkLimits.MaxEscapedUrlLength - Uri.EscapeDataString(prefix).Length) / Uri.EscapeDataString("✓").Length;
+        var longest = prefix + new string('✓', checks);
+        var tooLong = longest + "✓";
+        var allChecks = prefix + new string('✓', WorkItemLinkLimits.MaxUrlLength - prefix.Length);
+        // Nearly every character of this one takes three when encoded: the most an ASCII URL can need.
+        var longestAscii = "https://x.example" + new string('/', WorkItemLinkLimits.MaxUrlLength - "https://x.example".Length);
+        Assert.InRange(Uri.EscapeDataString(longest).Length, WorkItemLinkLimits.MaxEscapedUrlLength - 8, WorkItemLinkLimits.MaxEscapedUrlLength);
+        Assert.True(tooLong.Length < WorkItemLinkLimits.MaxUrlLength);
+        // The documented number, and the longest request line it leads to fits the server's default limit.
+        Assert.Equal(6144, WorkItemLinkLimits.MaxEscapedUrlLength);
+        Assert.True(
+            $"DELETE /api/items/{item}/links?kind=branch&url= HTTP/1.1\r\n".Length + WorkItemLinkLimits.MaxEscapedUrlLength
+            < new Microsoft.AspNetCore.Server.Kestrel.Core.KestrelServerLimits().MaxRequestLineSize - 1024);
+        Assert.InRange(Uri.EscapeDataString(longestAscii).Length, WorkItemLinkLimits.MaxEscapedUrlLength - 40, WorkItemLinkLimits.MaxEscapedUrlLength);
+
+        var addedTooLong = await AddAsync(fixture, item, "pr", tooLong);
+        var addedAllChecks = await AddAsync(fixture, item, "pr", allChecks);
+        var foundTooLong = await fixture.Client.GetAsync($"/api/items/by-link?url={Uri.EscapeDataString(tooLong)}");
+        var removedTooLong = await RemoveAsync(fixture, item, "pr", tooLong);
+
+        await AssertErrorAsync(addedTooLong, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(addedAllChecks, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(foundTooLong, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(removedTooLong, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        Assert.Empty(await LinksAsync(fixture));
+
+        foreach (var url in new[] { longest, longestAscii })
+        {
+            var added = await ReadAsync(await AddAsync(fixture, item, "pr", url));
+            Assert.Equal(url, Assert.Single(added.Links).Url);
+            Assert.Equal([item], await FindIdsAsync(fixture, url));
+            Assert.Empty((await ReadAsync(await RemoveAsync(fixture, item, "pr", url))).Links);
+        }
+    }
+
+    [Fact]
+    public async Task Only_an_add_or_remove_that_changes_the_item_publishes_a_board_change()
+    {
+        using var fixture = await ApiFixture.CreateAsync();
+        var item = await fixture.AddItemAsync();
+        using var changes = fixture.SubscribeToBoardChanges();
+        int Published()
+        {
+            var count = 0;
+            while (changes.Reader.TryRead(out _))
+            {
+                count++;
+            }
+
+            return count;
+        }
+
+        var link = Assert.Single((await ReadAsync(await AddAsync(fixture, item, "pr", PrUrl))).Links);
+        var afterAdd = Published();
+        Assert.Equal(HttpStatusCode.OK, (await AddAsync(fixture, item, "pr", PrUrl)).StatusCode);
+        var afterRepeatedAdd = Published();
+        Assert.Equal(HttpStatusCode.OK, (await RemoveAsync(fixture, item, "pr", PrUrl)).StatusCode);
+        var afterRemove = Published();
+        Assert.Equal(HttpStatusCode.OK, (await RemoveAsync(fixture, item, "pr", PrUrl)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await fixture.Client.DeleteAsync($"/api/items/{item}/links?linkId={link.Id}")).StatusCode);
+        var afterRepeatedRemoves = Published();
+
+        Assert.Equal((1, 0, 1, 0), (afterAdd, afterRepeatedAdd, afterRemove, afterRepeatedRemoves));
     }
 
     [Fact]

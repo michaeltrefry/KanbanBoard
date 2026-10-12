@@ -153,6 +153,11 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 return InvalidArgument("Argument 'url' is required.");
             }
 
+            if (!WorkItemLinkLimits.FitsLookup(normalizedUrl))
+            {
+                return InvalidArgument(WorkItemLinkLimits.LookupUrlTooLongMessage);
+            }
+
             var query = dbContext.WorkItems.AsNoTracking().WhereHasLink(dbContext, normalizedUrl);
             var items = await query
                 .Include(item => item.Epic)

@@ -94,6 +94,35 @@ public sealed class KanbanToolsLinkTests
         Assert.Equal("[]", Text(result));
     }
 
+    // The API would answer a request line this long with 414, which is not a typed refusal.
+    [Fact]
+    public async Task Find_and_remove_refuse_a_url_too_long_to_send_invalid_argument_without_calling_the_api()
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, request =>
+            Json(HttpStatusCode.OK, request.Path == "/api/items/by-link" ? $"[{LinkedItemJson}]" : LinkedItemJson));
+        const string prefix = "https://x.example/";
+        var checks = (WorkItemLinkLimits.MaxEscapedUrlLength - Uri.EscapeDataString(prefix).Length) / Uri.EscapeDataString("✓").Length;
+        var tooLong = prefix + new string('✓', checks + 1);
+
+        var found = await server.CallAsync("find_work_items_by_link", new() { ["url"] = tooLong });
+        var removed = await server.CallAsync("remove_work_item_link", new() { ["id"] = ItemId, ["kind"] = "pr", ["url"] = tooLong });
+
+        AssertError(found, KanbanErrorCodes.InvalidArgument);
+        AssertError(removed, KanbanErrorCodes.InvalidArgument);
+        Assert.Empty(server.Api.Requests);
+
+        // One character less is sent, without the whitespace around it.
+        var longest = tooLong[..^1];
+        var foundLongest = await server.CallAsync("find_work_items_by_link", new() { ["url"] = $" {longest} " });
+        var removedLongest = await server.CallAsync("remove_work_item_link", new() { ["id"] = ItemId, ["kind"] = "pr", ["url"] = $" {longest} " });
+
+        Assert.NotEqual(true, foundLongest.IsError);
+        Assert.NotEqual(true, removedLongest.IsError);
+        Assert.Equal(
+            [$"?url={Uri.EscapeDataString(longest)}", $"?kind=pr&url={Uri.EscapeDataString(longest)}"],
+            server.Api.Requests.Select(request => request.Query).ToArray());
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.BadRequest, """{"code":"invalid_argument","message":"Argument 'kind' must be one of: pr, branch, other."}""", KanbanErrorCodes.InvalidArgument)]
     [InlineData(HttpStatusCode.NotFound, """{"code":"not_found","message":"no such item"}""", KanbanErrorCodes.NotFound)]

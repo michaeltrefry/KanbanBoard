@@ -10,6 +10,8 @@ namespace KanbanBoard.Api.Services;
 public enum WorkItemLinkOutcome
 {
     Succeeded,
+    /// <summary>The item exists and already was as asked: nothing was written.</summary>
+    Unchanged,
     NotFound
 }
 
@@ -27,14 +29,21 @@ public static class WorkItemLinks
         return WorkItemLinkKinds.All.Contains(kind);
     }
 
-    /// <summary>Accepts an absolute http or https URL of at most <see cref="WorkItemLinkLimits.MaxUrlLength"/> characters.</summary>
+    /// <summary>
+    /// Accepts an absolute http or https URL of at most <see cref="WorkItemLinkLimits.MaxUrlLength"/> characters that
+    /// holds no whitespace, no control character and no credentials, and that can be looked up again
+    /// (<see cref="WorkItemLinkLimits.FitsLookup"/>).
+    /// </summary>
     public static bool TryNormalizeUrl(string? value, out string url)
     {
         url = value?.Trim() ?? string.Empty;
         return url.Length is > 0 and <= WorkItemLinkLimits.MaxUrlLength &&
+            !url.Any(character => char.IsControl(character) || char.IsWhiteSpace(character)) &&
+            WorkItemLinkLimits.FitsLookup(url) &&
             Uri.TryCreate(url, UriKind.Absolute, out var parsed) &&
             (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps) &&
-            parsed.Host.Length > 0;
+            parsed.Host.Length > 0 &&
+            parsed.UserInfo.Length == 0;
     }
 
     public static string HashUrl(string url) =>
@@ -65,7 +74,7 @@ public static class WorkItemLinks
         if (exists)
         {
             // Nothing changed: leaving the transaction uncommitted takes the stamp back.
-            return WorkItemLinkOutcome.Succeeded;
+            return WorkItemLinkOutcome.Unchanged;
         }
 
         dbContext.WorkItemLinks.Add(new WorkItemLink
@@ -109,7 +118,7 @@ public static class WorkItemLinks
                 candidate => candidate.WorkItemId == itemId && candidate.Kind == kind && candidate.UrlHash == urlHash, cancellationToken);
         if (link is null)
         {
-            return WorkItemLinkOutcome.Succeeded;
+            return WorkItemLinkOutcome.Unchanged;
         }
 
         // A tracked delete, not ExecuteDelete: MySql.EntityFrameworkCore writes that as DELETE FROM ... AS `w`,

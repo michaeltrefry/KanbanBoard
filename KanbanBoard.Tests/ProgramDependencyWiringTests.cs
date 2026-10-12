@@ -97,6 +97,23 @@ public sealed class ProgramDependencyWiringTests
         Assert.StartsWith("INSERT INTO \"WorkItemComments\"", writes[1], StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task A_comment_on_an_item_deleted_after_it_was_loaded_is_refused_not_found()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "GONE" });
+        var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        // The endpoint loads the item and then opens its transaction: the delete lands between the two.
+        var deleted = 0;
+        api.BeforeNextTransaction = () => deleted = api.DeleteItem(item.Id);
+
+        using var response = await client.PostAsJsonAsync($"/api/items/{item.Id}/comments", new { author = "tester", body = "note" });
+
+        Assert.Equal(1, deleted);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     internal static Task<T> PostAsync<T>(HttpClient client, string path, object body) => SendAsync<T>(client, HttpMethod.Post, path, body);
 
     internal static async Task<T> SendAsync<T>(HttpClient client, HttpMethod method, string path, object body)
@@ -111,9 +128,23 @@ public sealed class ProgramDependencyWiringTests
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"kanban-program-{Guid.NewGuid():N}.db");
         private readonly CommandRecorder recorder = new();
+        private readonly TransactionHook transactionHook = new();
 
         /// <summary>The text of every SQL command the application has run, in order.</summary>
         public List<string> Commands => recorder.Commands;
+
+        /// <summary>Runs once, just before the application opens its next transaction.</summary>
+        public Action? BeforeNextTransaction
+        {
+            set => transactionHook.BeforeNext = value;
+        }
+
+        /// <summary>Deletes the item behind the application's back; returns the number of rows deleted.</summary>
+        public int DeleteItem(Guid itemId)
+        {
+            using var dbContext = new KanbanDbContext(new DbContextOptionsBuilder<KanbanDbContext>().UseSqlite($"Data Source={databasePath};Pooling=False").Options);
+            return dbContext.WorkItems.Where(item => item.Id == itemId).ExecuteDelete();
+        }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -136,7 +167,7 @@ public sealed class ProgramDependencyWiringTests
                     services.Remove(registration);
                 }
 
-                services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False").AddInterceptors(recorder));
+                services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False").AddInterceptors(recorder, transactionHook));
             });
         }
 
@@ -144,6 +175,20 @@ public sealed class ProgramDependencyWiringTests
         {
             base.Dispose(disposing);
             File.Delete(databasePath);
+        }
+    }
+
+    private sealed class TransactionHook : DbTransactionInterceptor
+    {
+        public Action? BeforeNext { get; set; }
+
+        public override ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
+            DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result, CancellationToken cancellationToken = default)
+        {
+            var action = BeforeNext;
+            BeforeNext = null;
+            action?.Invoke();
+            return ValueTask.FromResult(result);
         }
     }
 

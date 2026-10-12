@@ -333,20 +333,22 @@ public sealed class KanbanTools(
         [Description("Id of the work item that blocks it")] Guid blocked_by_id) =>
         SendWorkItemWriteAsync(client => client.DeleteAsync($"/api/items/{id}/dependencies/{blocked_by_id}"));
 
-    [McpServerTool, Description("Attach an external URL, such as a pull request or a branch, to work item id. kind is pr, branch or other; any other kind is refused with code invalid_argument, as is a url that is not an absolute http or https URL of at most 2048 characters. Adding a kind and url the item already carries changes nothing and succeeds. The same url may be attached to several items. Returns work item id; its links field lists each link as {id, kind, url, created_at_utc}.")]
+    [McpServerTool, Description("Attach an external URL, such as a pull request or a branch, to work item id. kind is pr, branch or other; any other kind is refused with code invalid_argument, as is a url that is not an absolute http or https URL of at most 2048 characters, that holds whitespace, a control character or credentials (user:password@), or whose percent-encoded form is longer than 6144 characters (every ASCII URL of 2048 characters fits; a non-ASCII character counts for 6 to 9). Adding a kind and url the item already carries changes nothing and succeeds. The same url may be attached to several items. Returns work item id; its links field lists each link as {id, kind, url, created_at_utc}.")]
     public Task<WorkItemDto> AddWorkItemLink(
         [Description("Work item id")] Guid id,
         [Description("Kind of link: pr, branch or other")] string kind,
-        [Description("Absolute http or https URL, at most 2048 characters. URLs are compared exactly, character for character.")] string url) =>
+        [Description("Absolute http or https URL, at most 2048 characters, without whitespace or credentials. URLs are compared exactly, character for character.")] string url) =>
         SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/links", new AddWorkItemLinkRequest(kind, url)));
 
-    [McpServerTool, Description("Remove one link from work item id. Address the link either by link_id (the id of an entry of the item's links field) or by kind and url together; any other combination is refused with code invalid_argument. Removing a link the item does not carry changes nothing and succeeds. Returns work item id with its remaining links.")]
+    [McpServerTool, Description("Remove one link from work item id. Address the link either by link_id (the id of an entry of the item's links field) or by kind and url together; any other combination is refused with code invalid_argument, as is a url whose percent-encoded form is longer than 6144 characters. Removing a link the item does not carry changes nothing and succeeds. Returns work item id with its remaining links.")]
     public Task<WorkItemDto> RemoveWorkItemLink(
         [Description("Work item id")] Guid id,
         [Description("Id of the link to remove. Leave out when passing kind and url.")] Guid? link_id = null,
         [Description("Kind of the link to remove: pr, branch or other. Pass together with url.")] string? kind = null,
         [Description("URL of the link to remove, exactly as it was added. Pass together with kind.")] string? url = null)
     {
+        // The API drops surrounding whitespace as well; dropping it here keeps it out of the length that is checked.
+        url = url?.Trim();
         var parameters = new List<string>();
         if (link_id is not null)
         {
@@ -363,13 +365,23 @@ public sealed class KanbanTools(
             parameters.Add($"url={Uri.EscapeDataString(url)}");
         }
 
-        return SendWorkItemWriteAsync(client => client.DeleteAsync($"/api/items/{id}/links?{string.Join('&', parameters)}"));
+        // The scope check comes first; a URL too long for the request line never reaches the API.
+        return SendWorkItemWriteAsync(client => url is null || WorkItemLinkLimits.FitsLookup(url)
+            ? client.DeleteAsync($"/api/items/{id}/links?{string.Join('&', parameters)}")
+            : throw KanbanToolErrors.InvalidArgument(WorkItemLinkLimits.LookupUrlTooLongMessage));
     }
 
-    [McpServerTool, Description("Find the work items that carry an external link with exactly this URL, under any kind and in any status, project or epic, oldest item first. Returns full work items, and an empty array when no item carries the URL.")]
+    [McpServerTool, Description("Find the work items that carry an external link with exactly this URL, under any kind and in any status, project or epic, oldest item first. Returns full work items, and an empty array when no item carries the URL. An empty url, or one whose percent-encoded form is longer than 6144 characters, is refused with code invalid_argument.")]
     public async Task<IReadOnlyList<WorkItemDto>> FindWorkItemsByLink(
         [Description("The URL, exactly as it was added: URLs are compared character for character")] string url)
     {
+        // A URL too long for the request line never reaches the API. The API drops surrounding whitespace as well.
+        url = url.Trim();
+        if (!WorkItemLinkLimits.FitsLookup(url))
+        {
+            throw KanbanToolErrors.InvalidArgument(WorkItemLinkLimits.LookupUrlTooLongMessage);
+        }
+
         var client = httpClientFactory.CreateClient("kanban-api");
         using var response = await client.GetAsync($"/api/items/by-link?url={Uri.EscapeDataString(url)}");
         await KanbanToolErrors.EnsureSuccessAsync(response);

@@ -48,7 +48,7 @@ public sealed class WorkItemLinkMySqlTests
 
         var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, Now, CancellationToken.None);
 
-        Assert.Equal(WorkItemLinkOutcome.Succeeded, outcome);
+        Assert.Equal(WorkItemLinkOutcome.Unchanged, outcome);
         Assert.DoesNotContain(database.Commands, command => command.Text.Contains("INSERT", StringComparison.Ordinal));
     }
 
