@@ -383,7 +383,7 @@ public sealed class WorkItemClaimApiTests
     private static string PrintedToken(StringWriter output, string label) =>
         output.ToString().Split('\n').Single(line => line.StartsWith(label, StringComparison.Ordinal))[label.Length..].Trim();
 
-    private static async Task AssertErrorAsync(HttpResponseMessage response, HttpStatusCode status, string code)
+    internal static async Task AssertErrorAsync(HttpResponseMessage response, HttpStatusCode status, string code)
     {
         var body = await response.Content.ReadAsStringAsync();
         Assert.True(status == response.StatusCode, $"Expected {status} but got {response.StatusCode}: {body}");
@@ -392,7 +392,7 @@ public sealed class WorkItemClaimApiTests
         Assert.False(string.IsNullOrWhiteSpace(error.Message));
     }
 
-    private sealed class MutableClock : TimeProvider
+    internal sealed class MutableClock : TimeProvider
     {
         // Whole seconds, so values survive the round trip through any provider's datetime precision.
         public DateTimeOffset Now { get; private set; } = new(2026, 10, 12, 12, 0, 0, TimeSpan.Zero);
@@ -402,7 +402,7 @@ public sealed class WorkItemClaimApiTests
         public void Advance(TimeSpan by) => Now += by;
     }
 
-    private sealed class ApiFixture : IDisposable
+    internal sealed class ApiFixture : IDisposable
     {
         private readonly IHost host;
         private readonly string databasePath;
@@ -434,12 +434,18 @@ public sealed class WorkItemClaimApiTests
                         services.AddSingleton(TestDb.PatOptions());
                         services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
                         services.AddSingleton<TimeProvider>(clock);
+                        services.AddSingleton<BoardChangeNotifier>();
                     });
                     webBuilder.Configure(app =>
                     {
                         app.UseKanbanInternalApiAuthentication(new InternalApiOptions { SharedSecret = InternalSecret });
                         app.UseRouting();
-                        app.UseEndpoints(endpoints => endpoints.MapKanbanClaimEndpoints());
+                        app.UseEndpoints(endpoints =>
+                        {
+                            endpoints.MapKanbanClaimEndpoints();
+                            endpoints.MapKanbanDependencyEndpoints();
+                            endpoints.MapKanbanWorkItemReadEndpoints();
+                        });
                     });
                 })
                 .StartAsync();
@@ -473,18 +479,18 @@ public sealed class WorkItemClaimApiTests
                 await services.GetRequiredService<IPersonalAccessTokenService>().ValidateAsync(plaintextToken, CancellationToken.None)
                 ?? throw new InvalidOperationException("The token did not validate."));
 
-        public Task<Guid> AddItemAsync() =>
+        public Task<Guid> AddItemAsync(string title = "Item", string projectKey = "PRJ") =>
             WithServicesAsync(async services =>
             {
                 var dbContext = services.GetRequiredService<KanbanDbContext>();
-                var project = await dbContext.Projects.FirstOrDefaultAsync();
+                var project = await dbContext.Projects.FirstOrDefaultAsync(candidate => candidate.Key == projectKey);
                 if (project is null)
                 {
-                    project = new Project { Name = "Project", Key = "PRJ" };
+                    project = new Project { Name = "Project", Key = projectKey };
                     dbContext.Projects.Add(project);
                 }
 
-                var item = new WorkItem { ProjectId = project.Id, Title = "Item" };
+                var item = new WorkItem { ProjectId = project.Id, Title = title };
                 dbContext.WorkItems.Add(item);
                 await dbContext.SaveChangesAsync();
                 return item.Id;

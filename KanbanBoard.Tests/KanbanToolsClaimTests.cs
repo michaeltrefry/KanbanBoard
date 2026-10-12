@@ -154,10 +154,10 @@ public sealed class KanbanToolsClaimTests
         Assert.Contains(ItemId.ToString(), AssertError(result, KanbanErrorCodes.NotFound), StringComparison.Ordinal);
     }
 
-    private static string[] ArgumentNames(McpClientTool tool) =>
+    internal static string[] ArgumentNames(McpClientTool tool) =>
         tool.JsonSchema.GetProperty("properties").EnumerateObject().Select(property => property.Name).Order().ToArray();
 
-    private static string[] RequiredArguments(McpClientTool tool) =>
+    internal static string[] RequiredArguments(McpClientTool tool) =>
         tool.JsonSchema.GetProperty("required").EnumerateArray().Select(name => name.GetString()!).Order().ToArray();
 
     private static void AssertClaimFields(CallToolResult result)
@@ -170,7 +170,7 @@ public sealed class KanbanToolsClaimTests
     }
 
     // The envelope: isError, structuredContent {code, message}, and one text block holding the same JSON.
-    private static string AssertError(CallToolResult result, string code)
+    internal static string AssertError(CallToolResult result, string code)
     {
         Assert.True(result.IsError);
         var structured = result.StructuredContent!.Value;
@@ -184,12 +184,12 @@ public sealed class KanbanToolsClaimTests
         return message!;
     }
 
-    private static HttpResponseMessage Json(HttpStatusCode status, string body) =>
+    internal static HttpResponseMessage Json(HttpStatusCode status, string body) =>
         new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
-    private sealed record RecordedRequest(HttpMethod Method, string Path, string Body);
+    internal sealed record RecordedRequest(HttpMethod Method, string Path, string Query, string Body);
 
-    private sealed class FakeApi(Func<RecordedRequest, HttpResponseMessage> respond) : HttpMessageHandler
+    internal sealed class FakeApi(Func<RecordedRequest, HttpResponseMessage> respond) : HttpMessageHandler
     {
         public List<RecordedRequest> Requests { get; } = [];
 
@@ -198,13 +198,14 @@ public sealed class KanbanToolsClaimTests
             var recorded = new RecordedRequest(
                 request.Method,
                 request.RequestUri!.AbsolutePath,
+                request.RequestUri.Query,
                 request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken));
             Requests.Add(recorded);
             return respond(recorded);
         }
     }
 
-    private sealed class McpFixture(IHost host, McpClient client, FakeApi api) : IAsyncDisposable
+    internal sealed class McpFixture(IHost host, McpClient client, FakeApi api) : IAsyncDisposable
     {
         public McpClient Client { get; } = client;
 

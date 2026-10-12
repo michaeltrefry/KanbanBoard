@@ -3,9 +3,9 @@
 //
 //   KANBAN_MCP_URL                 MCP endpoint, for example https://kanban-mcp.example.net/mcp
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
-//   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) one scratch work item
+//   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the three claim tools refuse it with scope_denied
+//                                  that the claim and dependency tools refuse it with scope_denied
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
@@ -138,6 +138,109 @@ finally
     }
 }
 
+// Dependencies: C is blocked by B, B is blocked by A.
+var chain = new Dictionary<string, string>();
+try
+{
+    foreach (var name in new[] { "A", "B", "C" })
+    {
+        var scratch = await CallAsync("create_work_item", new()
+        {
+            ["projectId"] = projectId,
+            ["title"] = $"Factory acceptance dependency item {name} {run}",
+            ["type"] = "Task"
+        });
+        if (scratch.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not create dependency scratch item {name}: {scratch.Code}: {scratch.Message}");
+            return 1;
+        }
+
+        chain[name] = scratch.Body.GetProperty("id").GetString()!;
+    }
+
+    Console.WriteLine($"Dependency scratch items A {chain["A"]}, B {chain["B"]}, C {chain["C"]}");
+
+    // 7. Add the two edges; reads report them.
+    var cOnB = await CallAsync("add_work_item_dependency", new() { ["id"] = chain["C"], ["blocked_by_id"] = chain["B"] });
+    Check("add_work_item_dependency (C blocked by B) returns C with B as its blocker",
+        cOnB.Code is null && ReferencedIds(cOnB.Body, "blockers").SequenceEqual([chain["B"]]), cOnB);
+    var bOnA = await CallAsync("add_work_item_dependency", new() { ["id"] = chain["B"], ["blocked_by_id"] = chain["A"] });
+    Check("add_work_item_dependency (B blocked by A) succeeds", bOnA.Code is null, bOnA);
+    var readB = await CallAsync("get_work_item", new() { ["itemId"] = chain["B"] });
+    Check("get_work_item on B returns blocker A and dependent C",
+        readB.Code is null &&
+        ReferencedIds(readB.Body, "blockers").SequenceEqual([chain["A"]]) &&
+        ReferencedIds(readB.Body, "dependents").SequenceEqual([chain["C"]]),
+        readB);
+
+    // 8. Only A is unblocked.
+    var unblocked = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["unblocked_only"] = true });
+    Check("list_work_items with unblocked_only returns A but neither B nor C",
+        unblocked.Code is null && ListedOf(unblocked.Body, chain).SequenceEqual(["A"]), unblocked);
+
+    // 9. Closing the loop is refused and changes nothing.
+    var cycle = await CallAsync("add_work_item_dependency", new() { ["id"] = chain["A"], ["blocked_by_id"] = chain["C"] });
+    Check("add_work_item_dependency (A blocked by C) is refused cycle", cycle.Code == "cycle", cycle);
+    var readA = await CallAsync("get_work_item", new() { ["itemId"] = chain["A"] });
+    Check("the refused call left A without blockers", readA.Code is null && ReferencedIds(readA.Body, "blockers").Length == 0, readA);
+
+    // 10. A read-scope token is refused by both dependency tools.
+    if (string.IsNullOrWhiteSpace(readToken))
+    {
+        Console.WriteLine("SKIP  read-scope refusal of the dependency tools (KANBAN_FACTORY_READ_TOKEN is not set)");
+    }
+    else
+    {
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        foreach (var tool in new[] { "add_work_item_dependency", "remove_work_item_dependency" })
+        {
+            var refused = await CallAsync(tool, new() { ["id"] = chain["C"], ["blocked_by_id"] = chain["B"] }, readClient);
+            Check($"{tool} with the read-scope token is refused scope_denied", refused.Code == "scope_denied", refused);
+        }
+
+        var readUnblocked = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["unblocked_only"] = true }, readClient);
+        Check("the read-scope token can list with unblocked_only, and C is still blocked",
+            readUnblocked.Code is null && ListedOf(readUnblocked.Body, chain).SequenceEqual(["A"]), readUnblocked);
+    }
+
+    // 11. Once A is Done, B is unblocked and C is not.
+    var done = await CallAsync("move_work_item", new() { ["itemId"] = chain["A"], ["status"] = "Done" });
+    Check("move_work_item moves A to Done", done.Code is null, done);
+    var afterDone = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["unblocked_only"] = true });
+    Check("after A is Done, list_work_items with unblocked_only returns B and still not C",
+        afterDone.Code is null && ListedOf(afterDone.Body, chain).SequenceEqual(["A", "B"]), afterDone);
+    var listedB = afterDone.Code is null
+        ? afterDone.Body.EnumerateArray().FirstOrDefault(item => StringField(item, "id") == chain["B"])
+        : default;
+    Check("the listed B reports its blocker A with status Done",
+        listedB.ValueKind == JsonValueKind.Object &&
+        listedB.GetProperty("blockers").EnumerateArray().Any(blocker =>
+            StringField(blocker, "id") == chain["A"] && StringField(blocker, "status") == "Done"),
+        afterDone);
+
+    // 12. Removing an edge unblocks its item.
+    var removed = await CallAsync("remove_work_item_dependency", new() { ["id"] = chain["C"], ["blocked_by_id"] = chain["B"] });
+    Check("remove_work_item_dependency (C blocked by B) returns C without blockers",
+        removed.Code is null && ReferencedIds(removed.Body, "blockers").Length == 0, removed);
+    var afterRemove = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["unblocked_only"] = true });
+    Check("after the removal, list_work_items with unblocked_only returns C",
+        afterRemove.Code is null && ListedOf(afterRemove.Body, chain).SequenceEqual(["A", "B", "C"]), afterRemove);
+}
+finally
+{
+    foreach (var (name, id) in chain)
+    {
+        var deleted = await CallAsync("delete_work_item", new() { ["itemId"] = id });
+        if (deleted.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not delete dependency scratch item {name} {id}: {deleted.Code}: {deleted.Message}");
+            failures++;
+        }
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
@@ -194,6 +297,19 @@ static DateTimeOffset? ExpiryField(JsonElement item) =>
     DateTimeOffset.TryParse(StringField(item, "claim_expires_at_utc"), null, System.Globalization.DateTimeStyles.RoundtripKind, out var expiry)
         ? expiry
         : null;
+
+// Ids in an item's "blockers" or "dependents" array.
+static string[] ReferencedIds(JsonElement item, string name) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var references) && references.ValueKind == JsonValueKind.Array
+        ? references.EnumerateArray().Select(reference => StringField(reference, "id")!).ToArray()
+        : ["<missing>"];
+
+// Which of the scratch items A, B, C a list result contains; other items in the project are ignored.
+static string[] ListedOf(JsonElement items, Dictionary<string, string> chain) =>
+    chain.Where(entry => items.EnumerateArray().Any(item => StringField(item, "id") == entry.Value))
+        .Select(entry => entry.Key)
+        .Order()
+        .ToArray();
 
 static bool IsNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && (!item.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null);

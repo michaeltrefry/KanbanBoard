@@ -94,7 +94,21 @@ public sealed record WorkItemDto(
     [property: JsonPropertyName("claimant")] string? Claimant = null,
     [property: JsonPropertyName("claimant_id")] Guid? ClaimantId = null,
     [property: JsonPropertyName("claim_marker")] string? ClaimMarker = null,
-    [property: JsonPropertyName("claim_expires_at_utc")] DateTimeOffset? ClaimExpiresAtUtc = null);
+    [property: JsonPropertyName("claim_expires_at_utc")] DateTimeOffset? ClaimExpiresAtUtc = null)
+{
+    /// <summary>Work items this item is blocked by, each with its current status.</summary>
+    [JsonPropertyName("blockers")]
+    public IReadOnlyList<WorkItemDependencyRefDto> Blockers { get; init; } = [];
+
+    /// <summary>Work items that are blocked by this item, each with its current status.</summary>
+    [JsonPropertyName("dependents")]
+    public IReadOnlyList<WorkItemDependencyRefDto> Dependents { get; init; } = [];
+}
+
+public sealed record WorkItemDependencyRefDto(
+    Guid Id,
+    string Title,
+    WorkItemStatus Status);
 
 public sealed record WorkItemSearchResultDto(
     Guid Id,
@@ -196,3 +210,6 @@ public sealed record ClaimWorkItemRequest(
 
 public sealed record ReleaseWorkItemClaimRequest(
     string Marker);
+
+public sealed record AddWorkItemDependencyRequest(
+    Guid BlockedByItemId);

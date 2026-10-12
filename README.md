@@ -95,6 +95,8 @@ Epics can be managed through project-scoped list/create endpoints plus retrieve/
 Epic documents can be managed through epic-scoped list/create endpoints plus retrieve/update endpoints for individual documents.
 `GetWorkItem` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
 Work item reads (`GetWorkItem`, `ListWorkItems`, `ListEpicWorkItems`, `GetIssues`, `GetBoard`) include the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are `null` when the item is unclaimed or its claim has expired.
+Work item reads also include `blockers` (the items this one is blocked by) and `dependents` (the items it blocks); each entry is `{id, title, status}` with the other item's current status, and both are `[]` when there are none.
+`ListWorkItems`, `ListEpicWorkItems` and `GetIssues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
 `SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
 
 ### Claims
@@ -105,6 +107,16 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 - A claim succeeds when the item is unclaimed, its claim has expired, or the caller already holds it under the same marker (the expiry is reset). Any other marker or identity on a live claim is refused `already_claimed`. The write is one conditional `UPDATE`, so two concurrent claims have exactly one winner.
 - Renew is refused `conflict` when the caller's claim has lapsed or was released, and `already_claimed` when someone else now holds the item. Release is refused the same way; the holder may release its own claim after it lapsed.
 - The claim tools are write tools: a `read` token is refused `scope_denied` before the API is called.
+
+### Dependencies
+
+`add_work_item_dependency(id, blocked_by_id)` records that work item `id` is blocked by work item `blocked_by_id`, and `remove_work_item_dependency(id, blocked_by_id)` deletes that edge. Both return work item `id` with its `blockers` and `dependents`.
+
+- A dependency that would make an item block itself, directly or through other items (including `id` equal to `blocked_by_id`), is refused `cycle` and nothing is written. The check and the insert run one caller at a time, so concurrent adds cannot close a loop between them.
+- Adding an edge that already exists, or removing one that does not, succeeds and changes nothing. An unknown `id` or `blocked_by_id` is refused `not_found`.
+- The two items may belong to different projects. Deleting a work item (or its project) deletes its dependencies.
+- A blocker counts as finished only in status `Done`; a `Closed` blocker still blocks, so remove the dependency if the blocker was abandoned.
+- Both are write tools: a `read` token is refused `scope_denied` before the API is called.
 
 ### Tool errors
 
@@ -117,8 +129,9 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `already_claimed` | The work item has a live claim held by another identity or marker. |
 | `conflict` | The entity is no longer in the state the call depends on; nothing was changed. |
 | `invalid_argument` | An argument is missing or out of range. |
+| `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, and every refusal from the claim tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, and every refusal from the claim and dependency tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 
@@ -162,6 +175,8 @@ The names below are the C# method names; on the wire each tool is its snake_case
 - `ClaimWorkItem`
 - `RenewWorkItemClaim`
 - `ReleaseWorkItemClaim`
+- `AddWorkItemDependency`
+- `RemoveWorkItemDependency`
 
 ## Production deployment
 

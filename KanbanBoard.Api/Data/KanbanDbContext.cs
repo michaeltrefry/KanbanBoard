@@ -12,6 +12,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<EpicDocument> EpicDocuments => Set<EpicDocument>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
     public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
+    public DbSet<WorkItemDependency> WorkItemDependencies => Set<WorkItemDependency>();
     public DbSet<AppUser> AppUsers => Set<AppUser>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
 
@@ -102,6 +103,23 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasOne(comment => comment.WorkItem)
                 .WithMany(item => item.Comments)
                 .HasForeignKey(comment => comment.WorkItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<WorkItemDependency>(entity =>
+        {
+            entity.HasKey(dependency => new { dependency.BlockedItemId, dependency.BlockerItemId });
+            entity.Property(dependency => dependency.BlockedItemId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(dependency => dependency.BlockerItemId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.HasIndex(dependency => dependency.BlockerItemId);
+            // Both sides cascade, so deleting an item (or its project) removes every edge that names it.
+            entity.HasOne(dependency => dependency.BlockedItem)
+                .WithMany()
+                .HasForeignKey(dependency => dependency.BlockedItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+            entity.HasOne(dependency => dependency.BlockerItem)
+                .WithMany()
+                .HasForeignKey(dependency => dependency.BlockerItemId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

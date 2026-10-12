@@ -25,6 +25,9 @@ public sealed class KanbanTools(
 
     public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
 
+    private const string UnblockedOnlyDescription =
+        "When true, return only items that are not waiting on a blocker: every item they are blocked by is Done (items with no blockers included)";
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -188,13 +191,14 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status. Closed items stay persisted but are hidden unless status=Closed is requested.")]
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, and status. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status.")]
     public async Task<IReadOnlyList<WorkItemDto>> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
         [Description("Optional epic id")] Guid? epicId = null,
         [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
         [Description("Optional status filter")] WorkItemStatus? status = null,
-        [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false)
+        [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false,
+        [Description(UnblockedOnlyDescription)] bool unblocked_only = false)
     {
         var client = httpClientFactory.CreateClient("kanban-api");
         var parameters = new List<string>();
@@ -224,6 +228,11 @@ public sealed class KanbanTools(
             parameters.Add("includeArchivedEpics=true");
         }
 
+        if (unblocked_only)
+        {
+            parameters.Add("unblockedOnly=true");
+        }
+
         var path = parameters.Count == 0
             ? "/api/items"
             : $"/api/items?{string.Join('&', parameters)}";
@@ -231,7 +240,7 @@ public sealed class KanbanTools(
         return await client.GetFromJsonAsync<IReadOnlyList<WorkItemDto>>(path, JsonOptions) ?? [];
     }
 
-    [McpServerTool, Description("Fetch a single work item by id, including its description, status, and comments.")]
+    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, and its blockers and dependents with their current status.")]
     public async Task<WorkItemDto> GetWorkItem(
         [Description("Work item id")] Guid itemId)
     {
@@ -252,20 +261,32 @@ public sealed class KanbanTools(
         [Description("Work item id")] Guid id,
         [Description("Caller-chosen id for this claim, such as a run id (max 200 characters, compared exactly). Renew and release must pass the same marker.")] string marker,
         [Description("Seconds until the claim lapses unless renewed (1 to 86400)")] int ttl_seconds) =>
-        PostClaimAsync($"/api/items/{id}/claim", new ClaimWorkItemRequest(marker, ttl_seconds));
+        SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/claim", new ClaimWorkItemRequest(marker, ttl_seconds)));
 
     [McpServerTool, Description("Extend a live claim the caller holds under this marker to ttl_seconds from now. Refused with code conflict when the claim has lapsed or was released, and already_claimed when someone else now holds the item.")]
     public Task<WorkItemDto> RenewWorkItemClaim(
         [Description("Work item id")] Guid id,
         [Description("Marker the claim was made with")] string marker,
         [Description("Seconds until the claim lapses unless renewed again (1 to 86400)")] int ttl_seconds) =>
-        PostClaimAsync($"/api/items/{id}/claim/renew", new ClaimWorkItemRequest(marker, ttl_seconds));
+        SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/claim/renew", new ClaimWorkItemRequest(marker, ttl_seconds)));
 
     [McpServerTool, Description("Release the caller's claim on a work item so others can claim it. Refused with code conflict when the caller holds no claim under this marker, and already_claimed when someone else holds the item.")]
     public Task<WorkItemDto> ReleaseWorkItemClaim(
         [Description("Work item id")] Guid id,
         [Description("Marker the claim was made with")] string marker) =>
-        PostClaimAsync($"/api/items/{id}/claim/release", new ReleaseWorkItemClaimRequest(marker));
+        SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/claim/release", new ReleaseWorkItemClaimRequest(marker)));
+
+    [McpServerTool, Description("Record that work item id is blocked by work item blocked_by_id. Adding a dependency that already exists changes nothing and succeeds. Refused with code cycle, changing nothing, when it would make an item block itself directly or through other items. Returns work item id with its blockers and dependents.")]
+    public Task<WorkItemDto> AddWorkItemDependency(
+        [Description("Id of the work item that is blocked")] Guid id,
+        [Description("Id of the work item that blocks it")] Guid blocked_by_id) =>
+        SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/dependencies", new AddWorkItemDependencyRequest(blocked_by_id)));
+
+    [McpServerTool, Description("Remove the dependency that makes work item id blocked by work item blocked_by_id. Removing a dependency that does not exist changes nothing and succeeds. Returns work item id with its blockers and dependents.")]
+    public Task<WorkItemDto> RemoveWorkItemDependency(
+        [Description("Id of the work item that is blocked")] Guid id,
+        [Description("Id of the work item that blocks it")] Guid blocked_by_id) =>
+        SendWorkItemWriteAsync(client => client.DeleteAsync($"/api/items/{id}/dependencies/{blocked_by_id}"));
 
     [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, titles, types, and statuses only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
     public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(
@@ -300,15 +321,17 @@ public sealed class KanbanTools(
         [Description("Epic id")] Guid epicId,
         [Description("Optional work item type: Story, Issue, or Task")] WorkItemType? type = null,
         [Description("Optional status filter")] WorkItemStatus? status = null,
-        [Description("Whether to include items when the epic is archived")] bool includeArchivedEpics = false) =>
-        ListWorkItems(epicId: epicId, type: type, status: status, includeArchivedEpics: includeArchivedEpics);
+        [Description("Whether to include items when the epic is archived")] bool includeArchivedEpics = false,
+        [Description(UnblockedOnlyDescription)] bool unblocked_only = false) =>
+        ListWorkItems(epicId: epicId, type: type, status: status, includeArchivedEpics: includeArchivedEpics, unblocked_only: unblocked_only);
 
     [McpServerTool, Description("Fetch issue work items, optionally filtered by project and status.")]
     public async Task<IReadOnlyList<WorkItemDto>> GetIssues(
         [Description("Optional project id")] Guid? projectId = null,
-        [Description("Optional status filter")] WorkItemStatus? status = null)
+        [Description("Optional status filter")] WorkItemStatus? status = null,
+        [Description(UnblockedOnlyDescription)] bool unblocked_only = false)
     {
-        return await ListWorkItems(projectId: projectId, type: WorkItemType.Issue, status: status);
+        return await ListWorkItems(projectId: projectId, type: WorkItemType.Issue, status: status, unblocked_only: unblocked_only);
     }
 
     [McpServerTool, Description("Add a comment to any work item. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
@@ -452,14 +475,15 @@ public sealed class KanbanTools(
         return new DeleteResultDto(itemId, "work_item", true);
     }
 
-    private async Task<WorkItemDto> PostClaimAsync<TRequest>(string path, TRequest request)
+    // A write that returns the work item, with API refusals turned into the typed error envelope.
+    private async Task<WorkItemDto> SendWorkItemWriteAsync(Func<HttpClient, Task<HttpResponseMessage>> send)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        using var response = await client.PostAsJsonAsync(path, request);
+        using var response = await send(client);
         await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions)
-            ?? throw new InvalidOperationException($"The Kanban API returned no work item for {path}.");
+            ?? throw new InvalidOperationException($"The Kanban API returned no work item for {response.RequestMessage?.RequestUri?.AbsolutePath}.");
     }
 
     // Write tools call this before touching the API. Tools that do not call it are read tools

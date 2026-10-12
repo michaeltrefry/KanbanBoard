@@ -142,6 +142,8 @@ mariadb -h HOST -P 3306 -u kanban -p kanban -e "SELECT MigrationId FROM __EFMigr
 
 For the work item claim change (sc-25859) the API adds four nullable claim columns to `WorkItems` on its first start (`20261012211402_AddWorkItemClaim`); existing items start unclaimed. `deploy/sql/003_work_item_claim.sql` is the manual equivalent.
 
+For the work item dependency change (sc-25860) the API creates the `WorkItemDependencies` table on its first start (`20261012214428_AddWorkItemDependencies`); existing items start with no dependencies. `deploy/sql/004_work_item_dependencies.sql` is the manual equivalent.
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:

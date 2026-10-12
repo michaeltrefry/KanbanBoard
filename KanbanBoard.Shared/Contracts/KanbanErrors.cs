@@ -20,6 +20,9 @@ public static class KanbanErrorCodes
 
     /// <summary>An argument is missing or out of range.</summary>
     public const string InvalidArgument = "invalid_argument";
+
+    /// <summary>The dependency would make a work item block itself, directly or through other items; nothing was changed.</summary>
+    public const string Cycle = "cycle";
 }
 
 public sealed record KanbanErrorDto(string Code, string Message);
