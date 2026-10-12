@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace KanbanBoard.Shared.Contracts;
 
 public enum WorkItemType
@@ -87,7 +89,12 @@ public sealed record WorkItemDto(
     string? Labels,
     IReadOnlyList<WorkItemCommentDto> Comments,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc,
+    // Live claim, or all null when the item is unclaimed or its claim has expired.
+    [property: JsonPropertyName("claimant")] string? Claimant = null,
+    [property: JsonPropertyName("claimant_id")] Guid? ClaimantId = null,
+    [property: JsonPropertyName("claim_marker")] string? ClaimMarker = null,
+    [property: JsonPropertyName("claim_expires_at_utc")] DateTimeOffset? ClaimExpiresAtUtc = null);
 
 public sealed record WorkItemSearchResultDto(
     Guid Id,
@@ -182,3 +189,10 @@ public sealed record CreatePersonalAccessTokenRequest(
     string Name,
     DateTimeOffset? ExpiresAtUtc,
     string? Scope = null);
+
+public sealed record ClaimWorkItemRequest(
+    string Marker,
+    int TtlSeconds);
+
+public sealed record ReleaseWorkItemClaimRequest(
+    string Marker);

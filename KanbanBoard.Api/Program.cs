@@ -5,6 +5,7 @@ using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Scalar.AspNetCore;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -61,6 +62,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 builder.Services.AddOpenApi();
 builder.Services.AddSingleton<BoardChangeNotifier>();
+builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter());
@@ -83,6 +85,19 @@ using (var scope = app.Services.CreateScope())
         CancellationToken.None);
 }
 
+if (ServiceIdentityCommand.IsCommand(args))
+{
+    // Operator command: runs against the configured database and exits without serving HTTP.
+    using var scope = app.Services.CreateScope();
+    Environment.ExitCode = await ServiceIdentityCommand.RunAsync(
+        args,
+        scope.ServiceProvider,
+        Console.Out,
+        Console.Error,
+        CancellationToken.None);
+    return;
+}
+
 if (authOptions.Enabled)
 {
     app.UseForwardedHeaders();
@@ -101,6 +116,7 @@ else
 app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
+app.MapKanbanClaimEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
@@ -861,34 +877,7 @@ static EpicDocumentDto ToEpicDocumentDto(EpicDocument document) =>
         document.UpdatedAtUtc);
 
 static WorkItemDto ToWorkItemDto(WorkItem item) =>
-    new(
-        item.Id,
-        item.ProjectId,
-        item.EpicId,
-        item.Epic is null ? null : new EpicReferenceDto(item.Epic.Id, item.Epic.Name),
-        item.Title,
-        item.Description,
-        item.Type,
-        item.Status,
-        item.Priority,
-        item.Order,
-        item.Estimate,
-        item.Labels,
-        item.Comments
-            .OrderBy(comment => comment.CreatedAtUtc)
-            .ThenBy(comment => comment.Id)
-            .Select(ToWorkItemCommentDto)
-            .ToList(),
-        item.CreatedAtUtc,
-        item.UpdatedAtUtc);
-
-static WorkItemCommentDto ToWorkItemCommentDto(WorkItemComment comment) =>
-    new(
-        comment.Id,
-        comment.WorkItemId,
-        comment.Author,
-        comment.Body,
-        comment.CreatedAtUtc);
+    WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
 
 static string? NormalizeLabels(string? labels) =>
     string.IsNullOrWhiteSpace(labels)

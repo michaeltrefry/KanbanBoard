@@ -235,6 +235,22 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasMaxLength(36)
                         .HasColumnType("varchar(36)");
 
+                    b.Property<DateTime?>("ClaimExpiresAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ClaimMarker")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("ClaimantName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("ClaimantUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
 

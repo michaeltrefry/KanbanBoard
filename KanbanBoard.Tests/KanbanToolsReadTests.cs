@@ -60,7 +60,9 @@ public sealed class KanbanToolsReadTests
         var handler = new StubHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound));
         var tools = CreateTools(handler);
 
-        var exception = await Assert.ThrowsAsync<McpException>(() => tools.GetWorkItem(itemId));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => tools.GetWorkItem(itemId));
+
+        Assert.Equal(KanbanErrorCodes.NotFound, exception.Code);
 
         Assert.Contains("not found", exception.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(itemId.ToString(), exception.Message);

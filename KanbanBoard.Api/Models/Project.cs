@@ -57,6 +57,11 @@ public sealed class WorkItem
     public List<WorkItemComment> Comments { get; set; } = [];
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+    // Claim: all four are set together by WorkItemClaims and cleared together on release.
+    public Guid? ClaimantUserId { get; set; }
+    public string? ClaimantName { get; set; }
+    public string? ClaimMarker { get; set; }
+    public DateTimeOffset? ClaimExpiresAtUtc { get; set; }
 }
 
 public sealed class WorkItemComment

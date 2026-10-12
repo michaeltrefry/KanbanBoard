@@ -67,7 +67,7 @@ The API container still listens on internal HTTP port `8080` so the MCP containe
 
 ## MCP tools
 
-The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, comment, delete) return a scope error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
+The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, claim, comment, delete) return a `scope_denied` error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
 
 The MCP service exposes tools for:
 
@@ -94,9 +94,45 @@ The MCP service exposes tools for:
 Epics can be managed through project-scoped list/create endpoints plus retrieve/update/delete endpoints for individual epics.
 Epic documents can be managed through epic-scoped list/create endpoints plus retrieve/update endpoints for individual documents.
 `GetWorkItem` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
+Work item reads (`GetWorkItem`, `ListWorkItems`, `ListEpicWorkItems`, `GetIssues`, `GetBoard`) include the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are `null` when the item is unclaimed or its claim has expired.
 `SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
 
+### Claims
+
+An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)`, keeps it with `renew_work_item_claim(id, marker, ttl_seconds)` and gives it up with `release_work_item_claim(id, marker)`. `id` is the work item id (a GUID), `marker` is a caller-chosen id for the claim such as a run id (at most 200 characters, compared exactly), and `ttl_seconds` is 1 to 86400. All three return the work item.
+
+- The claimant is always the identity that owns the calling token. No argument can name another one.
+- A claim succeeds when the item is unclaimed, its claim has expired, or the caller already holds it under the same marker (the expiry is reset). Any other marker or identity on a live claim is refused `already_claimed`. The write is one conditional `UPDATE`, so two concurrent claims have exactly one winner.
+- Renew is refused `conflict` when the caller's claim has lapsed or was released, and `already_claimed` when someone else now holds the item. Release is refused the same way; the holder may release its own claim after it lapsed.
+- The claim tools are write tools: a `read` token is refused `scope_denied` before the API is called.
+
+### Tool errors
+
+A refused tool call returns a tool result with `isError: true`. Its `structuredContent` is `{"code": "...", "message": "..."}` and its single text block holds the same JSON. Branch on `code`; `message` is for people and may change.
+
+| Code | Meaning |
+| --- | --- |
+| `scope_denied` | The token (or missing token) is not allowed to make this call. |
+| `not_found` | The addressed entity does not exist. |
+| `already_claimed` | The work item has a live claim held by another identity or marker. |
+| `conflict` | The entity is no longer in the state the call depends on; nothing was changed. |
+| `invalid_argument` | An argument is missing or out of range. |
+
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, and every refusal from the claim tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+
+### Service identities
+
+A service identity is a user that no person signs in as, for a program such as the factory orchestrator. Create one with the API's own command; it needs no browser or OIDC login and prints one `full` and one `read` token:
+
+```bash
+dotnet KanbanBoard.Api.dll create-service-identity --name factory [--rotate]
+```
+
+The name is the identity's display name and the `claimant` on the items it claims. Running the command again with the same name adds a new token pair to the same identity; `--rotate` revokes its existing tokens first. See [docs/deployment.md](docs/deployment.md#factory-service-identity) for the production steps.
+
 ### Available tool names
+
+The names below are the C# method names; on the wire each tool is its snake_case form (`ListProjects` is `list_projects`).
 
 - `ListProjects`
 - `CreateProject`
@@ -123,6 +159,9 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 - `UpdateWorkItem`
 - `MoveWorkItem`
 - `DeleteWorkItem`
+- `ClaimWorkItem`
+- `RenewWorkItemClaim`
+- `ReleaseWorkItemClaim`
 
 ## Production deployment
 
