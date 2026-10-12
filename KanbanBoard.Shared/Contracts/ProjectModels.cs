@@ -105,6 +105,14 @@ public sealed record WorkItemDto(
     public IReadOnlyList<WorkItemDependencyRefDto> Dependents { get; init; } = [];
 }
 
+/// <summary>
+/// One page of a work item list. <see cref="NextCursor"/> is null on the last page; otherwise pass it back
+/// unchanged, with the same filters, to get the next page.
+/// </summary>
+public sealed record WorkItemPageDto(
+    [property: JsonPropertyName("items")] IReadOnlyList<WorkItemDto> Items,
+    [property: JsonPropertyName("next_cursor")] string? NextCursor);
+
 public sealed record WorkItemDependencyRefDto(
     Guid Id,
     string Title,

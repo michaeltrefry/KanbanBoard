@@ -17,7 +17,7 @@ namespace KanbanBoard.Tests;
 // each one that returns work items must return their blockers and dependents.
 public sealed class ProgramDependencyWiringTests
 {
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
+    internal static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { Converters = { new JsonStringEnumConverter() } };
 
     [Fact]
     public async Task Board_update_move_and_comment_responses_carry_blockers_and_dependents()
@@ -45,9 +45,9 @@ public sealed class ProgramDependencyWiringTests
         Assert.Equal(blockedByA, commented.Blockers);
     }
 
-    private static Task<T> PostAsync<T>(HttpClient client, string path, object body) => SendAsync<T>(client, HttpMethod.Post, path, body);
+    internal static Task<T> PostAsync<T>(HttpClient client, string path, object body) => SendAsync<T>(client, HttpMethod.Post, path, body);
 
-    private static async Task<T> SendAsync<T>(HttpClient client, HttpMethod method, string path, object body)
+    internal static async Task<T> SendAsync<T>(HttpClient client, HttpMethod method, string path, object body)
     {
         using var response = await client.SendAsync(new HttpRequestMessage(method, path) { Content = JsonContent.Create(body) });
         Assert.True(response.IsSuccessStatusCode, $"{method} {path}: {(int)response.StatusCode} {await response.Content.ReadAsStringAsync()}");
@@ -55,7 +55,7 @@ public sealed class ProgramDependencyWiringTests
     }
 
     // Any type of the API assembly names it; the test project also references the MCP server, which has its own Program.
-    private sealed class ApiApplication : WebApplicationFactory<KanbanDbContext>
+    internal sealed class ApiApplication : WebApplicationFactory<KanbanDbContext>
     {
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"kanban-program-{Guid.NewGuid():N}.db");
 

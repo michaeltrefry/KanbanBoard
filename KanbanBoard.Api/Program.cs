@@ -735,6 +735,8 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
     };
 
     dbContext.WorkItemComments.Add(comment);
+    // A new comment is a change to the item: readers polling with updated_since must see it.
+    item.UpdatedAtUtc = createdAtUtc;
     await dbContext.SaveChangesAsync(cancellationToken);
 
     var refreshedItem = await dbContext.WorkItems
@@ -870,8 +872,8 @@ static async Task NormalizeColumnOrderingAsync(
             index++;
         }
 
+        // Order only: a sibling that merely shifts has not changed, so its UpdatedAtUtc stays.
         item.Order = index++;
-        item.UpdatedAtUtc = DateTimeOffset.UtcNow;
     }
 }
 
