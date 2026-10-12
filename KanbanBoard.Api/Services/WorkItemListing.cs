@@ -72,13 +72,17 @@ public static class WorkItemListing
         return known;
     }
 
+    // ISO 8601 only: a date and time with an optional fraction of 1 to 7 digits and an optional Z or offset, or a
+    // date alone (midnight). Anything else, such as 10/12/2026, is refused rather than guessed at.
+    private static readonly string[] TimestampFormats = ["yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK", "yyyy-MM-dd"];
+
     /// <summary>
     /// Parses an ISO 8601 timestamp; one without an offset is read as UTC. The result is cut to whole microseconds,
     /// the precision MariaDB stores, so a stamp copied from a write response still matches the stored value.
     /// </summary>
     public static bool TryParseTimestamp(string value, out DateTimeOffset timestamp)
     {
-        if (!DateTimeOffset.TryParse(value.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out timestamp))
+        if (!DateTimeOffset.TryParseExact(value.Trim(), TimestampFormats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out timestamp))
         {
             return false;
         }

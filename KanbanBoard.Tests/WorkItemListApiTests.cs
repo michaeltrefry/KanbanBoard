@@ -283,6 +283,7 @@ public sealed class WorkItemListApiTests
     [InlineData("limit=201")]
     [InlineData("updatedSince=yesterday")]
     [InlineData("updatedSince=")]
+    [InlineData("updatedSince=10/12/2026")]
     [InlineData("claimState=mine")]
     [InlineData("claimState=1")]
     [InlineData("label=")]
@@ -296,6 +297,50 @@ public sealed class WorkItemListApiTests
 
         await AssertErrorAsync(response, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
     }
+
+    [Theory]
+    [InlineData("2026-10-01T09:00:00Z", 0)]
+    [InlineData("2026-10-01T11:00:00+02:00", 0)]
+    [InlineData("2026-10-01T09:00:00", 0)]
+    [InlineData("2026-10-01T09:00:00.1Z", 1000000)]
+    [InlineData("2026-10-01T09:00:00.12", 1200000)]
+    [InlineData("2026-10-01T09:00:00.123+00:00", 1230000)]
+    [InlineData("2026-10-01T09:00:00.1234Z", 1234000)]
+    [InlineData("2026-10-01T09:00:00.12345Z", 1234500)]
+    [InlineData("2026-10-01T09:00:00.123456Z", 1234560)]
+    // Seven digits are accepted and cut to the microsecond.
+    [InlineData("2026-10-01T09:00:00.1234567+00:00", 1234560)]
+    public void Updated_since_accepts_iso_8601_timestamps(string value, long ticksPastTheHour)
+    {
+        Assert.True(WorkItemListing.TryParseTimestamp(value, out var timestamp));
+
+        Assert.Equal(Start.AddHours(1).AddTicks(ticksPastTheHour), timestamp);
+        Assert.Equal(TimeSpan.Zero, timestamp.Offset);
+    }
+
+    [Fact]
+    public void Updated_since_accepts_a_date_alone_as_midnight_utc_and_the_stamps_the_api_writes()
+    {
+        Assert.True(WorkItemListing.TryParseTimestamp("2026-10-01", out var midnight));
+        Assert.Equal(new DateTimeOffset(2026, 10, 1, 0, 0, 0, TimeSpan.Zero), midnight);
+
+        // updatedAtUtc exactly as the API serialises it, with and without a fraction.
+        foreach (var stamp in new[] { Start, Start.AddTicks(1234560), Start.AddTicks(1200000) })
+        {
+            var written = JsonSerializer.Deserialize<string>(JsonSerializer.Serialize(stamp))!;
+            Assert.True(WorkItemListing.TryParseTimestamp(written, out var read), written);
+            Assert.Equal(stamp, read);
+        }
+    }
+
+    [Theory]
+    [InlineData("10/12/2026")]
+    [InlineData("12 Oct 2026")]
+    [InlineData("2026-10-12 12:00:00Z")]
+    [InlineData("2026-10-12T12:00:00.12345678Z")]
+    [InlineData("12:00:00")]
+    public void Updated_since_refuses_what_is_not_iso_8601(string value) =>
+        Assert.False(WorkItemListing.TryParseTimestamp(value, out _));
 
     [Fact]
     public void A_cursor_round_trips_and_shows_nothing_readable()

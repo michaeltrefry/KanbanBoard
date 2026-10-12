@@ -12,6 +12,10 @@ public sealed class KanbanToolsListTests
     private const string ItemJson =
         """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[]}""";
 
+    // ItemJson as the tools return it: in an array, with the null properties left out.
+    private const string ExpectedArrayText =
+        """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[]}]""";
+
     private static readonly string[] OriginalArguments = ["epicId", "includeArchivedEpics", "projectId", "status", "type", "unblocked_only"];
 
     [Fact]
@@ -43,11 +47,11 @@ public sealed class KanbanToolsListTests
 
         Assert.Equal(string.Empty, server.Api.Requests[0].Query);
         Assert.Equal($"?projectId={projectId}&type=Story&status=Ready&includeArchivedEpics=true&unblockedOnly=true", server.Api.Requests[1].Query);
-        // get_issues did not change: list_work_items must return, byte for byte, what it returns for the same API answer.
-        var unchanged = Text(await server.CallAsync("get_issues", []));
-        Assert.StartsWith("[{\"id\":\"11111111-1111-1111-1111-111111111111\"", unchanged, StringComparison.Ordinal);
-        Assert.Equal(unchanged, Text(bare));
-        Assert.Equal(unchanged, Text(filtered));
+        // The array result, byte for byte: the API answer with its null properties left out.
+        Assert.Equal(ExpectedArrayText, Text(bare));
+        Assert.Equal(ExpectedArrayText, Text(filtered));
+        // get_issues reads through the same code and returns the same text for the same API answer.
+        Assert.Equal(ExpectedArrayText, Text(await server.CallAsync("get_issues", [])));
         Assert.NotEqual(true, bare.IsError);
     }
 
