@@ -191,7 +191,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, status, label, claim state and time of last change. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status. Without limit and cursor the result is an array of every matching item, in board order. With limit or cursor it is one page, oldest item first: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. A malformed argument is refused with code invalid_argument.")]
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, status, label, claim state and time of last change. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status, and its external links. Without limit and cursor the result is an array of every matching item, in board order. With limit or cursor it is one page, oldest item first: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. A malformed argument is refused with code invalid_argument.")]
     public async Task<object> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
         [Description("Optional epic id")] Guid? epicId = null,
@@ -200,7 +200,7 @@ public sealed class KanbanTools(
         [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false,
         [Description(UnblockedOnlyDescription)] bool unblocked_only = false,
         [Description("Return only items that carry this label. The whole label must match, ignoring case: 'api' does not match an item labelled 'rapid'.")] string? label = null,
-        [Description("ISO 8601 timestamp, for example 2026-10-12T12:00:00Z. Return only items whose updatedAtUtc is at or after it. updatedAtUtc changes when the item's fields change, when it is moved, or when a comment is added to it; it does not change when the item is claimed, renewed or released, when a claim expires, or when a dependency or another item changes.")] string? updated_since = null,
+        [Description("ISO 8601 timestamp, for example 2026-10-12T12:00:00Z. Return only items whose updatedAtUtc is at or after it. updatedAtUtc changes when the item's fields change, when it is moved, when a comment is added to it, or when a link is added to or removed from it; it does not change when the item is claimed, renewed or released, when a claim expires, or when a dependency or another item changes.")] string? updated_since = null,
         [Description("Claim state at the time of the call: 'unclaimed' (no live claim, including a claim that has expired), 'claimed' (a live claim), or 'expired' (a claim that expired and was not released or replaced)")] string? claim_state = null,
         [Description("Page size, 1 to 200. Passing limit or cursor makes the result a page object instead of an array.")] int? limit = null,
         [Description("next_cursor of the previous page, passed back unchanged together with the same filters. Each matching item is returned exactly once across the pages, also when items are moved or edited in between. Page size is 50 when limit is not passed.")] string? cursor = null,
@@ -285,7 +285,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<TResult>(JsonOptions);
     }
 
-    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, and its blockers and dependents with their current status.")]
+    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links.")]
     public async Task<WorkItemDto> GetWorkItem(
         [Description("Work item id")] Guid itemId)
     {
@@ -332,6 +332,49 @@ public sealed class KanbanTools(
         [Description("Id of the work item that is blocked")] Guid id,
         [Description("Id of the work item that blocks it")] Guid blocked_by_id) =>
         SendWorkItemWriteAsync(client => client.DeleteAsync($"/api/items/{id}/dependencies/{blocked_by_id}"));
+
+    [McpServerTool, Description("Attach an external URL, such as a pull request or a branch, to work item id. kind is pr, branch or other; any other kind is refused with code invalid_argument, as is a url that is not an absolute http or https URL of at most 2048 characters. Adding a kind and url the item already carries changes nothing and succeeds. The same url may be attached to several items. Returns work item id; its links field lists each link as {id, kind, url, created_at_utc}.")]
+    public Task<WorkItemDto> AddWorkItemLink(
+        [Description("Work item id")] Guid id,
+        [Description("Kind of link: pr, branch or other")] string kind,
+        [Description("Absolute http or https URL, at most 2048 characters. URLs are compared exactly, character for character.")] string url) =>
+        SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/links", new AddWorkItemLinkRequest(kind, url)));
+
+    [McpServerTool, Description("Remove one link from work item id. Address the link either by link_id (the id of an entry of the item's links field) or by kind and url together; any other combination is refused with code invalid_argument. Removing a link the item does not carry changes nothing and succeeds. Returns work item id with its remaining links.")]
+    public Task<WorkItemDto> RemoveWorkItemLink(
+        [Description("Work item id")] Guid id,
+        [Description("Id of the link to remove. Leave out when passing kind and url.")] Guid? link_id = null,
+        [Description("Kind of the link to remove: pr, branch or other. Pass together with url.")] string? kind = null,
+        [Description("URL of the link to remove, exactly as it was added. Pass together with kind.")] string? url = null)
+    {
+        var parameters = new List<string>();
+        if (link_id is not null)
+        {
+            parameters.Add($"linkId={link_id}");
+        }
+
+        if (kind is not null)
+        {
+            parameters.Add($"kind={Uri.EscapeDataString(kind)}");
+        }
+
+        if (url is not null)
+        {
+            parameters.Add($"url={Uri.EscapeDataString(url)}");
+        }
+
+        return SendWorkItemWriteAsync(client => client.DeleteAsync($"/api/items/{id}/links?{string.Join('&', parameters)}"));
+    }
+
+    [McpServerTool, Description("Find the work items that carry an external link with exactly this URL, under any kind and in any status, project or epic, oldest item first. Returns full work items, and an empty array when no item carries the URL.")]
+    public async Task<IReadOnlyList<WorkItemDto>> FindWorkItemsByLink(
+        [Description("The URL, exactly as it was added: URLs are compared character for character")] string url)
+    {
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.GetAsync($"/api/items/by-link?url={Uri.EscapeDataString(url)}");
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<IReadOnlyList<WorkItemDto>>(JsonOptions) ?? [];
+    }
 
     [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, titles, types, and statuses only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
     public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(

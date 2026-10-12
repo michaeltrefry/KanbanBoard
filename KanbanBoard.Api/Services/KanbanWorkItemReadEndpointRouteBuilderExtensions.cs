@@ -120,9 +120,11 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 var lastCreatedAtUtc = page[^1].CreatedAtUtc;
                 var pageDependencies = await WorkItemDependencies.LoadAsync(
                     dbContext, query.Where(item => item.CreatedAtUtc <= lastCreatedAtUtc), cancellationToken);
+                var pageLinks = await WorkItemLinks.LoadAsync(
+                    dbContext, query.Where(item => item.CreatedAtUtc <= lastCreatedAtUtc), cancellationToken);
 
                 return Results.Ok(new WorkItemPageDto(
-                    page.Select(item => WorkItemDtoMapper.ToDto(item, now, pageDependencies)).ToList(),
+                    page.Select(item => WorkItemDtoMapper.ToDto(item, now, pageDependencies, pageLinks)).ToList(),
                     rows.Count > pageSize ? WorkItemCursor.After(page[^1]).Encode() : null));
             }
 
@@ -131,15 +133,39 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 .ThenBy(item => item.Order)
                 .ToListAsync(cancellationToken);
             var dependencies = await WorkItemDependencies.LoadAsync(dbContext, query, cancellationToken);
+            var links = await WorkItemLinks.LoadAsync(dbContext, query, cancellationToken);
 
             return Results.Ok(items
                 .OrderBy(item => item.Status)
                 .ThenBy(item => item.Order)
                 .ThenBy(item => item.CreatedAtUtc)
-                .Select(item => WorkItemDtoMapper.ToDto(item, now, dependencies))
+                .Select(item => WorkItemDtoMapper.ToDto(item, now, dependencies, links))
                 .ToList());
         })
         .WithName("ListWorkItems");
+
+        // Every item that carries the URL, whatever its status, project or epic, oldest first.
+        endpoints.MapGet("/api/items/by-link", async (string? url, KanbanDbContext dbContext, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        {
+            var normalizedUrl = url?.Trim();
+            if (string.IsNullOrEmpty(normalizedUrl))
+            {
+                return InvalidArgument("Argument 'url' is required.");
+            }
+
+            var query = dbContext.WorkItems.AsNoTracking().WhereHasLink(dbContext, normalizedUrl);
+            var items = await query
+                .Include(item => item.Epic)
+                .Include(item => item.Comments)
+                .InPagingOrder()
+                .ToListAsync(cancellationToken);
+            var dependencies = await WorkItemDependencies.LoadAsync(dbContext, query, cancellationToken);
+            var links = await WorkItemLinks.LoadAsync(dbContext, query, cancellationToken);
+            var now = timeProvider.GetUtcNow();
+
+            return Results.Ok(items.Select(item => WorkItemDtoMapper.ToDto(item, now, dependencies, links)).ToList());
+        })
+        .WithName("FindWorkItemsByLink");
 
         endpoints.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
         {
@@ -154,7 +180,8 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 : Results.Ok(WorkItemDtoMapper.ToDto(
                     item,
                     DateTimeOffset.UtcNow,
-                    await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken)));
+                    await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
+                    await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
         })
         .WithName("GetWorkItem");
 

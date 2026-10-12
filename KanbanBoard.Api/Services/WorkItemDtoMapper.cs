@@ -6,8 +6,13 @@ namespace KanbanBoard.Api.Services;
 public static class WorkItemDtoMapper
 {
     // A claim past its expiry is reported as no claim, so readers never have to compare clocks with the server.
-    // Pass the lookup from WorkItemDependencies.LoadAsync; without it the item is reported with no dependencies.
-    public static WorkItemDto ToDto(WorkItem item, DateTimeOffset now, WorkItemDependencyLookup? dependencies = null)
+    // Pass the lookups from WorkItemDependencies.LoadAsync and WorkItemLinks.LoadAsync; without them the item is
+    // reported with no dependencies and no links.
+    public static WorkItemDto ToDto(
+        WorkItem item,
+        DateTimeOffset now,
+        WorkItemDependencyLookup? dependencies = null,
+        ILookup<Guid, WorkItemLinkDto>? links = null)
     {
         var claimed = item.ClaimExpiresAtUtc > now;
         return new(
@@ -36,7 +41,8 @@ public static class WorkItemDtoMapper
             claimed ? item.ClaimExpiresAtUtc : null)
         {
             Blockers = dependencies?.Blockers[item.Id].ToList() ?? [],
-            Dependents = dependencies?.Dependents[item.Id].ToList() ?? []
+            Dependents = dependencies?.Dependents[item.Id].ToList() ?? [],
+            Links = links?[item.Id].ToList() ?? []
         };
     }
 

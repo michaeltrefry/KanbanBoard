@@ -55,7 +55,7 @@ public sealed class WorkItemListMySqlTests
     }
 
     [Fact]
-    public async Task A_page_is_a_keyset_query_and_its_dependencies_are_bounded_by_a_range_not_a_list_of_ids()
+    public async Task A_page_is_a_keyset_query_and_its_dependencies_and_links_are_bounded_by_a_range_not_a_list_of_ids()
     {
         var database = new FakeDatabase(lockResult: 1, OneItem);
         using var host = await StartApiAsync(database);
@@ -66,7 +66,7 @@ public sealed class WorkItemListMySqlTests
         var body = await response.Content.ReadAsStringAsync();
         Assert.True(response.StatusCode == HttpStatusCode.OK, body);
         Assert.Contains(ItemId.ToString(), body, StringComparison.Ordinal);
-        Assert.Equal(2, database.Commands.Count);
+        Assert.Equal(3, database.Commands.Count);
         var page = Normalize(database.Commands[0].Text);
         Assert.Contains("((`w`.`CreatedAtUtc` > @createdAtUtc) OR ((`w`.`CreatedAtUtc` = @createdAtUtc) AND (`w`.`Id` > @id)))", page, StringComparison.Ordinal);
         Assert.EndsWith("ORDER BY `w`.`CreatedAtUtc`, `w`.`Id`\nLIMIT @p", page, StringComparison.Ordinal);
@@ -79,6 +79,12 @@ public sealed class WorkItemListMySqlTests
         // MySql.EntityFrameworkCore cannot translate Contains over a list of ids, and MariaDB has no LIMIT inside EXISTS/IN.
         Assert.DoesNotContain(" IN (", dependencies, StringComparison.Ordinal);
         Assert.DoesNotContain("LIMIT", dependencies, StringComparison.Ordinal);
+        // The links of the page are bounded the same way.
+        var links = Normalize(database.Commands[2].Text);
+        Assert.Contains("FROM `WorkItemLinks`", links, StringComparison.Ordinal);
+        Assert.Contains("(`w0`.`CreatedAtUtc` <= @lastCreatedAtUtc)", links, StringComparison.Ordinal);
+        Assert.DoesNotContain(" IN (", links, StringComparison.Ordinal);
+        Assert.DoesNotContain("LIMIT", links, StringComparison.Ordinal);
     }
 
     [Fact]

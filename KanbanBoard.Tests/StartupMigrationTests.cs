@@ -243,6 +243,9 @@ public sealed class StartupMigrationTests
     {
         public List<(string Text, int Timeout)> Commands { get; } = [];
 
+        // What a command that returns no rows (such as the UPDATE of ExecuteUpdate) reports as rows affected.
+        public int NonQueryResult { get; init; }
+
         private void Record(DbCommand command) => Commands.Add((command.CommandText, command.CommandTimeout));
 
         private object? Scalar(DbCommand command) =>
@@ -287,14 +290,14 @@ public sealed class StartupMigrationTests
         public InterceptionResult<int> NonQueryExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
         {
             Record(command);
-            return InterceptionResult<int>.SuppressWithResult(0);
+            return InterceptionResult<int>.SuppressWithResult(NonQueryResult);
         }
 
         public ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
             DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
             Record(command);
-            return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(0));
+            return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(NonQueryResult));
         }
 
         public InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)

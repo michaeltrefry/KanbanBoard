@@ -13,6 +13,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
     public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
     public DbSet<WorkItemDependency> WorkItemDependencies => Set<WorkItemDependency>();
+    public DbSet<WorkItemLink> WorkItemLinks => Set<WorkItemLink>();
     public DbSet<AppUser> AppUsers => Set<AppUser>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
 
@@ -120,6 +121,24 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasOne(dependency => dependency.BlockerItem)
                 .WithMany()
                 .HasForeignKey(dependency => dependency.BlockerItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<WorkItemLink>(entity =>
+        {
+            entity.HasKey(link => link.Id);
+            entity.Property(link => link.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(link => link.WorkItemId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(link => link.Kind).HasMaxLength(WorkItemLinkLimits.MaxKindLength).IsRequired();
+            entity.Property(link => link.Url).HasMaxLength(WorkItemLinkLimits.MaxUrlLength).IsRequired();
+            entity.Property(link => link.UrlHash).HasMaxLength(64).IsRequired();
+            entity.Property(link => link.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
+            // One link per item, kind and URL. The same URL may be attached to several items.
+            entity.HasIndex(link => new { link.WorkItemId, link.Kind, link.UrlHash }).IsUnique();
+            entity.HasIndex(link => link.UrlHash);
+            entity.HasOne(link => link.WorkItem)
+                .WithMany()
+                .HasForeignKey(link => link.WorkItemId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

@@ -144,6 +144,8 @@ For the work item claim change (sc-25859) the API adds four nullable claim colum
 
 For the work item dependency change (sc-25860) the API creates the `WorkItemDependencies` table on its first start (`20261012214428_AddWorkItemDependencies`); existing items start with no dependencies. `deploy/sql/004_work_item_dependencies.sql` is the manual equivalent.
 
+For the work item link change (sc-25862) the API creates the `WorkItemLinks` table on its first start (`20261012225054_AddWorkItemLinks`); existing items start with no links. `deploy/sql/005_work_item_links.sql` is the manual equivalent.
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:

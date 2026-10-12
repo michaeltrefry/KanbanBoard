@@ -430,7 +430,7 @@ public sealed class WorkItemClaimApiTests
                     webBuilder.ConfigureServices(services =>
                     {
                         services.AddRouting();
-                        services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
+                        services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False"));
                         services.AddSingleton(TestDb.PatOptions());
                         services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
                         services.AddSingleton<TimeProvider>(clock);
@@ -444,6 +444,7 @@ public sealed class WorkItemClaimApiTests
                         {
                             endpoints.MapKanbanClaimEndpoints();
                             endpoints.MapKanbanDependencyEndpoints();
+                            endpoints.MapKanbanLinkEndpoints();
                             endpoints.MapKanbanWorkItemReadEndpoints();
                         });
                     });
@@ -523,7 +524,6 @@ public sealed class WorkItemClaimApiTests
         {
             Client.Dispose();
             host.Dispose();
-            SqliteConnection.ClearAllPools();
             File.Delete(databasePath);
         }
     }

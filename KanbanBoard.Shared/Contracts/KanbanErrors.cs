@@ -30,6 +30,21 @@ public static class KanbanErrorCodes
 
 public sealed record KanbanErrorDto(string Code, string Message);
 
+public static class WorkItemLinkKinds
+{
+    public const string PullRequest = "pr";
+    public const string Branch = "branch";
+    public const string Other = "other";
+
+    public static readonly IReadOnlyList<string> All = [PullRequest, Branch, Other];
+}
+
+public static class WorkItemLinkLimits
+{
+    public const int MaxKindLength = 16;
+    public const int MaxUrlLength = 2048;
+}
+
 public static class WorkItemClaimLimits
 {
     public const int MaxMarkerLength = 200;

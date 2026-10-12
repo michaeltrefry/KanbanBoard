@@ -67,7 +67,7 @@ The API container still listens on internal HTTP port `8080` so the MCP containe
 
 ## MCP tools
 
-The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, claim, comment, delete) return a `scope_denied` error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
+The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, claim, comment, link, delete) return a `scope_denied` error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
 
 The MCP service exposes tools for:
 
@@ -96,6 +96,7 @@ Epic documents can be managed through epic-scoped list/create endpoints plus ret
 `GetWorkItem` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
 Work item reads (`GetWorkItem`, `ListWorkItems`, `ListEpicWorkItems`, `GetIssues`, `GetBoard`) include the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are `null` when the item is unclaimed or its claim has expired.
 Work item reads also include `blockers` (the items this one is blocked by) and `dependents` (the items it blocks); each entry is `{id, title, status}` with the other item's current status, and both are `[]` when there are none.
+Work item reads also include `links`, the external links attached to the item (see [Links](#links)); it is `[]` when there are none.
 `ListWorkItems`, `ListEpicWorkItems` and `GetIssues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
 `ListWorkItems` also accepts the polling arguments described under [Polling work items](#polling-work-items).
 `SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
@@ -114,7 +115,7 @@ Work item reads also include `blockers` (the items this one is blocked by) and `
 | `include_comments` | `false` returns every item with `comments: []` and reads no comment. Default `true`. |
 
 - **Pages.** With `limit` or `cursor` the result is an object, `{"items": [...], "next_cursor": "..."}`, instead of an array. Pass `next_cursor` back unchanged as `cursor`, with the same filters, until a page comes without `next_cursor`. Pages are ordered oldest item first (creation time, then id), not in board order: that order never changes, so every matching item that exists for the whole walk is returned exactly once even when items are moved or edited during it. An item created during the walk, or one that stops or starts matching the filters during it, may or may not appear. The cursor is opaque; do not build or parse one.
-- **`updatedAtUtc` is the content timestamp.** It changes when the item's fields change (including a move to another column or position) and when a comment is added to it. It does not change when a sibling is moved or reordered around it, when it is claimed, renewed or released, when its claim expires, or when a dependency is added, removed or finished. The stamp is taken before the change commits, so a change can become visible slightly after another one that carries a later stamp: when following changes with `updated_since`, poll with a small overlap (for example a few seconds before the latest `updatedAtUtc` seen) and de-duplicate by id plus `updatedAtUtc`.
+- **`updatedAtUtc` is the content timestamp.** It changes when the item's fields change (including a move to another column or position) when a comment is added to it, and when a link is added to or removed from it. It does not change when a sibling is moved or reordered around it, when it is claimed, renewed or released, when its claim expires, or when a dependency is added, removed or finished. The stamp is taken before the change commits, so a change can become visible slightly after another one that carries a later stamp: when following changes with `updated_since`, poll with a small overlap (for example a few seconds before the latest `updatedAtUtc` seen) and de-duplicate by id plus `updatedAtUtc`.
 - **Claim state is read from the clock on every call.** A claim that expires writes nothing, so `updated_since` cannot report it, and neither can it report an item that became unblocked. To find work that is ready to take, poll with `status`, `unblocked_only: true` and `claim_state: "unclaimed"` and no `updated_since`; use `updated_since` to follow content changes.
 - A malformed `label`, `updated_since`, `claim_state`, `limit` or `cursor` is refused `invalid_argument`.
 
@@ -137,6 +138,23 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 - A blocker counts as finished only in status `Done`; a `Closed` blocker still blocks, so remove the dependency if the blocker was abandoned.
 - Both are write tools: a `read` token is refused `scope_denied` before the API is called.
 
+### Links
+
+`add_work_item_link(id, kind, url)` attaches an external URL to work item `id`, `remove_work_item_link(id, link_id)` or `remove_work_item_link(id, kind, url)` takes one off, and `find_work_items_by_link(url)` returns the work items that carry a URL. Add and remove return work item `id`. Every work item read lists the item's links, oldest first, as `links`:
+
+```json
+"links": [{ "id": "6f0c…", "kind": "pr", "url": "https://github.com/acme/app/pull/42", "created_at_utc": "2026-10-12T12:00:00+00:00" }]
+```
+
+- `kind` is `pr`, `branch` or `other` (case is ignored); any other kind is refused `invalid_argument`.
+- `url` must be an absolute `http` or `https` URL of at most 2048 characters, otherwise the add is refused `invalid_argument`. Whitespace around it is dropped; nothing else is normalised. URLs are compared exactly, character for character: `https://github.com/acme/app/pull/42` and `https://github.com/Acme/app/pull/42/` are different links, so pass a URL the same way every time.
+- A link is identified by item, kind and URL. Adding a kind and URL the item already carries returns the item with the existing link and creates nothing, also when two identical adds arrive at once. The same URL may be attached to several items, and to one item under several kinds.
+- `remove_work_item_link` takes either `link_id` (the `id` of an entry of `links`) or `kind` and `url` together; any other combination is refused `invalid_argument`. Removing a link the item does not carry, including a `link_id` that belongs to another item, succeeds and changes nothing.
+- An unknown `id` is refused `not_found` by add and remove.
+- `find_work_items_by_link(url)` returns full work items, oldest first, in any status (including `Closed`), project or epic, whatever the kind of the link; the result is `[]` when no item carries the URL. An empty `url` is refused `invalid_argument`.
+- A link that is added or removed stamps the item's `updatedAtUtc`, so `updated_since` reports it; an add or remove that changes nothing does not. Deleting a work item (or its project) deletes its links.
+- Add and remove are write tools: a `read` token is refused `scope_denied` before the API is called. `find_work_items_by_link` is a read tool.
+
 ### Tool errors
 
 A refused tool call returns a tool result with `isError: true`. Its `structuredContent` is `{"code": "...", "message": "..."}` and its single text block holds the same JSON. Branch on `code`; `message` is for people and may change.
@@ -151,7 +169,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
 | `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes); nothing was changed and the call can be retried. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim and dependency tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim, dependency and link tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 
@@ -197,6 +215,9 @@ The names below are the C# method names; on the wire each tool is its snake_case
 - `ReleaseWorkItemClaim`
 - `AddWorkItemDependency`
 - `RemoveWorkItemDependency`
+- `AddWorkItemLink`
+- `RemoveWorkItemLink`
+- `FindWorkItemsByLink`
 
 ## Production deployment
 
