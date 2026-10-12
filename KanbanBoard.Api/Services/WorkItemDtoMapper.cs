@@ -46,11 +46,12 @@ public static class WorkItemDtoMapper
         };
     }
 
-    private static WorkItemCommentDto ToCommentDto(WorkItemComment comment) =>
+    public static WorkItemCommentDto ToCommentDto(WorkItemComment comment) =>
         new(
             comment.Id,
             comment.WorkItemId,
             comment.Author,
             comment.Body,
-            comment.CreatedAtUtc);
+            comment.CreatedAtUtc,
+            comment.AuthorUserId);
 }

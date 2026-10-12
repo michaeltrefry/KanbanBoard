@@ -97,10 +97,15 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasKey(comment => comment.Id);
             entity.Property(comment => comment.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
             entity.Property(comment => comment.WorkItemId).HasConversion(GuidToStringConverter).HasMaxLength(36);
-            entity.Property(comment => comment.Author).HasMaxLength(80).IsRequired();
+            entity.Property(comment => comment.Author).HasMaxLength(WorkItemCommentLimits.MaxAuthorLength).IsRequired();
+            entity.Property(comment => comment.AuthorUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
             entity.Property(comment => comment.Body).IsRequired();
+            entity.Property(comment => comment.IdempotencyKeyHash).HasMaxLength(64);
             entity.Property(comment => comment.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(comment => new { comment.WorkItemId, comment.CreatedAtUtc });
+            // One comment per item and idempotency key (the hash covers the caller's identity). Comments without a
+            // key hold null here, and a unique index admits any number of nulls.
+            entity.HasIndex(comment => new { comment.WorkItemId, comment.IdempotencyKeyHash }).IsUnique();
             entity.HasOne(comment => comment.WorkItem)
                 .WithMany(item => item.Comments)
                 .HasForeignKey(comment => comment.WorkItemId)

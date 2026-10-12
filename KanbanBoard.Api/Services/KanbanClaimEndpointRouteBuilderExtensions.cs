@@ -103,7 +103,8 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
         };
     }
 
-    private static async Task<AppUser?> ResolveClaimantAsync(
+    // Also the author of a comment written with a token (KanbanCommentEndpointRouteBuilderExtensions).
+    internal static async Task<AppUser?> ResolveClaimantAsync(
         HttpContext httpContext,
         KanbanDbContext dbContext,
         DateTimeOffset now,

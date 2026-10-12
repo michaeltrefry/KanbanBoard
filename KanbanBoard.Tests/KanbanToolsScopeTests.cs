@@ -102,7 +102,7 @@ public sealed class KanbanToolsScopeTests
         await tools.CreateWorkItem(Guid.NewGuid(), "Title", WorkItemType.Story);
         await tools.MoveWorkItem(Guid.NewGuid(), WorkItemStatus.InProgress);
         await tools.DeleteWorkItem(Guid.NewGuid());
-        await tools.AddWorkItemComment(Guid.NewGuid(), "claude", "hello");
+        await tools.AddWorkItemComment(Guid.NewGuid(), "hello", "claude");
 
         Assert.Equal(
             [HttpMethod.Post, HttpMethod.Post, HttpMethod.Delete, HttpMethod.Post],

@@ -59,6 +59,13 @@ public static class WorkItemLinkLimits
         url.Length <= MaxEscapedUrlLength && Uri.EscapeDataString(url).Length <= MaxEscapedUrlLength;
 }
 
+public static class WorkItemCommentLimits
+{
+    /// <summary>As long as a claimant name: a token's comment carries the same name as its claims.</summary>
+    public const int MaxAuthorLength = WorkItemClaimLimits.MaxClaimantNameLength;
+    public const int MaxIdempotencyKeyLength = 128;
+}
+
 public static class WorkItemClaimLimits
 {
     public const int MaxMarkerLength = 200;

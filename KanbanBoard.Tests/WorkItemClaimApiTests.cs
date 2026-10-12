@@ -445,6 +445,7 @@ public sealed class WorkItemClaimApiTests
                             endpoints.MapKanbanClaimEndpoints();
                             endpoints.MapKanbanDependencyEndpoints();
                             endpoints.MapKanbanLinkEndpoints();
+                            endpoints.MapKanbanCommentEndpoints();
                             endpoints.MapKanbanWorkItemReadEndpoints();
                         });
                     });

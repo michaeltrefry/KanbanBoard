@@ -434,25 +434,50 @@ public sealed class KanbanTools(
         return await ListWorkItemsAsync<IReadOnlyList<WorkItemDto>>(projectId: projectId, type: WorkItemType.Issue, status: status, unblockedOnly: unblocked_only) ?? [];
     }
 
-    [McpServerTool, Description("Add a comment to any work item. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
+    [McpServerTool, Description("Add a comment to any work item. The author of a comment added with a personal access token is the token's identity: the comment carries that identity's name as author and its id as author_id, and the author argument is ignored. Without a token, author is required. Pass idempotency_key to make the call safe to repeat: when the same identity already used the key on this item, nothing is added, the item's updatedAtUtc does not change, and the earlier comment is reported whatever its body. Returns the work item with all its comments, plus comment_id (the id of the comment that was added, or of the earlier one) and comment_created (false for a repeat). An unknown itemId is refused with code not_found, a malformed argument with invalid_argument.")]
     public async Task<WorkItemDto?> AddWorkItemComment(
         [Description("Work item id")] Guid itemId,
-        [Description("Comment author. For LLM-authored comments, use your assistant name like codex or claude.")] string author,
-        [Description("Comment text")] string body)
+        [Description("Comment text")] string body,
+        [Description("Comment author, used only when the call carries no personal access token. With a token the author is the token's identity and this is ignored.")] string? author = null,
+        [Description("Caller-chosen key for this comment, such as a run id plus a step name: 1 to 128 printable ASCII characters without spaces, compared exactly. It belongs to the calling identity and this work item.")] string? idempotency_key = null)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var response = await client.PostAsJsonAsync($"/api/items/{itemId}/comments", new CreateWorkItemCommentRequest(author, body));
-        response.EnsureSuccessStatusCode();
+        using var response = await client.PostAsJsonAsync($"/api/items/{itemId}/comments", new CreateWorkItemCommentRequest(author, body, idempotency_key));
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Add a comment to an issue. When an LLM adds a comment, set author to the assistant name such as codex or claude.")]
+    [McpServerTool, Description("Add a comment to an issue. Same as add_work_item_comment without an idempotency key: with a personal access token the author is the token's identity and the author argument is ignored.")]
     public Task<WorkItemDto?> AddIssueComment(
         [Description("Issue work item id")] Guid itemId,
-        [Description("Comment author. For LLM-authored comments, use your assistant name like codex or claude.")] string author,
+        [Description("Comment author, used only when the call carries no personal access token")] string author,
         [Description("Comment text")] string body) =>
-        AddWorkItemComment(itemId, author, body);
+        AddWorkItemComment(itemId, body, author);
+
+    [McpServerTool, Description("List the comments of work item id, oldest first, one page at a time: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. Each comment is {id, workItemId, author, author_id, body, createdAtUtc}: author_id is the id of the identity whose token wrote the comment and is left out for a comment written without a token; author is that identity's name when the comment was written, or the name the writer gave. An unknown id is refused with code not_found, a malformed limit or cursor with invalid_argument.")]
+    public async Task<WorkItemCommentPageDto> ListWorkItemComments(
+        [Description("Work item id")] Guid id,
+        [Description("Page size, 1 to 200. 50 when not passed.")] int? limit = null,
+        [Description("next_cursor of the previous page, passed back unchanged. Each comment is returned exactly once across the pages, also when comments are added in between: a new comment always comes after every earlier one.")] string? cursor = null)
+    {
+        var parameters = new List<string>();
+        if (limit is not null)
+        {
+            parameters.Add($"limit={limit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        }
+
+        if (cursor is not null)
+        {
+            parameters.Add($"cursor={Uri.EscapeDataString(cursor)}");
+        }
+
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.GetAsync($"/api/items/{id}/comments{(parameters.Count == 0 ? string.Empty : "?" + string.Join('&', parameters))}");
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<WorkItemCommentPageDto>(JsonOptions)
+            ?? new WorkItemCommentPageDto([], null);
+    }
 
     [McpServerTool, Description("Create a story, issue, or task in a project backlog. Pass epicId to attach it to a specific epic backlog.")]
     public async Task<WorkItemDto?> CreateWorkItem(
