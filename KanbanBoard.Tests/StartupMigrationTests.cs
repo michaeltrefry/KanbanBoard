@@ -347,7 +347,7 @@ public sealed class StartupMigrationTests
             ValueTask.FromResult(InterceptionResult.Suppress());
     }
 
-    private static string FindRepoFile(string relativePath)
+    internal static string FindRepoFile(string relativePath)
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {

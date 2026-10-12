@@ -98,13 +98,36 @@ public sealed class ProgramDependencyWiringTests
     }
 
     [Fact]
+    public async Task Comment_routes_are_mapped_the_add_returns_the_comment_id_and_a_repeated_key_adds_nothing()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "CMT" });
+        var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+
+        var first = await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/comments", new { author = "tester", body = "note", idempotencyKey = "key" });
+        api.Commands.Clear();
+        var repeat = await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/comments", new { author = "tester", body = "note", idempotencyKey = "key" });
+        var writes = api.Commands.Where(text => text.StartsWith("UPDATE", StringComparison.Ordinal) || text.StartsWith("INSERT", StringComparison.Ordinal)).ToList();
+        var page = await client.GetFromJsonAsync<WorkItemCommentPageDto>($"/api/items/{item.Id}/comments?limit=1", Json);
+
+        var comment = Assert.Single(page!.Items);
+        Assert.Equal((comment.Id, true), (first.CommentId, first.CommentCreated));
+        Assert.Equal((comment.Id, false), (repeat.CommentId, repeat.CommentCreated));
+        Assert.Equal(("tester", "note", first.UpdatedAtUtc), (comment.Author, comment.Body, comment.CreatedAtUtc));
+        Assert.Equal(first.UpdatedAtUtc, repeat.UpdatedAtUtc);
+        // The repeat takes the item's row first, like every comment write, and then gives the stamp back.
+        Assert.StartsWith("UPDATE \"WorkItems\"", Assert.Single(writes), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_comment_on_an_item_deleted_after_it_was_loaded_is_refused_not_found()
     {
         using var api = new ApiApplication();
         using var client = api.CreateClient();
         var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "GONE" });
         var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "A", type = "Task", status = "Backlog", priority = "Medium" });
-        // The endpoint loads the item and then opens its transaction: the delete lands between the two.
+        // The delete lands just before the endpoint opens its transaction.
         var deleted = 0;
         api.BeforeNextTransaction = () => deleted = api.DeleteItem(item.Id);
 

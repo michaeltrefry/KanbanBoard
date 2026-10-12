@@ -5,7 +5,7 @@
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
 //   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the claim, dependency and link write tools refuse it with scope_denied
+//                                  that the claim, dependency, link and comment write tools refuse it with scope_denied
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
@@ -461,6 +461,138 @@ finally
     }
 }
 
+// Comments: a comment is a record with an id, the factory identity as author and a timestamp, and a repeated
+// idempotency key adds nothing.
+string? commentedId = null;
+try
+{
+    var scratch = await CallAsync("create_work_item", new()
+    {
+        ["projectId"] = projectId,
+        ["title"] = $"Factory acceptance comment item {run}",
+        ["type"] = "Task"
+    });
+    if (scratch.Code is not null)
+    {
+        Console.Error.WriteLine($"Could not create the comment scratch item: {scratch.Code}: {scratch.Message}");
+        return 1;
+    }
+
+    commentedId = StringField(scratch.Body, "id")!;
+    Console.WriteLine($"Comment scratch item {commentedId}");
+    // A claim names the identity behind the token; the comments must carry the same one.
+    var identity = await CallAsync("claim_work_item", new() { ["id"] = commentedId, ["marker"] = markerA, ["ttl_seconds"] = 60 });
+    var factoryName = StringField(identity.Body, "claimant");
+    var factoryId = StringField(identity.Body, "claimant_id");
+
+    // 23. Add a comment with an idempotency key and get its id; the author argument does not name the author.
+    var commentKey = $"acceptance-{run}:first";
+    var firstComment = await CallAsync("add_work_item_comment", new()
+    {
+        ["itemId"] = commentedId, ["author"] = "not the factory", ["body"] = $"first {run}", ["idempotency_key"] = commentKey
+    });
+    var commentId = StringField(firstComment.Body, "comment_id");
+    Check("add_work_item_comment with an idempotency key returns comment_id, comment_created true and the item with that comment",
+        firstComment.Code is null && commentId is not null && IsFlag(firstComment.Body, "comment_created", true) &&
+        CommentsOf(firstComment.Body) is [var onlyComment] && StringField(onlyComment, "id") == commentId,
+        firstComment);
+
+    // 24. The same key again, even with another body, returns the first comment and adds nothing.
+    var repeatedComment = await CallAsync("add_work_item_comment", new()
+    {
+        ["itemId"] = commentedId, ["body"] = $"another body {run}", ["idempotency_key"] = commentKey
+    });
+    Check("a repeated idempotency key returns the same comment_id with comment_created false, still one comment, and the same updatedAtUtc",
+        repeatedComment.Code is null && commentId is not null && StringField(repeatedComment.Body, "comment_id") == commentId &&
+        IsFlag(repeatedComment.Body, "comment_created", false) &&
+        CommentsOf(repeatedComment.Body) is [var keptComment] && StringField(keptComment, "body") == $"first {run}" &&
+        StringField(repeatedComment.Body, "updatedAtUtc") == StringField(firstComment.Body, "updatedAtUtc"),
+        repeatedComment);
+    var badKey = await CallAsync("add_work_item_comment", new() { ["itemId"] = commentedId, ["body"] = "x", ["idempotency_key"] = "two words" });
+    Check("add_work_item_comment with a malformed idempotency key is refused invalid_argument", badKey.Code == "invalid_argument", badKey);
+
+    // 25. The comment is listed with the factory identity as author and a timestamp.
+    var listedComments = await CallAsync("list_work_item_comments", new() { ["id"] = commentedId });
+    Check("list_work_item_comments returns that one comment with the factory identity as author and author_id, a timestamp and its body",
+        listedComments.Code is null && factoryName is not null && factoryId is not null &&
+        CommentsOf(listedComments.Body, "items") is [var listedComment] &&
+        StringField(listedComment, "id") == commentId &&
+        StringField(listedComment, "author") == factoryName &&
+        StringField(listedComment, "author_id") == factoryId &&
+        StringField(listedComment, "body") == $"first {run}" &&
+        DateTimeOffset.TryParse(StringField(listedComment, "createdAtUtc"), out _) &&
+        IsNullField(listedComments.Body, "next_cursor"),
+        listedComments);
+
+    // 26. Several comments are paged through with a small limit, each exactly once and in the order they were written.
+    var writtenIds = new List<string?> { commentId };
+    for (var number = 2; number <= 5; number++)
+    {
+        var next = await CallAsync("add_work_item_comment", new() { ["itemId"] = commentedId, ["body"] = $"comment {number} {run}" });
+        writtenIds.Add(StringField(next.Body, "comment_id"));
+    }
+
+    var pagedIds = new List<string?>();
+    var commentPages = 0;
+    ToolOutcome? pageFailure = null;
+    string? commentCursor = null;
+    do
+    {
+        var arguments = new Dictionary<string, object?> { ["id"] = commentedId, ["limit"] = 2 };
+        if (commentCursor is not null)
+        {
+            arguments["cursor"] = commentCursor;
+        }
+
+        var page = await CallAsync("list_work_item_comments", arguments);
+        if (page.Code is not null)
+        {
+            pageFailure = page;
+            break;
+        }
+
+        commentPages++;
+        pagedIds.AddRange(CommentsOf(page.Body, "items").Select(comment => StringField(comment, "id")));
+        commentCursor = StringField(page.Body, "next_cursor");
+    }
+    while (commentCursor is not null && commentPages < 10);
+    Check("a list_work_item_comments walk with limit 2 returns the five comments exactly once, in the order they were written, in three pages",
+        pageFailure is null && writtenIds.All(id => id is not null) && pagedIds.SequenceEqual(writtenIds) && commentPages == 3,
+        pageFailure ?? new ToolOutcome("error", $"walked {string.Join(", ", pagedIds)} in {commentPages} page(s); wrote {string.Join(", ", writtenIds)}", default));
+    var badCommentCursor = await CallAsync("list_work_item_comments", new() { ["id"] = commentedId, ["cursor"] = "not-a-cursor" });
+    Check("list_work_item_comments with a malformed cursor is refused invalid_argument", badCommentCursor.Code == "invalid_argument", badCommentCursor);
+    var unknownItem = await CallAsync("list_work_item_comments", new() { ["id"] = Guid.NewGuid().ToString() });
+    Check("list_work_item_comments for an unknown work item is refused not_found", unknownItem.Code == "not_found", unknownItem);
+
+    // 27. A read-scope token can list the comments and is refused by add.
+    if (string.IsNullOrWhiteSpace(readToken))
+    {
+        Console.WriteLine("SKIP  read-scope use of list_work_item_comments (KANBAN_FACTORY_READ_TOKEN is not set)");
+    }
+    else
+    {
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        var readComments = await CallAsync("list_work_item_comments", new() { ["id"] = commentedId, ["limit"] = 200 }, readClient);
+        Check("the read-scope token can list the five comments",
+            readComments.Code is null && CommentsOf(readComments.Body, "items").Length == 5, readComments);
+        var refusedComment = await CallAsync("add_work_item_comment", new() { ["itemId"] = commentedId, ["body"] = "x", ["idempotency_key"] = commentKey }, readClient);
+        Check("add_work_item_comment with the read-scope token is refused scope_denied", refusedComment.Code == "scope_denied", refusedComment);
+    }
+}
+finally
+{
+    if (commentedId is not null)
+    {
+        var deleted = await CallAsync("delete_work_item", new() { ["itemId"] = commentedId });
+        if (deleted.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not delete comment scratch item {commentedId}: {deleted.Code}: {deleted.Message}");
+            failures++;
+        }
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
@@ -572,6 +704,16 @@ static JsonElement[] LinksOf(JsonElement item) =>
 
 static bool IsOnlyLink(JsonElement item, string kind, string url) =>
     LinksOf(item) is [var link] && StringField(link, "kind") == kind && StringField(link, "url") == url;
+
+// The entries of an item's "comments" array, or of a comment page's "items"; empty when the field is missing.
+static JsonElement[] CommentsOf(JsonElement container, string name = "comments") =>
+    container.ValueKind == JsonValueKind.Object && container.TryGetProperty(name, out var comments) && comments.ValueKind == JsonValueKind.Array
+        ? comments.EnumerateArray().ToArray()
+        : [];
+
+static bool IsFlag(JsonElement item, string name, bool expected) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) &&
+    value.ValueKind == (expected ? JsonValueKind.True : JsonValueKind.False);
 
 static bool IsNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && (!item.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null);

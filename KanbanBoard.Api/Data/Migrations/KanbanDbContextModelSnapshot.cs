@@ -311,8 +311,12 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<string>("Author")
                         .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("varchar(80)");
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("AuthorUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
 
                     b.Property<string>("Body")
                         .IsRequired()
@@ -320,6 +324,10 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.Property<string>("WorkItemId")
                         .IsRequired()
@@ -329,6 +337,9 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("WorkItemId", "CreatedAtUtc");
+
+                    b.HasIndex("WorkItemId", "IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.ToTable("WorkItemComments");
                 });

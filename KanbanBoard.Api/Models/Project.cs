@@ -94,7 +94,12 @@ public sealed class WorkItemComment
     public Guid WorkItemId { get; set; }
     public WorkItem? WorkItem { get; set; }
     public string Author { get; set; } = string.Empty;
+    // The user behind the token that wrote the comment. Null for a comment written without a token (the web UI)
+    // and for every comment older than this column.
+    public Guid? AuthorUserId { get; set; }
     public string Body { get; set; } = string.Empty;
+    // WorkItemComments.HashIdempotencyKey of the caller's idempotency key, or null when none was passed.
+    public string? IdempotencyKeyHash { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 

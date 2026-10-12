@@ -119,6 +119,7 @@ app.MapKanbanInternalApiEndpoints();
 app.MapKanbanClaimEndpoints();
 app.MapKanbanDependencyEndpoints();
 app.MapKanbanLinkEndpoints();
+app.MapKanbanCommentEndpoints();
 app.MapKanbanWorkItemReadEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
@@ -708,68 +709,6 @@ app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemReq
     return Results.Ok(await ToWorkItemDtoWithDependenciesAsync(dbContext, item, cancellationToken));
 })
 .WithName("MoveWorkItem");
-
-app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkItemCommentRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
-{
-    var item = await dbContext.WorkItems
-        .Include(workItem => workItem.Epic)
-        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-    if (item is null)
-    {
-        return Results.NotFound();
-    }
-
-    var normalizedAuthor = request.Author.Trim();
-    var normalizedBody = request.Body.Trim();
-    var validationError = ValidateRequiredText(("author", normalizedAuthor), ("body", normalizedBody));
-    if (validationError is not null)
-    {
-        return Results.BadRequest(new { message = validationError });
-    }
-
-    var createdAtUtc = DateTimeOffset.UtcNow;
-    var comment = new WorkItemComment
-    {
-        WorkItemId = itemId,
-        Author = normalizedAuthor,
-        Body = normalizedBody,
-        CreatedAtUtc = createdAtUtc
-    };
-
-    // A new comment is a change to the item: readers polling with updated_since must see it.
-    // The stamp is written before the comment, in its own statement. The INSERT takes a shared lock on the item's
-    // row for its foreign key; when the UPDATE came after it, two writers of one item each held that lock while
-    // waiting for the other to let go, and MariaDB ended one of them as a deadlock.
-    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    item.UpdatedAtUtc = createdAtUtc;
-    try
-    {
-        await dbContext.SaveChangesAsync(cancellationToken);
-    }
-    catch (DbUpdateConcurrencyException)
-    {
-        // The item was deleted after it was loaded.
-        return Results.NotFound();
-    }
-
-    dbContext.WorkItemComments.Add(comment);
-    await dbContext.SaveChangesAsync(cancellationToken);
-    await transaction.CommitAsync(cancellationToken);
-
-    var refreshedItem = await dbContext.WorkItems
-        .AsNoTracking()
-        .Include(workItem => workItem.Epic)
-        .Include(workItem => workItem.Comments)
-        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-    if (refreshedItem is null)
-    {
-        return Results.NotFound();
-    }
-
-    changeNotifier.Publish();
-    return Results.Created($"/api/items/{itemId}/comments/{comment.Id}", await ToWorkItemDtoWithDependenciesAsync(dbContext, refreshedItem, cancellationToken));
-})
-.WithName("CreateWorkItemComment");
 
 app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {

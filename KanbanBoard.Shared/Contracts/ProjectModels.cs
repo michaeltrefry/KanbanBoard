@@ -67,12 +67,25 @@ public sealed record EpicReferenceDto(
     Guid Id,
     string Name);
 
+/// <param name="AuthorId">
+/// Id of the identity whose token wrote the comment; <paramref name="Author"/> is then that identity's name at the
+/// time. Null when the comment was written without a token, where the author is the name the writer typed.
+/// </param>
 public sealed record WorkItemCommentDto(
     Guid Id,
     Guid WorkItemId,
     string Author,
     string Body,
-    DateTimeOffset CreatedAtUtc);
+    DateTimeOffset CreatedAtUtc,
+    [property: JsonPropertyName("author_id")] Guid? AuthorId = null);
+
+/// <summary>
+/// One page of a work item's comments, oldest first. <see cref="NextCursor"/> is null on the last page; otherwise
+/// pass it back unchanged to get the next page.
+/// </summary>
+public sealed record WorkItemCommentPageDto(
+    [property: JsonPropertyName("items")] IReadOnlyList<WorkItemCommentDto> Items,
+    [property: JsonPropertyName("next_cursor")] string? NextCursor);
 
 public sealed record WorkItemDto(
     Guid Id,
@@ -107,6 +120,17 @@ public sealed record WorkItemDto(
     /// <summary>External links attached to this item, oldest first.</summary>
     [JsonPropertyName("links")]
     public IReadOnlyList<WorkItemLinkDto> Links { get; init; } = [];
+
+    /// <summary>
+    /// Only on the answer to adding a comment: the id of the comment that was added, or of the earlier comment the
+    /// idempotency key already belonged to. It is one of <see cref="Comments"/>.
+    /// </summary>
+    [JsonPropertyName("comment_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Guid? CommentId { get; init; }
+
+    /// <summary>Only on the answer to adding a comment: false when the idempotency key was a repeat and nothing was added.</summary>
+    [JsonPropertyName("comment_created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? CommentCreated { get; init; }
 }
 
 /// <summary>
@@ -214,9 +238,11 @@ public sealed record MoveWorkItemRequest(
     WorkItemStatus Status,
     int Order);
 
+/// <param name="Author">Used only when the request carries no token identity; a token's comment is its identity's.</param>
 public sealed record CreateWorkItemCommentRequest(
-    string Author,
-    string Body);
+    string? Author,
+    string Body,
+    string? IdempotencyKey = null);
 
 public sealed record CreatePersonalAccessTokenRequest(
     string Name,

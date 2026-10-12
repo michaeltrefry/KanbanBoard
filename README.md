@@ -79,6 +79,7 @@ The MCP service exposes tools for:
 - Listing, creating, updating, and retrieving epic documents
 - Fetching issue items
 - Fetching a single work item with its description and comments
+- Adding comments to work items and listing a work item's comments
 - Searching work items by words in titles and descriptions
 - Creating work items
 - Updating work items
@@ -155,6 +156,24 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 - A link that is added or removed stamps the item's `updatedAtUtc`, so `updated_since` reports it; an add or remove that changes nothing does not, and sends no board-change event either. Deleting a work item (or its project) deletes its links.
 - Add and remove are write tools: a `read` token is refused `scope_denied` before the API is called. `find_work_items_by_link` is a read tool.
 
+### Comments
+
+`add_work_item_comment(itemId, body, author?, idempotency_key?)` adds a comment and `list_work_item_comments(id, limit?, cursor?)` reads a work item's comments. A comment is a record:
+
+```json
+{ "id": "57a8…", "workItemId": "e086…", "author": "factory", "author_id": "3cac…", "body": "Opened PR 42", "createdAtUtc": "2026-10-12T23:42:26.996571+00:00" }
+```
+
+Work item reads embed the same records in `comments`, oldest first. `id` is a GUID, like a work item id, and never changes.
+
+- **The author is the token's identity.** A comment added with a personal access token carries that identity's name as `author` (the same name as `claimant`) and its id as `author_id`; the `author` argument is accepted and ignored, so no caller can write under another name. Match your own comments by `author_id`: `author` is the name at the time of writing. A comment written without a token (the web UI, or an MCP server that does not require tokens) keeps the `author` the writer gave, which is then required, and has no `author_id`; so does every comment older than this feature.
+- **`add_work_item_comment` returns the work item**, as before, with all its comments, plus `comment_id` (the id of the comment this call is about) and `comment_created`.
+- **`idempotency_key` makes the add safe to repeat.** It is 1 to 128 printable ASCII characters without spaces, compared exactly (`run-1` and `RUN-1` are two keys); anything else is refused `invalid_argument`. A key belongs to the calling identity and the work item: when that identity already used it on that item, nothing is added, `comment_id` is the earlier comment's id, `comment_created` is `false`, the item's `updatedAtUtc` does not move and no board-change event is sent. The body is not compared: a repeat with another body still returns the first comment unchanged. Two calls with one key at the same moment add one comment and both report its id. The same key used by another identity, or on another item, is another comment; callers without a token share one identity. Without a key every call adds a comment.
+- **`list_work_item_comments` returns one page**, `{"items": [...], "next_cursor": "..."}`, oldest comment first. `limit` is 1 to 200 (50 when left out). Pass `next_cursor` back unchanged as `cursor` until a page comes without one. Every comment is returned exactly once, also when comments are added during the walk: a comment's `createdAtUtc` is always later than that of every comment written to the item before it (when clocks disagree it is the latest one plus a microsecond), so a new comment lands after the cursor, never behind it. The cursor is opaque. A malformed `limit` or `cursor` is refused `invalid_argument`.
+- An unknown work item is refused `not_found` by both tools.
+- A comment that is added stamps the item's `updatedAtUtc` with the comment's `createdAtUtc`, so `updated_since` reports it.
+- `add_work_item_comment` is a write tool: a `read` token is refused `scope_denied` before the API is called. `list_work_item_comments` is a read tool. `add_issue_comment(itemId, author, body)` is the older form of the add, without a key; it stamps the author the same way.
+
 ### Tool errors
 
 A refused tool call returns a tool result with `isError: true`. Its `structuredContent` is `{"code": "...", "message": "..."}` and its single text block holds the same JSON. Branch on `code`; `message` is for people and may change.
@@ -169,7 +188,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
 | `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes); nothing was changed and the call can be retried. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim, dependency and link tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim, dependency, link and comment tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 
@@ -205,6 +224,7 @@ The names below are the C# method names; on the wire each tool is its snake_case
 - `SearchWorkItems`
 - `AddWorkItemComment`
 - `AddIssueComment`
+- `ListWorkItemComments`
 - `CreateWorkItem`
 - `CreateEpicWorkItem`
 - `UpdateWorkItem`
