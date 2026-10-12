@@ -276,7 +276,7 @@ public sealed class KanbanTools(
         [Description("Marker the claim was made with")] string marker) =>
         SendWorkItemWriteAsync(client => client.PostAsJsonAsync($"/api/items/{id}/claim/release", new ReleaseWorkItemClaimRequest(marker)));
 
-    [McpServerTool, Description("Record that work item id is blocked by work item blocked_by_id. Adding a dependency that already exists changes nothing and succeeds. Refused with code cycle, changing nothing, when it would make an item block itself directly or through other items. Returns work item id with its blockers and dependents.")]
+    [McpServerTool, Description("Record that work item id is blocked by work item blocked_by_id. Adding a dependency that already exists changes nothing and succeeds. Refused with code cycle, changing nothing, when it would make an item block itself directly or through other items. Refused with code busy, changing nothing, when other dependency changes kept it waiting 10 seconds; retry. Returns work item id with its blockers and dependents.")]
     public Task<WorkItemDto> AddWorkItemDependency(
         [Description("Id of the work item that is blocked")] Guid id,
         [Description("Id of the work item that blocks it")] Guid blocked_by_id) =>

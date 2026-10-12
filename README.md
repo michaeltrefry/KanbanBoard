@@ -112,7 +112,7 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 
 `add_work_item_dependency(id, blocked_by_id)` records that work item `id` is blocked by work item `blocked_by_id`, and `remove_work_item_dependency(id, blocked_by_id)` deletes that edge. Both return work item `id` with its `blockers` and `dependents`.
 
-- A dependency that would make an item block itself, directly or through other items (including `id` equal to `blocked_by_id`), is refused `cycle` and nothing is written. The check and the insert run one caller at a time, so concurrent adds cannot close a loop between them.
+- A dependency that would make an item block itself, directly or through other items (including `id` equal to `blocked_by_id`), is refused `cycle` and nothing is written. The check and the insert run one caller at a time, so concurrent adds cannot close a loop between them. An add that waits 10 s for its turn is refused `busy`, with nothing written, and can be retried.
 - Adding an edge that already exists, or removing one that does not, succeeds and changes nothing. An unknown `id` or `blocked_by_id` is refused `not_found`.
 - The two items may belong to different projects. Deleting a work item (or its project) deletes its dependencies.
 - A blocker counts as finished only in status `Done`; a `Closed` blocker still blocks, so remove the dependency if the blocker was abandoned.

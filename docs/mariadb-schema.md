@@ -37,7 +37,7 @@ Each script records its migration id in `__EFMigrationsHistory`, so the API skip
 
 `004` adds the `WorkItemDependencies` table: one row per edge, `BlockedItemId` is blocked by `BlockerItemId`, with the pair as primary key. Both columns reference `WorkItems.Id` with `ON DELETE CASCADE`, so deleting a work item or its project removes its edges. It is safe to re-run.
 
-The API serialises dependency adds with the MariaDB named lock `kanban_work_item_dependencies` (`GET_LOCK`, 10 s timeout), so the cycle check and the insert of two concurrent adds cannot interleave. It is held for one request and released on the same connection; `SELECT IS_USED_LOCK('kanban_work_item_dependencies')` shows a holder.
+The API serialises dependency adds with the MariaDB named lock `kanban_work_item_dependencies` (`GET_LOCK`, 10 s timeout), so the cycle check and the insert of two concurrent adds cannot interleave. It is held for one request and released on the same connection; `SELECT IS_USED_LOCK('kanban_work_item_dependencies')` shows a holder. An add that waits the full 10 s is refused with HTTP 503 and code `busy`, and writes nothing.
 
 `001` creates the EF migrations history table and the initial Kanban schema:
 
