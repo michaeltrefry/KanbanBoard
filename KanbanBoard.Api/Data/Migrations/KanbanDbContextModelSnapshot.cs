@@ -350,6 +350,46 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.ToTable("WorkItemDependencies");
                 });
 
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemLink", b =>
+                {
+                    b.Property<string>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.Property<string>("UrlHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UrlHash");
+
+                    b.HasIndex("WorkItemId", "Kind", "UrlHash")
+                        .IsUnique();
+
+                    b.ToTable("WorkItemLinks");
+                });
+
             modelBuilder.Entity("KanbanBoard.Api.Models.Epic", b =>
                 {
                     b.HasOne("KanbanBoard.Api.Models.Project", "Project")
@@ -429,6 +469,17 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Navigation("BlockedItem");
 
                     b.Navigation("BlockerItem");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemLink", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "WorkItem")
+                        .WithMany()
+                        .HasForeignKey("WorkItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("WorkItem");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.AppUser", b =>

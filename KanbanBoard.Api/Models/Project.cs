@@ -73,6 +73,21 @@ public sealed class WorkItemDependency
     public WorkItem? BlockerItem { get; set; }
 }
 
+// An external URL (a pull request, a branch, ...) attached to a work item. Written only by WorkItemLinks.
+public sealed class WorkItemLink
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid WorkItemId { get; set; }
+    public WorkItem? WorkItem { get; set; }
+    // One of WorkItemLinkKinds.
+    public string Kind { get; set; } = string.Empty;
+    public string Url { get; set; } = string.Empty;
+    // SHA-256 of Url in lowercase hex. Lookups and uniqueness use it instead of Url: it fits an index key whatever
+    // the length of the URL, and it matches exactly where the database's default collation would ignore case.
+    public string UrlHash { get; set; } = string.Empty;
+    public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
+}
+
 public sealed class WorkItemComment
 {
     public Guid Id { get; set; } = Guid.NewGuid();

@@ -118,6 +118,7 @@ app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
 app.MapKanbanClaimEndpoints();
 app.MapKanbanDependencyEndpoints();
+app.MapKanbanLinkEndpoints();
 app.MapKanbanWorkItemReadEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
@@ -211,6 +212,7 @@ app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStat
         : Results.Ok(ToBoardDto(
             project,
             await WorkItemDependencies.LoadAsync(dbContext, dbContext.WorkItems.Where(item => item.ProjectId == projectId), cancellationToken),
+            await WorkItemLinks.LoadAsync(dbContext, dbContext.WorkItems.Where(item => item.ProjectId == projectId), cancellationToken),
             status,
             includeArchivedEpicItems));
 })
@@ -734,10 +736,25 @@ app.MapPost("/api/items/{itemId:guid}/comments", async (Guid itemId, CreateWorkI
         CreatedAtUtc = createdAtUtc
     };
 
-    dbContext.WorkItemComments.Add(comment);
     // A new comment is a change to the item: readers polling with updated_since must see it.
+    // The stamp is written before the comment, in its own statement. The INSERT takes a shared lock on the item's
+    // row for its foreign key; when the UPDATE came after it, two writers of one item each held that lock while
+    // waiting for the other to let go, and MariaDB ended one of them as a deadlock.
+    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
     item.UpdatedAtUtc = createdAtUtc;
+    try
+    {
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        // The item was deleted after it was loaded.
+        return Results.NotFound();
+    }
+
+    dbContext.WorkItemComments.Add(comment);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
 
     var refreshedItem = await dbContext.WorkItems
         .AsNoTracking()
@@ -782,7 +799,7 @@ static ProjectSummaryDto ToSummaryDto(Project project) =>
         project.Items.Count,
         project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed));
 
-static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup dependencies, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
+static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup dependencies, ILookup<Guid, WorkItemLinkDto> links, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
     new(
         project.Id,
         project.Name,
@@ -796,7 +813,7 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup depe
             .OrderBy(item => item.Status)
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)
-            .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies))
+            .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies, links))
             .ToList());
 
 static EpicDto ToEpicDto(Epic epic) =>
@@ -818,12 +835,16 @@ static EpicDocumentDto ToEpicDocumentDto(EpicDocument document) =>
         document.CreatedAtUtc,
         document.UpdatedAtUtc);
 
-// For an item that was just created, which cannot have dependencies yet.
+// For an item that was just created, which cannot have dependencies or links yet.
 static WorkItemDto ToWorkItemDto(WorkItem item) =>
     WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
 
 static async Task<WorkItemDto> ToWorkItemDtoWithDependenciesAsync(KanbanDbContext dbContext, WorkItem item, CancellationToken cancellationToken) =>
-    WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, await WorkItemDependencies.LoadAsync(dbContext, item.Id, cancellationToken));
+    WorkItemDtoMapper.ToDto(
+        item,
+        DateTimeOffset.UtcNow,
+        await WorkItemDependencies.LoadAsync(dbContext, item.Id, cancellationToken),
+        await WorkItemLinks.LoadAsync(dbContext, item.Id, cancellationToken));
 
 static string? NormalizeLabels(string? labels) =>
     string.IsNullOrWhiteSpace(labels)

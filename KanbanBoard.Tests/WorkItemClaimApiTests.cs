@@ -430,7 +430,7 @@ public sealed class WorkItemClaimApiTests
                     webBuilder.ConfigureServices(services =>
                     {
                         services.AddRouting();
-                        services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath}"));
+                        services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False"));
                         services.AddSingleton(TestDb.PatOptions());
                         services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
                         services.AddSingleton<TimeProvider>(clock);
@@ -444,6 +444,7 @@ public sealed class WorkItemClaimApiTests
                         {
                             endpoints.MapKanbanClaimEndpoints();
                             endpoints.MapKanbanDependencyEndpoints();
+                            endpoints.MapKanbanLinkEndpoints();
                             endpoints.MapKanbanWorkItemReadEndpoints();
                         });
                     });
@@ -478,6 +479,9 @@ public sealed class WorkItemClaimApiTests
             WithServicesAsync(async services =>
                 await services.GetRequiredService<IPersonalAccessTokenService>().ValidateAsync(plaintextToken, CancellationToken.None)
                 ?? throw new InvalidOperationException("The token did not validate."));
+
+        public BoardChangeSubscription SubscribeToBoardChanges() =>
+            host.Services.GetRequiredService<BoardChangeNotifier>().Subscribe();
 
         public Task<Guid> AddItemAsync(string title = "Item", string projectKey = "PRJ") =>
             WithServicesAsync(async services =>
@@ -523,7 +527,6 @@ public sealed class WorkItemClaimApiTests
         {
             Client.Dispose();
             host.Dispose();
-            SqliteConnection.ClearAllPools();
             File.Delete(databasePath);
         }
     }

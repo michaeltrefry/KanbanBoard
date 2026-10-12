@@ -73,7 +73,8 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
         return Results.Ok(WorkItemDtoMapper.ToDto(
             item,
             DateTimeOffset.UtcNow,
-            await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken)));
+            await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
+            await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
     }
 
     private static IResult Error(int statusCode, string code, string message) =>

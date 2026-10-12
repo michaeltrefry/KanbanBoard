@@ -5,7 +5,7 @@
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
 //   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the claim and dependency tools refuse it with scope_denied
+//                                  that the claim, dependency and link write tools refuse it with scope_denied
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
@@ -365,6 +365,102 @@ finally
     }
 }
 
+// Links: a pull request URL is attached to an item, found again from the URL, and taken off.
+string? linkedId = null;
+try
+{
+    var scratch = await CallAsync("create_work_item", new()
+    {
+        ["projectId"] = projectId,
+        ["title"] = $"Factory acceptance link item {run}",
+        ["type"] = "Task"
+    });
+    if (scratch.Code is not null)
+    {
+        Console.Error.WriteLine($"Could not create the link scratch item: {scratch.Code}: {scratch.Message}");
+        return 1;
+    }
+
+    linkedId = StringField(scratch.Body, "id")!;
+    var prUrl = $"https://example.com/acceptance/{run}/pull/1";
+    Console.WriteLine($"Link scratch item {linkedId}");
+
+    // 18. Add a pr link and read it back on the item.
+    var linked = await CallAsync("add_work_item_link", new() { ["id"] = linkedId, ["kind"] = "pr", ["url"] = prUrl });
+    var linkId = linked.Code is null ? LinksOf(linked.Body).Select(link => StringField(link, "id")).FirstOrDefault() : null;
+    Check("add_work_item_link (kind pr) returns the item with that one link and a link id",
+        linked.Code is null && linkId is not null && IsOnlyLink(linked.Body, "pr", prUrl), linked);
+    var readLinked = await CallAsync("get_work_item", new() { ["itemId"] = linkedId });
+    Check("get_work_item returns the same link",
+        readLinked.Code is null && IsOnlyLink(readLinked.Body, "pr", prUrl) &&
+        StringField(LinksOf(readLinked.Body)[0], "id") == linkId,
+        readLinked);
+
+    // 19. The item is found again from the URL, by that URL only.
+    var found = await CallAsync("find_work_items_by_link", new() { ["url"] = prUrl });
+    Check("find_work_items_by_link returns exactly the linked item, with its link",
+        found.Code is null && found.Body.ValueKind == JsonValueKind.Array && found.Body.GetArrayLength() == 1 &&
+        StringField(found.Body[0], "id") == linkedId && IsOnlyLink(found.Body[0], "pr", prUrl),
+        found);
+    var foundOtherCase = await CallAsync("find_work_items_by_link", new() { ["url"] = prUrl.ToUpperInvariant() });
+    Check("find_work_items_by_link with the URL in another case returns an empty list",
+        foundOtherCase.Code is null && foundOtherCase.Body.ValueKind == JsonValueKind.Array && foundOtherCase.Body.GetArrayLength() == 0,
+        foundOtherCase);
+
+    // 20. Adding the same kind and URL again leaves one link, the same one.
+    var linkedAgain = await CallAsync("add_work_item_link", new() { ["id"] = linkedId, ["kind"] = "pr", ["url"] = prUrl });
+    Check("adding the same kind and URL again returns the item with still one link, with the same link id",
+        linkedAgain.Code is null && IsOnlyLink(linkedAgain.Body, "pr", prUrl) && StringField(LinksOf(linkedAgain.Body)[0], "id") == linkId,
+        linkedAgain);
+    var badKind = await CallAsync("add_work_item_link", new() { ["id"] = linkedId, ["kind"] = "issue", ["url"] = prUrl });
+    Check("add_work_item_link with an unknown kind is refused invalid_argument", badKind.Code == "invalid_argument", badKind);
+
+    // 21. A read-scope token is refused by add and remove, and can find.
+    if (string.IsNullOrWhiteSpace(readToken))
+    {
+        Console.WriteLine("SKIP  read-scope refusal of the link write tools (KANBAN_FACTORY_READ_TOKEN is not set)");
+    }
+    else
+    {
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        foreach (var tool in new[] { "add_work_item_link", "remove_work_item_link" })
+        {
+            var refused = await CallAsync(tool, new() { ["id"] = linkedId, ["kind"] = "pr", ["url"] = prUrl }, readClient);
+            Check($"{tool} with the read-scope token is refused scope_denied", refused.Code == "scope_denied", refused);
+        }
+
+        var readFound = await CallAsync("find_work_items_by_link", new() { ["url"] = prUrl }, readClient);
+        Check("the read-scope token can find the item by URL, and the link is still there",
+            readFound.Code is null && readFound.Body.GetArrayLength() == 1 && IsOnlyLink(readFound.Body[0], "pr", prUrl),
+            readFound);
+    }
+
+    // 22. Remove the link; the URL then finds nothing. Removing it again changes nothing.
+    var unlinked = await CallAsync("remove_work_item_link", new() { ["id"] = linkedId, ["kind"] = "pr", ["url"] = prUrl });
+    Check("remove_work_item_link (kind and url) returns the item without links",
+        unlinked.Code is null && LinksOf(unlinked.Body).Length == 0, unlinked);
+    var foundAfterRemove = await CallAsync("find_work_items_by_link", new() { ["url"] = prUrl });
+    Check("after the removal, find_work_items_by_link returns an empty list",
+        foundAfterRemove.Code is null && foundAfterRemove.Body.ValueKind == JsonValueKind.Array && foundAfterRemove.Body.GetArrayLength() == 0,
+        foundAfterRemove);
+    var unlinkedAgain = await CallAsync("remove_work_item_link", new() { ["id"] = linkedId, ["link_id"] = linkId });
+    Check("removing the link again, by link_id, succeeds and changes nothing",
+        unlinkedAgain.Code is null && LinksOf(unlinkedAgain.Body).Length == 0, unlinkedAgain);
+}
+finally
+{
+    if (linkedId is not null)
+    {
+        var deleted = await CallAsync("delete_work_item", new() { ["itemId"] = linkedId });
+        if (deleted.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not delete link scratch item {linkedId}: {deleted.Code}: {deleted.Message}");
+            failures++;
+        }
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
@@ -467,6 +563,15 @@ static string[] ListedOf(JsonElement items, Dictionary<string, string> chain) =>
         .Select(entry => entry.Key)
         .Order()
         .ToArray();
+
+// The entries of an item's "links" array; empty when the field is missing, which no check accepts as a link.
+static JsonElement[] LinksOf(JsonElement item) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty("links", out var links) && links.ValueKind == JsonValueKind.Array
+        ? links.EnumerateArray().ToArray()
+        : [];
+
+static bool IsOnlyLink(JsonElement item, string kind, string url) =>
+    LinksOf(item) is [var link] && StringField(link, "kind") == kind && StringField(link, "url") == url;
 
 static bool IsNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && (!item.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null);

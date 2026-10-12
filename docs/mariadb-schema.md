@@ -27,6 +27,7 @@ mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/001_initial_mariadb_sch
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/002_personal_access_token_scope.sql
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/003_work_item_claim.sql
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/004_work_item_dependencies.sql
+mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/005_work_item_links.sql
 ```
 
 Each script records its migration id in `__EFMigrationsHistory`, so the API skips migrations already applied by hand. A test (`StartupMigrationTests.Deploy_sql_history_rows_match_every_ef_migration`) fails if the ids in `deploy/sql` drift from the migrations in `KanbanBoard.Api/Data/Migrations`; add a numbered script with each new migration.
@@ -38,6 +39,10 @@ Each script records its migration id in `__EFMigrationsHistory`, so the API skip
 `004` adds the `WorkItemDependencies` table: one row per edge, `BlockedItemId` is blocked by `BlockerItemId`, with the pair as primary key. Both columns reference `WorkItems.Id` with `ON DELETE CASCADE`, so deleting a work item or its project removes its edges. It is safe to re-run.
 
 The API serialises dependency adds with the MariaDB named lock `kanban_work_item_dependencies` (`GET_LOCK`, 10 s timeout), so the cycle check and the insert of two concurrent adds cannot interleave. It is held for one request and released on the same connection; `SELECT IS_USED_LOCK('kanban_work_item_dependencies')` shows a holder. An add that waits the full 10 s is refused with HTTP 503 and code `busy`, and writes nothing.
+
+`005` adds the `WorkItemLinks` table: one row per external URL attached to a work item, with a `Kind` (`pr`, `branch` or `other`). `WorkItemId` references `WorkItems.Id` with `ON DELETE CASCADE`. `Url` holds up to 2048 characters, which is more than an index key can hold under `utf8mb4`, and the database's default collation would compare it ignoring case; so the API stores `UrlHash`, the SHA-256 of the URL in lowercase hex, and both the unique key (`WorkItemId`, `Kind`, `UrlHash`) and the lookup by URL (`IX_WorkItemLinks_UrlHash`) use the hash. A row whose `UrlHash` does not match its `Url` is never found by URL, so do not insert links by hand. It is safe to re-run.
+
+The API starts every link add and remove with the `UPDATE` that stamps the work item's `UpdatedAtUtc`, inside a transaction. That statement holds the item's row until the transaction ends, so the link writes of one item run one at a time and two identical adds never meet on the unique key: the second waits, finds the first one's row and inserts nothing (its stamp is rolled back). Adding a comment writes in the same order, stamp first and then the `INSERT`; in the other order two writers of one item deadlocked (error 1213) on the shared lock the `INSERT` takes for its foreign key.
 
 `001` creates the EF migrations history table and the initial Kanban schema:
 

@@ -26,6 +26,8 @@ public static class KanbanToolErrors
 
     public static KanbanToolException ScopeDenied(string message) => new(KanbanErrorCodes.ScopeDenied, message);
 
+    public static KanbanToolException InvalidArgument(string message) => new(KanbanErrorCodes.InvalidArgument, message);
+
     public static KanbanToolException NotFound(string message) => new(KanbanErrorCodes.NotFound, message);
 
     /// <summary>

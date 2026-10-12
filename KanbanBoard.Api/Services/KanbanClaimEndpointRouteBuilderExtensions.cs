@@ -88,7 +88,10 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
         return result.Outcome switch
         {
             WorkItemClaimOutcome.Succeeded => Results.Ok(WorkItemDtoMapper.ToDto(
-                current!, now, await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken))),
+                current!,
+                now,
+                await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
+                await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken))),
             WorkItemClaimOutcome.NotFound => Error(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound,
                 $"Work item {itemId} was not found."),
             WorkItemClaimOutcome.AlreadyClaimed => Error(StatusCodes.Status409Conflict, KanbanErrorCodes.AlreadyClaimed,

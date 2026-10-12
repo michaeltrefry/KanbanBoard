@@ -103,6 +103,10 @@ public sealed record WorkItemDto(
     /// <summary>Work items that are blocked by this item, each with its current status.</summary>
     [JsonPropertyName("dependents")]
     public IReadOnlyList<WorkItemDependencyRefDto> Dependents { get; init; } = [];
+
+    /// <summary>External links attached to this item, oldest first.</summary>
+    [JsonPropertyName("links")]
+    public IReadOnlyList<WorkItemLinkDto> Links { get; init; } = [];
 }
 
 /// <summary>
@@ -117,6 +121,13 @@ public sealed record WorkItemDependencyRefDto(
     Guid Id,
     string Title,
     WorkItemStatus Status);
+
+/// <summary>An external URL attached to a work item. <see cref="Kind"/> is one of <see cref="WorkItemLinkKinds"/>.</summary>
+public sealed record WorkItemLinkDto(
+    Guid Id,
+    string Kind,
+    string Url,
+    [property: JsonPropertyName("created_at_utc")] DateTimeOffset CreatedAtUtc);
 
 public sealed record WorkItemSearchResultDto(
     Guid Id,
@@ -221,3 +232,7 @@ public sealed record ReleaseWorkItemClaimRequest(
 
 public sealed record AddWorkItemDependencyRequest(
     Guid BlockedByItemId);
+
+public sealed record AddWorkItemLinkRequest(
+    string Kind,
+    string Url);

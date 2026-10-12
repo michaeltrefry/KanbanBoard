@@ -30,6 +30,35 @@ public static class KanbanErrorCodes
 
 public sealed record KanbanErrorDto(string Code, string Message);
 
+public static class WorkItemLinkKinds
+{
+    public const string PullRequest = "pr";
+    public const string Branch = "branch";
+    public const string Other = "other";
+
+    public static readonly IReadOnlyList<string> All = [PullRequest, Branch, Other];
+}
+
+public static class WorkItemLinkLimits
+{
+    public const int MaxKindLength = 16;
+    public const int MaxUrlLength = 2048;
+
+    /// <summary>
+    /// The longest percent-encoded form (<see cref="Uri.EscapeDataString(string)"/>) a link URL may have. Find and
+    /// remove carry the URL in the query string, and the request line of the API is limited to 8 KB. Three times
+    /// <see cref="MaxUrlLength"/> lets every ASCII URL of the allowed length through.
+    /// </summary>
+    public const int MaxEscapedUrlLength = 3 * MaxUrlLength;
+
+    public static readonly string LookupUrlTooLongMessage =
+        $"Argument 'url' must be at most {MaxEscapedUrlLength} characters when percent-encoded.";
+
+    /// <summary>Whether <paramref name="url"/> is short enough, percent-encoded, to be looked up.</summary>
+    public static bool FitsLookup(string url) =>
+        url.Length <= MaxEscapedUrlLength && Uri.EscapeDataString(url).Length <= MaxEscapedUrlLength;
+}
+
 public static class WorkItemClaimLimits
 {
     public const int MaxMarkerLength = 200;
