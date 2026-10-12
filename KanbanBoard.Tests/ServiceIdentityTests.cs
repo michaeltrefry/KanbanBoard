@@ -1,8 +1,12 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
+using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Tests;
 
@@ -86,6 +90,73 @@ public sealed class ServiceIdentityTests
 
         Assert.Equal(1, exitCode);
         Assert.Contains("not enabled", error.ToString(), StringComparison.Ordinal);
+        Assert.Empty(await services.GetRequiredService<KanbanDbContext>().AppUsers.ToListAsync());
+    }
+
+    [Fact]
+    public async Task Rotate_with_personal_access_tokens_disabled_revokes_nothing()
+    {
+        await using var services = CreateServices();
+        var dbContext = services.GetRequiredService<KanbanDbContext>();
+        var patOptions = services.GetRequiredService<IOptions<PersonalAccessTokenOptions>>();
+        Assert.Equal(0, await ServiceIdentityCommand.RunAsync(
+            [ServiceIdentityCommand.CommandName, "--name", "factory"], services, TextWriter.Null, TextWriter.Null, CancellationToken.None));
+        var error = new StringWriter();
+
+        patOptions.Value.Enabled = false;
+        var exitCode = await ServiceIdentityCommand.RunAsync(
+            [ServiceIdentityCommand.CommandName, "--name", "factory", "--rotate"], services, TextWriter.Null, error, CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Contains("not enabled", error.ToString(), StringComparison.Ordinal);
+        var tokens = await dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync();
+        Assert.Equal(2, tokens.Count);
+        Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
+    }
+
+    // The in-memory provider has no transactions, so there the order of the writes alone must protect the old tokens.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Rotate_keeps_the_existing_tokens_when_issuing_the_new_pair_fails(bool relational)
+    {
+        await using var services = CreateServices(relational: relational);
+        var dbContext = services.GetRequiredService<KanbanDbContext>();
+        var patService = services.GetRequiredService<IPersonalAccessTokenService>();
+        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: false, CancellationToken.None);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => ServiceIdentityProvisioner.ProvisionAsync(
+            dbContext, new FailingOnSecondCreate(patService), "factory", rotate: true, CancellationToken.None));
+
+        Assert.NotNull(await patService.ValidateAsync(first.FullToken.PlaintextToken, CancellationToken.None));
+        Assert.NotNull(await patService.ValidateAsync(first.ReadToken.PlaintextToken, CancellationToken.None));
+        if (relational)
+        {
+            // The full token issued before the failure was rolled back: no live token exists that was never printed.
+            Assert.Equal(2, await dbContext.PersonalAccessTokens.CountAsync());
+        }
+    }
+
+    private sealed class FailingOnSecondCreate(IPersonalAccessTokenService inner) : IPersonalAccessTokenService
+    {
+        private int creates;
+
+        public Task<CreatedPersonalAccessToken> CreateAsync(
+            AppUser user, string name, DateTimeOffset? expiresAtUtc, string scope, CancellationToken cancellationToken) =>
+            ++creates == 2
+                ? throw new InvalidOperationException("The second token could not be issued.")
+                : inner.CreateAsync(user, name, expiresAtUtc, scope, cancellationToken);
+
+        public Task<PersonalAccessTokenValidationResult?> ValidateAsync(string token, CancellationToken cancellationToken) =>
+            inner.ValidateAsync(token, cancellationToken);
+
+        public Task<bool> RevokeAsync(Guid appUserId, Guid tokenId, CancellationToken cancellationToken) =>
+            inner.RevokeAsync(appUserId, tokenId, cancellationToken);
+
+        public Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken) =>
+            inner.GetScopeAsync(tokenId, cancellationToken);
+
+        public void EnsureEnabled() => inner.EnsureEnabled();
     }
 
     [Theory]
@@ -100,15 +171,36 @@ public sealed class ServiceIdentityTests
     private static string PrintedToken(StringWriter output, string label) =>
         output.ToString().Split('\n').Single(line => line.StartsWith(label, StringComparison.Ordinal))[label.Length..].Trim();
 
-    private static ServiceProvider CreateServices(bool patEnabled = true)
+    private static ServiceProvider CreateServices(bool patEnabled = true, bool relational = false)
     {
         var databaseName = Guid.NewGuid().ToString();
         var patOptions = TestDb.PatOptions();
         patOptions.Value.Enabled = patEnabled;
         var services = new ServiceCollection();
-        services.AddDbContext<KanbanDbContext>(options => options.UseInMemoryDatabase(databaseName));
+        if (relational)
+        {
+            // A private in-memory SQLite database that lives as long as this connection, which the provider disposes.
+            services.AddSingleton(_ =>
+            {
+                var connection = new SqliteConnection("Data Source=:memory:");
+                connection.Open();
+                return connection;
+            });
+            services.AddDbContext<KanbanDbContext>((provider, options) => options.UseSqlite(provider.GetRequiredService<SqliteConnection>()));
+        }
+        else
+        {
+            services.AddDbContext<KanbanDbContext>(options => options.UseInMemoryDatabase(databaseName));
+        }
+
         services.AddSingleton(patOptions);
         services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
-        return services.BuildServiceProvider();
+        var provider = services.BuildServiceProvider();
+        if (relational)
+        {
+            provider.GetRequiredService<KanbanDbContext>().Database.EnsureCreated();
+        }
+
+        return provider;
     }
 }

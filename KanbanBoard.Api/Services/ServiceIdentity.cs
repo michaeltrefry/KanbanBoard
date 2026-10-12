@@ -34,6 +34,14 @@ public static class ServiceIdentityProvisioner
             throw new ArgumentException($"A service identity name is required and must be at most {MaxNameLength} characters.", nameof(name));
         }
 
+        // Before any write: with tokens disabled nothing is created and nothing is revoked.
+        personalAccessTokenService.EnsureEnabled();
+
+        // One transaction on a real database: a failure part-way leaves no identity, no unprinted token, no revocation.
+        await using var transaction = dbContext.Database.IsRelational()
+            ? await dbContext.Database.BeginTransactionAsync(cancellationToken)
+            : null;
+
         var subject = displayName.ToLowerInvariant();
         var now = DateTimeOffset.UtcNow;
         var user = await dbContext.AppUsers
@@ -48,28 +56,37 @@ public static class ServiceIdentityProvisioner
         user.DisplayName = displayName;
         user.UpdatedAtUtc = now;
 
-        var revoked = 0;
-        if (rotate && !created)
-        {
-            var activeTokens = await dbContext.PersonalAccessTokens
-                .Where(token => token.AppUserId == user.Id && token.RevokedAtUtc == null)
-                .ToListAsync(cancellationToken);
-            foreach (var token in activeTokens)
-            {
-                token.RevokedAtUtc = now;
-            }
-
-            revoked = activeTokens.Count;
-        }
-
         await dbContext.SaveChangesAsync(cancellationToken);
+
+        // Loaded before the new pair exists, so the pair is never among the tokens to revoke.
+        var previousTokens = rotate && !created
+            ? await dbContext.PersonalAccessTokens
+                .Where(token => token.AppUserId == user.Id && token.RevokedAtUtc == null)
+                .ToListAsync(cancellationToken)
+            : [];
 
         var fullToken = await personalAccessTokenService.CreateAsync(
             user, $"{displayName} ({PersonalAccessTokenScopes.Full})", null, PersonalAccessTokenScopes.Full, cancellationToken);
         var readToken = await personalAccessTokenService.CreateAsync(
             user, $"{displayName} ({PersonalAccessTokenScopes.Read})", null, PersonalAccessTokenScopes.Read, cancellationToken);
 
-        return new ProvisionedServiceIdentity(user, created, revoked, fullToken, readToken);
+        // The old tokens are revoked only once both replacements exist, so a failed issue leaves them usable.
+        if (previousTokens.Count > 0)
+        {
+            foreach (var token in previousTokens)
+            {
+                token.RevokedAtUtc = now;
+            }
+
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
+        if (transaction is not null)
+        {
+            await transaction.CommitAsync(cancellationToken);
+        }
+
+        return new ProvisionedServiceIdentity(user, created, previousTokens.Count, fullToken, readToken);
     }
 }
 
@@ -84,7 +101,7 @@ public static class ServiceIdentityCommand
     public const string Usage =
         "Usage: dotnet KanbanBoard.Api.dll " + CommandName + " --name NAME [--rotate]\n" +
         "  --name NAME  Display name of the service identity. Re-using a name adds tokens to that identity.\n" +
-        "  --rotate     Revoke the identity's existing tokens before issuing the new pair.";
+        "  --rotate     Revoke the identity's existing tokens once the new pair is issued.";
 
     public static bool IsCommand(string[] args) =>
         args.Length > 0 && string.Equals(args[0], CommandName, StringComparison.Ordinal);

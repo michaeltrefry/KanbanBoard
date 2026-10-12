@@ -48,14 +48,14 @@ public static class KanbanInternalApiExtensions
                     if (scope is null)
                     {
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                        await context.Response.WriteAsJsonAsync(new { message = UnknownTokenMessage });
+                        await context.Response.WriteAsJsonAsync(new KanbanErrorDto(KanbanErrorCodes.ScopeDenied, UnknownTokenMessage));
                         return;
                     }
 
                     if (!PersonalAccessTokenScopes.AllowsWrites(scope))
                     {
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
-                        await context.Response.WriteAsJsonAsync(new { message = ReadOnlyScopeMessage });
+                        await context.Response.WriteAsJsonAsync(new KanbanErrorDto(KanbanErrorCodes.ScopeDenied, ReadOnlyScopeMessage));
                         return;
                     }
                 }

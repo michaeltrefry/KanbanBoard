@@ -311,17 +311,23 @@ public sealed class WorkItemClaimApiTests
         var revokedCaller = await fixture.CreateCallerAsync("Revoked");
         await fixture.WithServicesAsync(services => services.GetRequiredService<IPersonalAccessTokenService>()
             .RevokeAsync(revokedCaller.User.Id, revokedCaller.Token.Id, CancellationToken.None));
+        // Expiring exactly now is already expired, as in PersonalAccessTokenService.ValidateAsync.
+        var expiredCaller = await fixture.CreateCallerAsync("Expired", expiresAtUtc: fixture.Clock.Now);
         var itemId = await fixture.AddItemAsync();
         var path = $"/api/items/{itemId}/{route}";
         var body = new ClaimWorkItemRequest("run-1", 60);
 
         var readToken = await fixture.PostAsync(path, readCaller, body);
         var revokedToken = await fixture.PostAsync(path, revokedCaller, body);
+        var expiredToken = await fixture.PostAsync(path, expiredCaller, body);
+        var unknownToken = await fixture.Client.SendAsync(fixture.InternalRequest(path, Guid.NewGuid(), body));
         var internalWithoutToken = await fixture.Client.SendAsync(fixture.InternalRequest(path, tokenId: null, body));
         var notInternal = await fixture.Client.PostAsJsonAsync(path, body);
 
-        Assert.Equal(HttpStatusCode.Forbidden, readToken.StatusCode);
+        await AssertErrorAsync(readToken, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
         await AssertErrorAsync(revokedToken, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
+        await AssertErrorAsync(expiredToken, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
+        await AssertErrorAsync(unknownToken, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
         await AssertErrorAsync(internalWithoutToken, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
         await AssertErrorAsync(notInternal, HttpStatusCode.Forbidden, KanbanErrorCodes.ScopeDenied);
         Assert.Null((await fixture.GetItemAsync(itemId)).ClaimantUserId);
@@ -449,7 +455,8 @@ public sealed class WorkItemClaimApiTests
             return await action(scope.ServiceProvider);
         }
 
-        public Task<PersonalAccessTokenValidationResult> CreateCallerAsync(string name, string scope = PersonalAccessTokenScopes.Full) =>
+        public Task<PersonalAccessTokenValidationResult> CreateCallerAsync(
+            string name, string scope = PersonalAccessTokenScopes.Full, DateTimeOffset? expiresAtUtc = null) =>
             WithServicesAsync(async services =>
             {
                 var dbContext = services.GetRequiredService<KanbanDbContext>();
@@ -457,7 +464,7 @@ public sealed class WorkItemClaimApiTests
                 dbContext.AppUsers.Add(user);
                 await dbContext.SaveChangesAsync();
                 var created = await services.GetRequiredService<IPersonalAccessTokenService>()
-                    .CreateAsync(user, $"token-{name}", null, scope, CancellationToken.None);
+                    .CreateAsync(user, $"token-{name}", expiresAtUtc, scope, CancellationToken.None);
                 return new PersonalAccessTokenValidationResult(user, created.Token);
             });
 

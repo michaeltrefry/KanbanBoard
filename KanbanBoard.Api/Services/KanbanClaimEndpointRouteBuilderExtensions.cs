@@ -62,7 +62,8 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
         CancellationToken cancellationToken)
     {
         // The claimant is whoever owns the forwarded token. No request field can name a different one.
-        var claimant = await ResolveClaimantAsync(httpContext, dbContext, cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var claimant = await ResolveClaimantAsync(httpContext, dbContext, now, cancellationToken);
         if (claimant is null)
         {
             return Error(StatusCodes.Status403Forbidden, KanbanErrorCodes.ScopeDenied, NoClaimantMessage);
@@ -81,7 +82,6 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
                 $"Field 'ttl_seconds' must be between {WorkItemClaimLimits.MinTtlSeconds} and {WorkItemClaimLimits.MaxTtlSeconds}.");
         }
 
-        var now = timeProvider.GetUtcNow();
         var result = await write(claimant, marker, ttlSeconds is null ? null : TimeSpan.FromSeconds(ttlSeconds.Value), now);
         var current = result.Current;
 
@@ -102,6 +102,7 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
     private static async Task<AppUser?> ResolveClaimantAsync(
         HttpContext httpContext,
         KanbanDbContext dbContext,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         if (!KanbanInternalApiExtensions.IsInternalApiRequest(httpContext) ||
@@ -114,7 +115,9 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
 
         return await dbContext.PersonalAccessTokens
             .AsNoTracking()
-            .Where(token => token.Id == tokenId && token.RevokedAtUtc == null)
+            .Where(token => token.Id == tokenId &&
+                token.RevokedAtUtc == null &&
+                (token.ExpiresAtUtc == null || token.ExpiresAtUtc > now))
             .Select(token => token.AppUser)
             .FirstOrDefaultAsync(cancellationToken);
     }

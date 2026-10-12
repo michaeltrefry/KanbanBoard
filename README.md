@@ -128,7 +128,7 @@ A service identity is a user that no person signs in as, for a program such as t
 dotnet KanbanBoard.Api.dll create-service-identity --name factory [--rotate]
 ```
 
-The name is the identity's display name and the `claimant` on the items it claims. Running the command again with the same name adds a new token pair to the same identity; `--rotate` revokes its existing tokens first. See [docs/deployment.md](docs/deployment.md#factory-service-identity) for the production steps.
+The name is the identity's display name and the `claimant` on the items it claims. Running the command again with the same name adds a new token pair to the same identity; `--rotate` also revokes its existing tokens once the new pair is issued. See [docs/deployment.md](docs/deployment.md#factory-service-identity) for the production steps.
 
 ### Available tool names
 
