@@ -778,13 +778,43 @@ try
         legacy.Code is null && StringField(legacy.Body, "priority") == "High" && StringField(legacy.Body, "description") == "to be cleared" && IntField(legacy.Body, "estimate") == 3,
         legacy);
 
-    // 36. clear empties an optional field; an empty string is not a way to clear.
+    // 36. clear empties an optional field.
     var cleared = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["clear"] = new[] { "description", "estimate" } });
     Check("update_work_item with clear [description, estimate] empties both and leaves the labels",
         cleared.Code is null && IsNullField(cleared.Body, "description") && HasNullField(cleared.Body, "estimate") && LabelsOf(cleared.Body).Length == 2,
         cleared);
-    var emptyDescription = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["description"] = "" });
-    Check("update_work_item with an empty description is refused invalid_argument", emptyDescription.Code == "invalid_argument", emptyDescription);
+    // The call as it was made before clear existed, where an empty description or labels emptied the field, still does that.
+    await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["description"] = "to be emptied" });
+    var emptyDescription = await CallAsync("update_work_item", new()
+    {
+        ["itemId"] = patchItemId, ["title"] = $"Renamed update item {run}", ["type"] = "Task", ["status"] = "Ready", ["priority"] = "High", ["description"] = ""
+    });
+    Check("update_work_item with the four old arguments and an empty description empties the description and leaves the labels",
+        emptyDescription.Code is null && StringField(emptyDescription.Body, "description") == "" && LabelsOf(emptyDescription.Body).Length == 2 && StringField(emptyDescription.Body, "priority") == "High",
+        emptyDescription);
+    foreach (var noLabels in new[] { "", " , " })
+    {
+        await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["labels"] = $"acceptance, run-{run}", ["description"] = "kept" });
+        var emptyLabels = await CallAsync("update_work_item", new()
+        {
+            ["itemId"] = patchItemId, ["title"] = $"Renamed update item {run}", ["type"] = "Task", ["status"] = "Ready", ["priority"] = "High", ["labels"] = noLabels
+        });
+        Check($"update_work_item with the four old arguments and labels \"{noLabels}\" leaves the item without labels and keeps the description",
+            emptyLabels.Code is null && LabelsOf(emptyLabels.Body).Length == 0 && IsNullField(emptyLabels.Body, "labels") && StringField(emptyLabels.Body, "description") == "kept",
+            emptyLabels);
+    }
+
+    await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["labels"] = $"acceptance, run-{run}", ["clear"] = new[] { "description" } });
+    // An update of nothing is refused, and does not advance the version.
+    var beforeNothing = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    var nothing = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId });
+    var versionOnly = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["expected_version"] = IntField(beforeNothing.Body, "version") });
+    var afterNothing = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    Check("update_work_item with only itemId, or only itemId and expected_version, is refused invalid_argument and leaves the version and updatedAtUtc",
+        nothing.Code == "invalid_argument" && versionOnly.Code == "invalid_argument" &&
+        IntField(beforeNothing.Body, "version") is { } versionBefore && IntField(afterNothing.Body, "version") == versionBefore &&
+        StringField(afterNothing.Body, "updatedAtUtc") == StringField(beforeNothing.Body, "updatedAtUtc"),
+        nothing);
     var clearTitle = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["clear"] = new[] { "title" } });
     Check("update_work_item with clear [title] is refused invalid_argument", clearTitle.Code == "invalid_argument", clearTitle);
 

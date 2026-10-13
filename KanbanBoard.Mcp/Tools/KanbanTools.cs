@@ -87,11 +87,11 @@ public sealed class KanbanTools(
         EnsureWriteScope();
         var body = PatchBody(
             clear,
-            ("name", "name", name, false),
-            ("key", "key", key, false),
-            ("description", "description", description, true),
-            ("repository_url", "repositoryUrl", repository_url, true),
-            ("default_branch", "defaultBranch", default_branch, true));
+            ("name", "name", name, false, false),
+            ("key", "key", key, false, false),
+            ("description", "description", description, true, false),
+            ("repository_url", "repositoryUrl", repository_url, true, false),
+            ("default_branch", "defaultBranch", default_branch, true, false));
         if (is_archived is not null)
         {
             body["isArchived"] = is_archived.Value;
@@ -605,7 +605,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Change a work item. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value, so update_work_item(itemId, status) changes the status and nothing else. To empty an optional field, name it in clear (description, estimate, labels, epicId); an empty string or an empty label_list is refused with code invalid_argument, as is a field that is both passed and named in clear. A new status puts the item at the end of that column. Pass expected_version to refuse the update with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version: version goes up by one with every update and every move of the item, and not when it is claimed, commented on, linked, given a dependency, or when another item is reordered around it. An unknown itemId is refused with code not_found.")]
+    [McpServerTool, Description("Change a work item. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value, so update_work_item(itemId, status) changes the status and nothing else. To empty an optional field, name it in clear (description, estimate, labels, epicId); an empty string or an empty label_list is refused with code invalid_argument, as are a field that is both passed and named in clear and a call that passes no field to change. One exception, kept for callers from before clear existed: description passed as an empty or whitespace-only string leaves the item with an empty description, and labels passed as a string with no label in it (\"\", \" \", \" , \") leaves it without labels. A new status puts the item at the end of that column. Pass expected_version to refuse the update with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version: version goes up by one with every update and every move of the item, and not when it is claimed, commented on, linked, given a dependency, or when another item is reordered around it. An unknown itemId is refused with code not_found.")]
     public async Task<WorkItemDto?> UpdateWorkItem(
         [Description("Work item id")] Guid itemId,
         [Description("New title, at most 240 characters")] string? title = null,
@@ -644,14 +644,22 @@ public sealed class KanbanTools(
 
         var body = PatchBody(
             clear,
-            ("title", "title", title, false),
-            ("type", "type", type?.ToString(), false),
-            ("status", "status", status?.ToString(), false),
-            ("priority", "priority", priority?.ToString(), false),
-            ("epicId", "epicId", epicId?.ToString(), true),
-            ("description", "description", description, true),
-            ("estimate", "estimate", estimate, true),
-            ("labels", "labels", newLabels, true));
+            ("title", "title", title, false, false),
+            ("type", "type", type?.ToString(), false, false),
+            ("status", "status", status?.ToString(), false, false),
+            ("priority", "priority", priority?.ToString(), false, false),
+            ("epicId", "epicId", epicId?.ToString(), true, false),
+            // description and labels are the two strings this tool took before clear existed, when an empty one
+            // emptied the field. That still works: the API stores an empty description and no labels.
+            ("description", "description", description, true, true),
+            ("estimate", "estimate", estimate, true, false),
+            ("labels", "labels", newLabels, true, true));
+        if (body.Count == 0)
+        {
+            // An update of nothing would still advance the version, and make another caller's guarded write fail.
+            throw KanbanToolErrors.InvalidArgument("Nothing to change: pass at least one field to change, or name one in 'clear'.");
+        }
+
         if (expected_version is not null)
         {
             body["expectedVersion"] = expected_version.Value;
@@ -678,8 +686,8 @@ public sealed class KanbanTools(
     // The body of a partial update, and the one convention for emptying an optional field over MCP: an argument
     // that is left out (or null: MCP cannot tell the two apart) is not sent and keeps its value, an argument with a
     // value is sent, and a field named in clear is sent as null. Each field is (argument name, API name, value as
-    // JSON, whether clear may name it).
-    private static JsonObject PatchBody(string[]? clear, params (string Argument, string ApiName, JsonNode? Value, bool Clearable)[] fields)
+    // JSON, whether clear may name it, whether an empty string is sent as it is instead of being refused).
+    private static JsonObject PatchBody(string[]? clear, params (string Argument, string ApiName, JsonNode? Value, bool Clearable, bool EmptyAllowed)[] fields)
     {
         var cleared = clear ?? [];
         var clearable = fields.Where(field => field.Clearable).Select(field => field.Argument).ToArray();
@@ -691,7 +699,7 @@ public sealed class KanbanTools(
         }
 
         var body = new JsonObject();
-        foreach (var (argument, apiName, value, _) in fields)
+        foreach (var (argument, apiName, value, _, emptyAllowed) in fields)
         {
             var isCleared = cleared.Contains(argument);
             if (value is not null && isCleared)
@@ -699,7 +707,7 @@ public sealed class KanbanTools(
                 throw KanbanToolErrors.InvalidArgument($"Argument '{argument}' is both passed and named in 'clear'. Do one of the two.");
             }
 
-            if (value is JsonValue text && text.TryGetValue<string>(out var characters) && string.IsNullOrWhiteSpace(characters))
+            if (!emptyAllowed && value is JsonValue text && text.TryGetValue<string>(out var characters) && string.IsNullOrWhiteSpace(characters))
             {
                 throw KanbanToolErrors.InvalidArgument(clearable.Contains(argument)
                     ? $"Argument '{argument}' must not be empty. To empty the field, name it in 'clear'."

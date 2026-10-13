@@ -64,17 +64,15 @@ public sealed class KanbanToolsWorkItemUpdateTests
         {
             ["itemId"] = ItemId, ["title"] = "Renamed", ["type"] = "Issue", ["priority"] = "High", ["epicId"] = EpicId, ["description"] = "d", ["labels"] = "a,b", ["expected_version"] = 7
         });
-        var nothing = await server.CallAsync("update_work_item", new() { ["itemId"] = ItemId });
 
-        Assert.All(new[] { status, estimate, several, nothing }, result => Assert.NotEqual(true, result.IsError));
+        Assert.All(new[] { status, estimate, several }, result => Assert.NotEqual(true, result.IsError));
         // One request per call: the item is not looked up on any board first.
         Assert.All(server.Api.Requests, request => Assert.Equal((HttpMethod.Patch, $"/api/items/{ItemId}"), (request.Method, request.Path)));
         Assert.Equal(
             [
                 """{"status":"InProgress"}""",
                 """{"estimate":8}""",
-                $$"""{"title":"Renamed","type":"Issue","priority":"High","epicId":"{{EpicId}}","description":"d","labels":"a,b","expectedVersion":7}""",
-                "{}"
+                $$"""{"title":"Renamed","type":"Issue","priority":"High","epicId":"{{EpicId}}","description":"d","labels":"a,b","expectedVersion":7}"""
             ],
             server.Api.Requests.Select(request => request.Body).ToArray());
         Assert.Equal(ItemText, Text(status));
@@ -94,6 +92,27 @@ public sealed class KanbanToolsWorkItemUpdateTests
         // As before, the optional fields that were not passed keep their values: they are not sent at all.
         Assert.Equal("""{"title":"Item","type":"Story","status":"Ready","priority":"Medium"}""", Assert.Single(server.Api.Requests).Body);
         Assert.Equal(ItemText, Text(result));
+    }
+
+    // Before clear existed, an empty description or labels string emptied the field. It still reaches the API, which
+    // stores an empty description and no labels (WorkItemUpdateApiTests).
+    [Theory]
+    [InlineData("description", "", """{"title":"Item","type":"Story","status":"Ready","priority":"Medium","description":""}""")]
+    [InlineData("description", "  ", """{"title":"Item","type":"Story","status":"Ready","priority":"Medium","description":"  "}""")]
+    [InlineData("labels", "", """{"title":"Item","type":"Story","status":"Ready","priority":"Medium","labels":""}""")]
+    [InlineData("labels", " ", """{"title":"Item","type":"Story","status":"Ready","priority":"Medium","labels":" "}""")]
+    [InlineData("labels", " , ", """{"title":"Item","type":"Story","status":"Ready","priority":"Medium","labels":" , "}""")]
+    public async Task Update_with_the_arguments_it_always_required_and_an_empty_description_or_labels_still_empties_that_field(string argument, string value, string body)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(HttpStatusCode.OK, ItemJson));
+
+        var result = await server.CallAsync("update_work_item", new()
+        {
+            ["itemId"] = ItemId, ["title"] = "Item", ["type"] = "Story", ["status"] = "Ready", ["priority"] = "Medium", [argument] = value
+        });
+
+        Assert.NotEqual(true, result.IsError);
+        Assert.Equal(body, Assert.Single(server.Api.Requests).Body);
     }
 
     [Fact]
@@ -138,11 +157,18 @@ public sealed class KanbanToolsWorkItemUpdateTests
         new Dictionary<string, object?> { ["labels"] = "a", ["clear"] = new[] { "labels" } },
         new Dictionary<string, object?> { ["label_list"] = new[] { "a" }, ["clear"] = new[] { "labels" } },
         new Dictionary<string, object?> { ["epicId"] = Guid.Parse("44444444-4444-4444-4444-444444444444"), ["clear"] = new[] { "epicId" } },
-        // An empty value is not a way to clear.
-        new Dictionary<string, object?> { ["description"] = "" },
-        new Dictionary<string, object?> { ["labels"] = " " },
+        // An empty value is not a way to clear, except a description or labels string (see the test above).
         new Dictionary<string, object?> { ["title"] = "" },
+        new Dictionary<string, object?> { ["title"] = " ", ["description"] = "" },
         new Dictionary<string, object?> { ["label_list"] = Array.Empty<string>() },
+        new Dictionary<string, object?> { ["label_list"] = new[] { "" } },
+        // An empty string is a value: it is not passed together with clear.
+        new Dictionary<string, object?> { ["description"] = "", ["clear"] = new[] { "description" } },
+        new Dictionary<string, object?> { ["labels"] = "", ["clear"] = new[] { "labels" } },
+        // Nothing to change: the version would advance for nothing.
+        new Dictionary<string, object?>(),
+        new Dictionary<string, object?> { ["expected_version"] = 7 },
+        new Dictionary<string, object?> { ["clear"] = Array.Empty<string>() },
         // A label of a list is one label.
         new Dictionary<string, object?> { ["label_list"] = new[] { "a,b" } },
         new Dictionary<string, object?> { ["label_list"] = new[] { "a", " " } },

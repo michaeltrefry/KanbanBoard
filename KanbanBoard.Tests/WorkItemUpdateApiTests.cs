@@ -141,7 +141,7 @@ public sealed class WorkItemUpdateApiTests
     }
 
     [Fact]
-    public async Task Comments_links_and_dependencies_do_not_advance_the_version_so_an_update_after_them_still_succeeds()
+    public async Task Comments_links_dependencies_and_claims_do_not_advance_the_version_so_an_update_after_them_still_succeeds()
     {
         using var api = new ApiApplication();
         using var client = api.CreateClient();
@@ -152,13 +152,104 @@ public sealed class WorkItemUpdateApiTests
         var commented = await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/comments", new { author = "tester", body = "note" });
         var linked = await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/links", new AddWorkItemLinkRequest("pr", "https://github.com/acme/app/pull/1"));
         var blocked = await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/dependencies", new AddWorkItemDependencyRequest(other.Id));
+        using var caller = api.CreateCallerClient();
+        var claimed = await PostAsync<WorkItemDto>(caller, $"/api/items/{item.Id}/claim", new ClaimWorkItemRequest("run-1", 60));
+        var renewed = await PostAsync<WorkItemDto>(caller, $"/api/items/{item.Id}/claim/renew", new ClaimWorkItemRequest("run-1", 120));
+        var released = await PostAsync<WorkItemDto>(caller, $"/api/items/{item.Id}/claim/release", new ReleaseWorkItemClaimRequest("run-1"));
         var updated = await PatchAsync(client, item.Id, new { status = "InProgress", expectedVersion = item.Version });
+        // An update with the values the item already has is still an update.
+        var sameValues = await PatchAsync(client, item.Id, new { status = "InProgress", title = "A" });
+        var read = (await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{item.Id}", Json))!;
 
         Assert.Equal([1L, 1L, 1L], new[] { commented.Version, linked.Version, blocked.Version });
+        // The claim was really taken, renewed and given back, and none of the three is a write of the item.
+        Assert.Equal(("run-1", "run-1", null), (claimed.ClaimMarker, renewed.ClaimMarker, released.ClaimMarker));
+        Assert.True(renewed.ClaimExpiresAtUtc > claimed.ClaimExpiresAtUtc);
+        Assert.Equal([1L, 1L, 1L], new[] { claimed.Version, renewed.Version, released.Version });
         Assert.Equal((WorkItemStatus.InProgress, 2L), (updated.Status, updated.Version));
+        Assert.Equal((WorkItemStatus.InProgress, "A", updated.Order, 3L), (sameValues.Status, sameValues.Title, sameValues.Order, sameValues.Version));
+        Assert.Equal(sameValues, read, Same);
         Assert.Single(updated.Comments);
         Assert.Single(updated.Links);
         Assert.Single(updated.Blockers);
+    }
+
+    [Fact]
+    public async Task A_patch_that_names_no_field_is_refused_invalid_argument_and_writes_nothing_while_the_put_of_the_web_ui_is_as_it_was()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "NONE");
+        var item = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        api.Commands.Clear();
+
+        using var empty = await client.PatchAsJsonAsync($"/api/items/{item.Id}", new { });
+        using var versionOnly = await client.PatchAsJsonAsync($"/api/items/{item.Id}", new { expectedVersion = 1 });
+        using var staleVersionOnly = await client.PatchAsJsonAsync($"/api/items/{item.Id}", new { expectedVersion = 9 });
+        var writes = Writes(api);
+        var unchanged = await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{item.Id}", Json);
+        // Another caller's guarded write still goes through.
+        var guarded = await PatchAsync(client, item.Id, new { title = "B", expectedVersion = 1 });
+        var put = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{item.Id}", new { });
+
+        await AssertErrorAsync(empty, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(versionOnly, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(staleVersionOnly, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        Assert.Empty(writes);
+        Assert.Equal(item, unchanged, Same);
+        Assert.Equal(("B", 2L), (guarded.Title, guarded.Version));
+        Assert.Equal(("B", 3L), (put.Title, put.Version));
+    }
+
+    [Fact]
+    public async Task An_empty_description_and_a_label_string_without_a_label_empty_those_fields_and_leave_the_rest()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "OLD");
+        var item = await CreateAsync(client, project, new { title = "A", description = "Body", type = "Story", status = "Backlog", priority = "High", estimate = 5, labels = "api,backend", epicId = epic });
+
+        // What update_work_item sends for the call it has always taken: the four fields that were required, and an empty string.
+        var noDescription = await PatchAsync(client, item.Id, new { title = "A", type = "Story", status = "Backlog", priority = "High", description = "" });
+        var noLabels = await PatchAsync(client, item.Id, new { title = "A", type = "Story", status = "Backlog", priority = "High", labels = "" });
+        var relabelled = await PatchAsync(client, item.Id, new { labels = "x", description = "again" });
+        var commasOnly = await PatchAsync(client, item.Id, new { labels = " , ", description = "   " });
+
+        Assert.Equal(("", "api,backend", 5, epic, "A", 0, 2L), (noDescription.Description, noDescription.Labels, noDescription.Estimate, noDescription.EpicId, noDescription.Title, noDescription.Order, noDescription.Version));
+        Assert.Equal(("", null, 5, epic, 3L), (noLabels.Description, noLabels.Labels, noLabels.Estimate, noLabels.EpicId, noLabels.Version));
+        Assert.Empty(noLabels.LabelList);
+        Assert.Equal(("again", "x"), (relabelled.Description, relabelled.Labels));
+        Assert.Equal(("", null, 5, epic, 5L), (commasOnly.Description, commasOnly.Labels, commasOnly.Estimate, commasOnly.EpicId, commasOnly.Version));
+        Assert.Empty(commasOnly.LabelList);
+    }
+
+    [Fact]
+    public async Task A_move_whose_renumbering_of_the_siblings_fails_is_still_answered_with_the_moved_item_and_its_new_version()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "SIB");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
+
+        // The item is written by an UPDATE of its own; the only save of a move is the one of its siblings.
+        api.FailNextSave = true;
+        using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 1 });
+        var failed = !api.FailNextSave;
+        var body = await response.Content.ReadAsStringAsync();
+        var after = await ItemsAsync(client);
+        // The next move in the column renumbers it.
+        var next = await PostAsync<WorkItemDto>(client, $"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 2 });
+        var repaired = await ItemsAsync(client);
+
+        Assert.True(failed);
+        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{(int)response.StatusCode} {body}");
+        var moved = JsonSerializer.Deserialize<WorkItemDto>(body, Json)!;
+        Assert.Equal((b.Id, WorkItemStatus.Backlog, 0, 2L), (moved.Id, moved.Status, moved.Order, moved.Version));
+        Assert.Equal(moved, after[b.Id], Same);
+        // The sibling was not renumbered, and is otherwise untouched.
+        Assert.Equal(a, after[a.Id], Same);
+        Assert.Equal((0, 1, 3L, 1L), (repaired[b.Id].Order, repaired[a.Id].Order, next.Version, repaired[a.Id].Version));
     }
 
     [Fact]

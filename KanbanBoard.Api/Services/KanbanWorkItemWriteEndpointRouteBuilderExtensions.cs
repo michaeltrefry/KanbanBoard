@@ -21,7 +21,8 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         .WithName("UpdateWorkItem");
 
         // The partial update: a field that is present is written, null clears it, an absent field is left alone.
-        // With expectedVersion the update is refused 409 conflict unless the item still has that version.
+        // With expectedVersion the update is refused 409 conflict unless the item still has that version. A body
+        // that names no field is refused: it would advance the version and fail another caller's guarded write.
         endpoints.MapPatch("/api/items/{itemId:guid}", (
             Guid itemId,
             JsonElement payload,
@@ -38,10 +39,11 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            ILoggerFactory loggerFactory,
             CancellationToken cancellationToken) =>
             await AnswerAsync(
                 itemId,
-                await WorkItemWrites.MoveAsync(dbContext, itemId, request.Status, request.Order, request.ExpectedVersion, timeProvider.GetUtcNow(), cancellationToken),
+                await WorkItemWrites.MoveAsync(dbContext, itemId, request.Status, request.Order, request.ExpectedVersion, timeProvider.GetUtcNow(), loggerFactory.CreateLogger(typeof(WorkItemWrites)), cancellationToken),
                 dbContext, changeNotifier, timeProvider, cancellationToken))
         .WithName("MoveWorkItem");
 
@@ -60,6 +62,11 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         if (!UpdateWorkItemPatch.TryParse(payload, strict, out var patch, out var parseError))
         {
             return Error(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, parseError!);
+        }
+
+        if (strict && !patch!.HasAnyField)
+        {
+            return Error(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "The update names no field to change. Nothing was changed.");
         }
 
         return await AnswerAsync(

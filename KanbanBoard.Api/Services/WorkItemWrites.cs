@@ -138,6 +138,12 @@ public static class WorkItemWrites
     /// <summary>
     /// Puts the item in a column at a position. The item itself is written by one conditional UPDATE; the siblings
     /// it displaces are renumbered afterwards, in a save of their own, and keep their version and UpdatedAtUtc.
+    ///
+    /// The two are separate on purpose: renumbering inside the item's transaction would hold the moved item's row
+    /// while taking the rows of its siblings, and two moves in one column could then deadlock. The price is that
+    /// the renumbering can fail after the move is committed. That failure is logged and the moved item is still
+    /// returned, with its new version: answering with an error would tell the caller that a move which happened
+    /// did not. The column may then hold a duplicate or a gap in Order until the next move in it renumbers it.
     /// </summary>
     public static async Task<WorkItemWriteResult> MoveAsync(
         KanbanDbContext dbContext,
@@ -146,6 +152,7 @@ public static class WorkItemWrites
         int order,
         long? expectedVersion,
         DateTimeOffset now,
+        ILogger logger,
         CancellationToken cancellationToken)
     {
         WorkItem? moved;
@@ -181,8 +188,18 @@ public static class WorkItemWrites
 
         // The siblings are written after that transaction, without holding the moved item's row. Each save writes
         // its rows in the order of their keys, so two moves in one column wait for each other instead of deadlocking.
-        await NormalizeColumnOrderingAsync(dbContext, moved.ProjectId, status, itemId, order, cancellationToken);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await NormalizeColumnOrderingAsync(dbContext, moved.ProjectId, status, itemId, order, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            // The move itself is committed (see the summary): report it, not this.
+            logger.LogError(exception, "Work item {ItemId} was moved to {Status} at {Order}, but renumbering the other items of that column failed.", itemId, status, order);
+            dbContext.ChangeTracker.Clear();
+        }
+
         return new(WorkItemWriteOutcome.Succeeded, moved);
     }
 

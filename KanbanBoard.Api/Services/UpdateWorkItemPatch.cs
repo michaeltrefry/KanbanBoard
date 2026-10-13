@@ -33,6 +33,10 @@ public sealed class UpdateWorkItemPatch
     /// <summary>When set, the update is refused unless the item still has this version.</summary>
     public long? ExpectedVersion { get; init; }
 
+    /// <summary>Whether the update names a field of the item at all; the expected version is not one.</summary>
+    public bool HasAnyField =>
+        HasEpicId || HasTitle || HasDescription || HasType || HasStatus || HasPriority || HasEstimate || HasLabels;
+
     private static readonly string[] Fields =
         ["epicId", "title", "description", "type", "status", "priority", "estimate", "labels", "expectedVersion"];
 
