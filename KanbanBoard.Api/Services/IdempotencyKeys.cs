@@ -100,8 +100,10 @@ public static class IdempotencyKeys
     /// <paramref name="lockParent"/> must be an UPDATE of the parent's row that changes nothing and returns the rows
     /// it matched. It is the first statement of the transaction on purpose: it holds the row until the transaction
     /// ends, and on MariaDB (REPEATABLE READ) the reads that follow it see everything the earlier holders committed.
-    /// A read before it would fix the transaction's view too early. An INSERT of a child takes a shared lock on the
-    /// same row, so creates without a key wait for a keyed one and never deadlock with it: they hold nothing yet.
+    /// A read before it would fix the transaction's view too early. A create of a work item without a key runs
+    /// here as well, with a <paramref name="findExisting"/> that finds nothing, so that it reads the end of its
+    /// column under the same row. An INSERT of another child takes a shared lock on that row, so the creates of epics
+    /// without a key wait for a keyed one and never deadlock with it: they hold nothing yet.
     ///
     /// Should the unique index <paramref name="uniqueIndexName"/> refuse the INSERT all the same, the server is taken
     /// at its word (error 1062) and the key is looked up again after the transaction is gone; inside it the row that

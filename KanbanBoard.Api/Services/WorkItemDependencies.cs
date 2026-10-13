@@ -39,17 +39,21 @@ public static class WorkItemDependencies
     {
         // Two adds can each pass the cycle check and together close a loop, even when they share no item, so the
         // check and the insert run one caller at a time. Do not replace this with a plain read followed by a write.
-        return await MariaDbNamedLock.RunAsync(dbContext, LockName, LockTimeoutSeconds, WorkItemDependencyOutcome.Busy, async () =>
-        {
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-            var (outcome, added) = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
-            if (added)
+        // The add holds the rows of two items, in the order of their keys; a delete of a project or an archive of an
+        // epic holds its items in the order of an index, and MariaDB then rolls one of the two back (error 1213).
+        // The add is run again, still under the lock.
+        return await MariaDbNamedLock.RunAsync(dbContext, LockName, LockTimeoutSeconds, WorkItemDependencyOutcome.Busy, () =>
+            WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
             {
-                await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyAdded, blockedItemId, blockerItemId, actor, now, cancellationToken);
-            }
+                await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+                var (outcome, added) = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
+                if (added)
+                {
+                    await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyAdded, blockedItemId, blockerItemId, actor, now, cancellationToken);
+                }
 
-            return outcome;
-        }, cancellationToken);
+                return outcome;
+            }), cancellationToken);
     }
 
     // Whether the edge was inserted: an edge that was already there succeeds without a write.
@@ -121,34 +125,40 @@ public static class WorkItemDependencies
     {
         // The blocked item's row is held first, like every write that records an entry for an item: the removes of
         // one edge then run one at a time, and the second one reads the edge only after the first has committed.
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        await WorkItemChangeLog.LockItemAsync(dbContext, blockedItemId, cancellationToken);
-        if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
+        // The DELETE takes the edge's row and then its entry in the index on the blocker; a delete of the blocking
+        // item or of its project holds the edges it removes through that index first, and MariaDB then rolls one of
+        // the two back (error 1213). The remove is run again.
+        return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
-            return WorkItemDependencyOutcome.NotFound;
-        }
-
-        // A tracked delete, not ExecuteDelete: MySql.EntityFrameworkCore writes that as DELETE FROM ... AS `w`,
-        // which MariaDB rejects.
-        var edge = await dbContext.WorkItemDependencies.FindAsync([blockedItemId, blockerItemId], cancellationToken);
-        if (edge is not null)
-        {
-            dbContext.WorkItemDependencies.Remove(edge);
-            try
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            await WorkItemChangeLog.LockItemAsync(dbContext, blockedItemId, cancellationToken);
+            if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
             {
-                await dbContext.SaveChangesAsync(cancellationToken);
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                // Another caller removed the edge first: this call changed nothing and records nothing.
-                dbContext.ChangeTracker.Clear();
-                return WorkItemDependencyOutcome.Succeeded;
+                return WorkItemDependencyOutcome.NotFound;
             }
 
-            await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyRemoved, blockedItemId, blockerItemId, actor, now, cancellationToken);
-        }
+            // A tracked delete, not ExecuteDelete: MySql.EntityFrameworkCore writes that as DELETE FROM ... AS `w`,
+            // which MariaDB rejects.
+            var edge = await dbContext.WorkItemDependencies.FindAsync([blockedItemId, blockerItemId], cancellationToken);
+            if (edge is not null)
+            {
+                dbContext.WorkItemDependencies.Remove(edge);
+                try
+                {
+                    await dbContext.SaveChangesAsync(cancellationToken);
+                }
+                catch (DbUpdateConcurrencyException)
+                {
+                    // Another caller removed the edge first: this call changed nothing and records nothing.
+                    dbContext.ChangeTracker.Clear();
+                    return WorkItemDependencyOutcome.Succeeded;
+                }
 
-        return WorkItemDependencyOutcome.Succeeded;
+                await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyRemoved, blockedItemId, blockerItemId, actor, now, cancellationToken);
+            }
+
+            return WorkItemDependencyOutcome.Succeeded;
+        });
     }
 
     // One edge is one entry of the change feed, on the blocked item: the edge is that item's "blocked by".

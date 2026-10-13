@@ -120,6 +120,68 @@ public sealed class WorkItemDependencyMySqlTests
         Assert.Contains("RELEASE_LOCK(", database.Commands[^1].Text, StringComparison.Ordinal);
     }
 
+    // The statement that holds the items, and the one that writes the edge.
+    public static TheoryData<bool, string> DeadlockingStatements => new()
+    {
+        { true, "UPDATE `WorkItems` AS `w`" },
+        { true, "INSERT INTO `WorkItemDependencies`" },
+        { false, "UPDATE `WorkItems` AS `w`" },
+        { false, "DELETE FROM `WorkItemDependencies`" }
+    };
+
+    [Theory]
+    [MemberData(nameof(DeadlockingStatements))]
+    public async Task A_dependency_write_that_was_the_victim_of_one_deadlock_is_run_again_and_recorded_once(bool add, string statement)
+    {
+        var deadlocks = 1;
+        var database = Deadlocking(statement, () => deadlocks-- > 0);
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        var outcome = add
+            ? await WorkItemDependencies.AddAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None)
+            : await WorkItemDependencies.RemoveAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.Equal(WorkItemDependencyOutcome.Succeeded, outcome);
+        var texts = database.Commands.Select(command => command.Text).ToList();
+        Assert.Equal(2, Indexes(texts, statement).Count);
+        // The whole write was run again, from the statement that holds the items.
+        Assert.Equal(2, Indexes(texts, "UPDATE `WorkItems` AS `w`").Count);
+        Assert.Single(Indexes(texts, "INSERT INTO `WorkItemChanges`"));
+        // An add keeps the dependency lock over both attempts.
+        Assert.Equal(add ? 1 : 0, database.Locks.Count(entry => entry == $"GET {WorkItemDependencies.LockName}"));
+        Assert.Empty(dbContext.ChangeTracker.Entries().Where(entry => entry.State != Microsoft.EntityFrameworkCore.EntityState.Unchanged));
+    }
+
+    [Theory]
+    [MemberData(nameof(DeadlockingStatements))]
+    public async Task A_dependency_write_that_deadlocks_three_times_is_refused_busy_and_records_nothing(bool add, string statement)
+    {
+        var database = Deadlocking(statement, () => true);
+        using var host = await StartApiAsync(database);
+
+        using var response = add
+            ? await host.GetTestClient().PostAsJsonAsync($"/api/items/{Blocked}/dependencies", new AddWorkItemDependencyRequest(Blocker))
+            : await host.GetTestClient().DeleteAsync($"/api/items/{Blocked}/dependencies/{Blocker}");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>();
+        Assert.Equal(KanbanErrorCodes.Busy, error!.Code);
+        Assert.Contains("Nothing was changed", error.Message, StringComparison.Ordinal);
+        var texts = database.Commands.Select(command => command.Text).ToList();
+        Assert.Equal(3, Indexes(texts, statement).Count);
+        Assert.Empty(Indexes(texts, "INSERT INTO `WorkItemChanges`"));
+        // The dependency lock is given back.
+        Assert.Equal(add, texts[^1].Contains("RELEASE_LOCK(", StringComparison.Ordinal));
+    }
+
+    private static FakeDatabase Deadlocking(string statement, Func<bool> deadlock) =>
+        new(lockResult: 1, Answer(lockResult: 1))
+        {
+            Fail = command => command.CommandText.StartsWith(statement, StringComparison.Ordinal) && deadlock()
+                ? WorkItemDeadlockRetryMySqlTests.MySqlFailure(1213)
+                : null
+        };
+
     private static List<int> Indexes(List<string> texts, string fragment) =>
         Enumerable.Range(0, texts.Count).Where(index => texts[index].Contains(fragment, StringComparison.Ordinal)).ToList();
 
@@ -189,6 +251,8 @@ public sealed class WorkItemDependencyMySqlTests
                 });
                 webBuilder.Configure(app =>
                 {
+                    // As in Program.cs: a write that gave up after deadlocks is answered 503 busy.
+                    app.UseKanbanBusyRefusal();
                     app.UseRouting();
                     app.UseEndpoints(endpoints => endpoints.MapKanbanDependencyEndpoints());
                 });

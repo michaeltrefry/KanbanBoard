@@ -140,6 +140,46 @@ public sealed class KanbanToolsImportTests
         Assert.Empty(server.Api.Requests);
     }
 
+    [Theory]
+    [InlineData('<', 400_000)]
+    // Three bytes each as themselves, six as an escape.
+    [InlineData('\u8a08', 400_000)]
+    public async Task The_size_of_a_plan_is_the_size_of_its_text_not_of_its_escapes(char character, int count)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(HttpStatusCode.Created, ResultJson));
+        var description = new string(character, count);
+        var plan = Plan();
+        plan["items"] = new object[] { new { @ref = "A", title = "First", description } };
+
+        var result = await server.CallAsync("import_epic_plan", plan);
+
+        Assert.True(result.IsError != true, Text(result));
+        // Written as itself: escaped as \uXXXX the body would be six bytes a character, and over the limit.
+        var body = Assert.Single(server.Api.Requests).Body;
+        Assert.Contains($"\"description\":\"{description}\"", body, StringComparison.Ordinal);
+        Assert.InRange(System.Text.Encoding.UTF8.GetByteCount(body), count, EpicPlanLimits.MaxRequestBytes);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("k-epic-item")]
+    public async Task Create_epic_work_item_for_an_epic_the_api_does_not_know_is_refused_not_found_and_posts_nothing(string? key)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, request =>
+            request.Method == HttpMethod.Get ? Json(HttpStatusCode.NotFound, "") : Json(HttpStatusCode.Created, EpicJson));
+        var call = new Dictionary<string, object?> { ["epicId"] = EpicId, ["title"] = "Item" };
+        if (key is not null)
+        {
+            call["idempotency_key"] = key;
+        }
+
+        var result = await server.CallAsync("create_epic_work_item", call);
+
+        AssertError(result, KanbanErrorCodes.NotFound);
+        var request = Assert.Single(server.Api.Requests);
+        Assert.Equal((HttpMethod.Get, $"/api/epics/{EpicId}"), (request.Method, request.Path));
+    }
+
     public static TheoryData<string, object?> MalformedArguments => new()
     {
         { "items", "not a list" },

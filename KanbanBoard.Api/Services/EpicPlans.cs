@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
@@ -29,7 +30,10 @@ public static class EpicPlans
     // The unique index on the idempotency key, as the server names it in error 1062.
     public const string IdempotencyIndexName = "IX_EpicPlanImports_ProjectId_IdempotencyKeyHash";
 
-    private sealed record StoredResult(IReadOnlyList<Guid> DocumentIds, IReadOnlyDictionary<string, Guid> ItemIds);
+    // EpicPlanImport.Result, with the names the answer of the import has.
+    private sealed record StoredResult(
+        [property: JsonPropertyName("document_ids")] IReadOnlyList<Guid> DocumentIds,
+        [property: JsonPropertyName("item_ids")] IReadOnlyDictionary<string, Guid> ItemIds);
 
     /// <summary>
     /// Turns a plan into the rows an import stores, or says why the plan is refused. Nothing is read from the

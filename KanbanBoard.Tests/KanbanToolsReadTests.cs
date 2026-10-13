@@ -107,7 +107,8 @@ public sealed class KanbanToolsReadTests
         var handler = new StubHandler(_ => JsonResponse(Array.Empty<WorkItemSearchResultDto>()));
         var tools = CreateTools(handler);
 
-        await Assert.ThrowsAsync<McpException>(() => tools.SearchWorkItems(query));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => tools.SearchWorkItems(query));
+        Assert.Equal(KanbanErrorCodes.InvalidArgument, exception.Code);
         Assert.Empty(handler.Requests);
     }
 
