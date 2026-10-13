@@ -247,7 +247,17 @@ public sealed class StartupMigrationTests
         // What a command that returns no rows (such as the UPDATE of ExecuteUpdate) reports as rows affected.
         public int NonQueryResult { get; init; }
 
-        private void Record(DbCommand command) => Commands.Add((command.CommandText, command.CommandTimeout));
+        /// <summary>Makes a command fail: the exception it returns is thrown in place of the command's answer.</summary>
+        public Func<DbCommand, Exception?>? Fail { get; init; }
+
+        private void Record(DbCommand command)
+        {
+            Commands.Add((command.CommandText, command.CommandTimeout));
+            if (Fail?.Invoke(command) is { } failure)
+            {
+                throw failure;
+            }
+        }
 
         private object? Scalar(DbCommand command) =>
             command.CommandText.Contains("GET_LOCK('__EFMigrationsLock'", StringComparison.Ordinal) ? lockResult : null;
@@ -268,11 +278,15 @@ public sealed class StartupMigrationTests
                 Locks.Add($"{(isGet ? "GET" : "RELEASE")} {command.Parameters[0].Value}");
             }
 
-            // The entry of the change feed that ends every logged write gets a sequence, whatever the test answers
-            // to other inserts.
-            var answer = text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal)
-                ? Single("Sequence", 1L)
-                : rows?.Invoke(command) ?? ChangeLogAnswer(command);
+            // The entries of the change feed that end every logged write get a sequence each, whatever the test
+            // answers to other inserts: one result per INSERT of the command.
+            var entries = text.Split("INSERT INTO `WorkItemChanges`").Length - 1;
+            if (entries > 0)
+            {
+                return new DataTableReader(Enumerable.Range(1, entries).Select(sequence => Single("Sequence", (long)sequence)).ToArray());
+            }
+
+            var answer = rows?.Invoke(command) ?? ChangeLogAnswer(command);
             return answer?.CreateDataReader() ?? EmptyHistory();
         }
 

@@ -46,6 +46,73 @@ public sealed class PersonalAccessTokenScopeApiTests
     }
 
     [Fact]
+    public async Task GetScopeAsync_has_no_scope_for_a_token_that_is_revoked_or_expired()
+    {
+        await using var dbContext = TestDb.CreateContext();
+        var user = new AppUser { Issuer = "issuer", Subject = "subject" };
+        dbContext.Add(user);
+        await dbContext.SaveChangesAsync();
+        var service = new PersonalAccessTokenService(dbContext, TestDb.PatOptions());
+        var revoked = await service.CreateAsync(user, "Revoked", null, PersonalAccessTokenScopes.Full, CancellationToken.None);
+        var expired = await service.CreateAsync(user, "Expired", DateTimeOffset.UtcNow.AddSeconds(-1), PersonalAccessTokenScopes.Full, CancellationToken.None);
+        var live = await service.CreateAsync(user, "Live", DateTimeOffset.UtcNow.AddHours(1), PersonalAccessTokenScopes.Read, CancellationToken.None);
+        Assert.Equal(PersonalAccessTokenScopes.Full, await service.GetScopeAsync(revoked.Token.Id, CancellationToken.None));
+
+        Assert.True(await service.RevokeAsync(user.Id, revoked.Token.Id, CancellationToken.None));
+
+        Assert.Null(await service.GetScopeAsync(revoked.Token.Id, CancellationToken.None));
+        Assert.Null(await service.GetScopeAsync(expired.Token.Id, CancellationToken.None));
+        // A token that expires later still has its scope.
+        Assert.Equal(PersonalAccessTokenScopes.Read, await service.GetScopeAsync(live.Token.Id, CancellationToken.None));
+    }
+
+    // The MCP server forwards a token it validated up to its cache window ago. Through the real application.
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("expired")]
+    public async Task A_forwarded_token_that_was_revoked_or_expired_since_neither_writes_nor_reads(string state)
+    {
+        using var api = new ProgramDependencyWiringTests.ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var project = await ProgramDependencyWiringTests.PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "REVOKE" });
+        var item = await ProgramDependencyWiringTests.PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "Item", type = "Task", status = "Backlog", priority = "Medium" });
+        using (var dbContext = api.OpenDatabase())
+        {
+            var token = await dbContext.PersonalAccessTokens.SingleAsync();
+            token.RevokedAtUtc = state == "revoked" ? DateTimeOffset.UtcNow : null;
+            token.ExpiresAtUtc = state == "expired" ? DateTimeOffset.UtcNow.AddSeconds(-1) : null;
+            await dbContext.SaveChangesAsync();
+        }
+
+        HttpResponseMessage[] responses =
+        [
+            await client.PatchAsJsonAsync($"/api/items/{item.Id}", new { title = "Renamed" }),
+            await client.PostAsJsonAsync($"/api/items/{item.Id}/links", new AddWorkItemLinkRequest("pr", "https://github.com/acme/app/pull/42")),
+            await client.PostAsJsonAsync($"/api/items/{item.Id}/comments", new { body = "note" }),
+            await client.DeleteAsync($"/api/items/{item.Id}"),
+            // The API is the one that decides, so the token does not read either.
+            await client.GetAsync($"/api/items/{item.Id}"),
+            await client.GetAsync("/api/items/changes?fromStart=true")
+        ];
+
+        foreach (var response in responses)
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>();
+            Assert.Equal(KanbanErrorCodes.ScopeDenied, error!.Code);
+            Assert.Equal(KanbanInternalApiExtensions.UnknownTokenMessage, error.Message);
+            response.Dispose();
+        }
+
+        Assert.Contains("revoked or has expired", KanbanInternalApiExtensions.UnknownTokenMessage, StringComparison.Ordinal);
+        using var stored = api.OpenDatabase();
+        Assert.Equal("Item", (await stored.WorkItems.SingleAsync()).Title);
+        Assert.Empty(await stored.WorkItemLinks.ToListAsync());
+        Assert.Empty(await stored.WorkItemComments.ToListAsync());
+        Assert.Equal(WorkItemChangeKinds.ItemCreated, (await stored.WorkItemChanges.SingleAsync()).Kind);
+    }
+
+    [Fact]
     public void Model_defaults_token_scope_to_full()
     {
         Assert.Equal(PersonalAccessTokenScopes.Full, new PersonalAccessToken().Scope);

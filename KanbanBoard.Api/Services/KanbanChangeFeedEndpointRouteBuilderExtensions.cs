@@ -13,7 +13,8 @@ public static class KanbanChangeFeedEndpointRouteBuilderExtensions
         //
         // Without a cursor the answer holds no entry and the cursor of the newest one: the place to start
         // following from. With fromStart it starts at the oldest entry instead. The answer always carries a
-        // cursor, which is the position after the entries it returned.
+        // cursor, which is the position after the entries it returned. An unknown project is a filter that matches
+        // nothing, not an error: the feed keeps the entries of projects that were deleted.
         endpoints.MapGet("/api/items/changes", async (
             string? cursor,
             Guid? projectId,
@@ -55,6 +56,15 @@ public static class KanbanChangeFeedEndpointRouteBuilderExtensions
                 .OrderBy(change => change.Sequence)
                 .Take(limit ?? WorkItemListing.DefaultPageSize)
                 .ToListAsync(cancellationToken);
+
+            // A cursor of this feed is never ahead of its newest entry. One that is (the database was restored to
+            // an earlier state, say) would return nothing until the feed had grown past it, and skip every entry
+            // written until then. Only asked when nothing came back: entries after the cursor prove it is not ahead.
+            if (page.Count == 0 && after > 0 &&
+                after > (await dbContext.WorkItemChanges.MaxAsync(change => (long?)change.Sequence, cancellationToken) ?? 0))
+            {
+                return InvalidArgument("Argument 'cursor' is ahead of the change feed: no entry has been written at or after it. Start again without a cursor, or with from_start.");
+            }
 
             return Results.Ok(new WorkItemChangePageDto(
                 page.Select(WorkItemChangeLog.ToDto).ToList(),

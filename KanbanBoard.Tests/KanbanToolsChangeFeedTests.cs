@@ -72,5 +72,44 @@ public sealed class KanbanToolsChangeFeedTests
         Assert.Contains("next_cursor", AssertError(result, KanbanErrorCodes.InvalidArgument), StringComparison.Ordinal);
     }
 
+    // Every write tool that reaches the change feed, or any other refusal of the API that carries a code.
+    public static TheoryData<string, Dictionary<string, object?>> WriteTools => new()
+    {
+        { "update_epic", new() { ["epicId"] = ProjectId, ["name"] = "Epic", ["isArchived"] = true } },
+        { "delete_project", new() { ["projectId"] = ProjectId } },
+        { "delete_epic", new() { ["epicId"] = ProjectId } },
+        { "delete_work_item", new() { ["itemId"] = ProjectId } },
+        { "create_epic", new() { ["projectId"] = ProjectId, ["name"] = "Epic" } },
+        { "create_epic_document", new() { ["epicId"] = ProjectId, ["title"] = "Title", ["body"] = "Body" } },
+        { "update_epic_document", new() { ["documentId"] = ProjectId, ["title"] = "Title", ["body"] = "Body" } }
+    };
+
+    [Theory]
+    [MemberData(nameof(WriteTools))]
+    public async Task A_write_the_api_refuses_busy_becomes_the_typed_error_envelope(string tool, Dictionary<string, object?> arguments)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ =>
+            Json(HttpStatusCode.ServiceUnavailable, """{"code":"busy","message":"Other work item changes were being recorded for 10 s. Nothing was changed; try again."}"""));
+
+        var result = await server.CallAsync(tool, arguments);
+
+        Assert.Contains("Nothing was changed", AssertError(result, KanbanErrorCodes.Busy), StringComparison.Ordinal);
+        Assert.Single(server.Api.Requests);
+    }
+
+    [Fact]
+    public async Task List_changes_says_what_a_follower_cannot_see_from_the_entries()
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Read, _ => Json(HttpStatusCode.OK, """{"items":[],"next_cursor":"aC4w"}"""));
+
+        var description = (await server.Client.ListToolsAsync()).Single(candidate => candidate.Name == "list_changes").Description;
+
+        Assert.Contains("16384 characters", description, StringComparison.Ordinal);
+        Assert.Contains("old_truncated", description, StringComparison.Ordinal);
+        Assert.Contains("new_truncated", description, StringComparison.Ordinal);
+        Assert.Contains("A project_id no project has is not refused", description, StringComparison.Ordinal);
+        Assert.Contains("ahead of the newest entry", description, StringComparison.Ordinal);
+    }
+
     private static string Text(CallToolResult result) => Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text;
 }

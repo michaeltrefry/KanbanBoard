@@ -42,13 +42,16 @@ public sealed class WorkItemChangeFeedMySqlTests
         // Nothing came back, so the reader keeps its place.
         Assert.Equal((head.NextCursor, head.NextCursor), (page!.NextCursor, ofProject!.NextCursor));
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
-        Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
-        Assert.Equal("SELECT MAX(`w`.`Sequence`)\nFROM `WorkItemChanges` AS `w`", texts[0]);
+        Assert.True(texts.Count == 5, string.Join("\n---\n", texts));
+        const string max = "SELECT MAX(`w`.`Sequence`)\nFROM `WorkItemChanges` AS `w`";
+        Assert.Equal(max, texts[0]);
         const string columns = "SELECT `w`.`Sequence`, `w`.`ActorName`, `w`.`ActorUserId`, `w`.`Changes`, `w`.`CreatedAtUtc`, `w`.`Kind`, `w`.`ProjectId`, `w`.`WorkItemId`\nFROM `WorkItemChanges` AS `w`\n";
         // The primary key: a range and a limit, never an offset.
         Assert.Equal(columns + "WHERE `w`.`Sequence` > @after\nORDER BY `w`.`Sequence`\nLIMIT @p", texts[1]);
         // IX_WorkItemChanges_ProjectId_Sequence.
-        Assert.Equal(columns + "WHERE (`w`.`Sequence` > @after) AND (`w`.`ProjectId` = @projectId)\nORDER BY `w`.`Sequence`\nLIMIT @p", texts[2]);
+        Assert.Equal(columns + "WHERE (`w`.`Sequence` > @after) AND (`w`.`ProjectId` = @projectId)\nORDER BY `w`.`Sequence`\nLIMIT @p", texts[3]);
+        // A read that returned nothing asks once more where the feed ends: its cursor must not be ahead of that.
+        Assert.Equal((max, max), (texts[2], texts[4]));
         Assert.All(database.Commands.Skip(1), command => Assert.DoesNotContain("OFFSET", command.Text, StringComparison.Ordinal));
     }
 

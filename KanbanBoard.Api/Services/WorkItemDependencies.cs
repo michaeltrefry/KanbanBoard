@@ -178,6 +178,60 @@ public static class WorkItemDependencies
             cancellationToken);
     }
 
+    /// <summary>
+    /// Holds the edges whose blocking item a delete is about to remove, until the transaction ends, and changes
+    /// nothing. The database removes those edges with the item (ON DELETE CASCADE) without a word; the delete records
+    /// them (see <see cref="RemovedWithBlockersAsync"/>). Call it before the first read of the transaction: a remove
+    /// of one of these edges that commits later than that read would otherwise be recorded twice.
+    /// </summary>
+    public static Task HoldAsync(IQueryable<WorkItemDependency> edges, CancellationToken cancellationToken) =>
+        edges.ExecuteUpdateAsync(setters => setters.SetProperty(edge => edge.BlockerItemId, edge => edge.BlockerItemId), cancellationToken);
+
+    /// <summary>
+    /// <see cref="HoldAsync"/> for the edges whose blocking item belongs to the project, for a delete of the project.
+    /// On MariaDB the statement is written here: MySql.EntityFrameworkCore writes the UPDATE of a join as
+    /// <c>UPDATE ... SET ... FROM</c>, which MariaDB rejects. STRAIGHT_JOIN makes it start from the project's items,
+    /// whose rows the delete already holds, and reach the edges through the index on their blocker: no other edge
+    /// and no item of another project is read, so none is locked.
+    /// </summary>
+    public static Task HoldBlockedByProjectAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
+        dbContext.Database.ProviderName == "MySql.EntityFrameworkCore"
+            ? dbContext.Database.ExecuteSqlAsync(
+                $"UPDATE `WorkItems` AS `i` STRAIGHT_JOIN `WorkItemDependencies` AS `d` ON `d`.`BlockerItemId` = `i`.`Id` SET `d`.`BlockerItemId` = `d`.`BlockerItemId` WHERE `i`.`ProjectId` = {projectId.ToString()}",
+                cancellationToken)
+            : HoldAsync(dbContext.WorkItemDependencies.Where(edge => edge.BlockerItem!.ProjectId == projectId), cancellationToken);
+
+    /// <summary>
+    /// One <c>dependency_removed</c> entry for each of <paramref name="edges"/> (held by <see cref="HoldAsync"/>)
+    /// whose blocked item is not deleted with its blocker: on that blocked item, in its own project.
+    /// </summary>
+    /// <param name="deletedProjectId">The project that is being deleted, whose items need no entry of this kind.</param>
+    public static async Task<List<WorkItemChange>> RemovedWithBlockersAsync(
+        IQueryable<WorkItemDependency> edges,
+        Guid? deletedProjectId,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var removed = await edges
+            .AsNoTracking()
+            .Select(edge => new { edge.BlockedItemId, edge.BlockerItemId, edge.BlockedItem!.ProjectId })
+            .ToListAsync(cancellationToken);
+        return removed
+            .Where(edge => edge.ProjectId != deletedProjectId)
+            .OrderBy(edge => edge.BlockedItemId)
+            .ThenBy(edge => edge.BlockerItemId)
+            .Select(edge => WorkItemChangeLog.Entry(
+                edge.BlockedItemId,
+                edge.ProjectId,
+                WorkItemChangeKinds.DependencyRemoved,
+                actor,
+                now,
+                new Dictionary<string, object?> { ["blocked_by"] = edge.BlockerItemId },
+                null))
+            .ToList();
+    }
+
     /// <summary>Keeps only items whose blockers are all Done (items without blockers included).</summary>
     public static IQueryable<WorkItem> WhereUnblocked(this IQueryable<WorkItem> items, KanbanDbContext dbContext) =>
         items.Where(item => !dbContext.WorkItemDependencies.Any(dependency =>

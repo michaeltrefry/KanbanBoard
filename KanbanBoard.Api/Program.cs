@@ -276,26 +276,36 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
     var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
     var now = timeProvider.GetUtcNow();
 
-    // Deleting the project deletes its items, which is a change to each of them. They are held first, so the
-    // entries of the change feed report the items as they were deleted.
-    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    await dbContext.WorkItems
-        .Where(item => item.ProjectId == projectId)
-        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
-    var project = await dbContext.Projects.FirstOrDefaultAsync(candidate => candidate.Id == projectId, cancellationToken);
-    if (project is null)
+    // Deleting the project deletes its items, which is a change to each of them, and to every item of another
+    // project that one of them blocks. The items and those dependencies are held first, so the entries of the
+    // change feed report them as they were deleted. Holding many rows at once can deadlock with other writers.
+    var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await dbContext.WorkItems
+            .Where(item => item.ProjectId == projectId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
+        await WorkItemDependencies.HoldBlockedByProjectAsync(dbContext, projectId, cancellationToken);
+        var project = await dbContext.Projects.FirstOrDefaultAsync(candidate => candidate.Id == projectId, cancellationToken);
+        if (project is null)
+        {
+            return false;
+        }
+
+        var items = await dbContext.WorkItems.AsNoTracking().Where(item => item.ProjectId == projectId).ToListAsync(cancellationToken);
+        var entries = await WorkItemDependencies.RemovedWithBlockersAsync(
+            dbContext.WorkItemDependencies.Where(edge => edge.BlockerItem!.ProjectId == projectId), projectId, actor, now, cancellationToken);
+        entries.AddRange(items.Select(item => WorkItemChangeLog.Entry(item.Id, projectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null)));
+        dbContext.Projects.Remove(project);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(dbContext, transaction, entries, cancellationToken);
+        return true;
+    });
+    if (!deleted)
     {
         return Results.NotFound();
     }
 
-    var items = await dbContext.WorkItems.AsNoTracking().Where(item => item.ProjectId == projectId).ToListAsync(cancellationToken);
-    dbContext.Projects.Remove(project);
-    await dbContext.SaveChangesAsync(cancellationToken);
-    await WorkItemChangeLog.CommitAsync(
-        dbContext,
-        transaction,
-        items.Select(item => WorkItemChangeLog.Entry(item.Id, projectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null)).ToList(),
-        cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -336,36 +346,52 @@ app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, Creat
 app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
-    var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
-    if (epic is null)
+    var normalizedName = request.Name.Trim();
+    var validationError = ValidateRequiredText(("name", normalizedName));
+    if (!await dbContext.Epics.AnyAsync(candidate => candidate.Id == epicId, cancellationToken))
     {
         return Results.NotFound();
     }
 
-    var normalizedName = request.Name.Trim();
-    var validationError = ValidateRequiredText(("name", normalizedName));
     if (validationError is not null)
     {
         return Results.BadRequest(new { message = validationError });
     }
 
-    epic.Name = normalizedName;
-    epic.Description = request.Description?.Trim();
-    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    List<WorkItemChange> detached = [];
-    if (request.IsArchived && !epic.IsArchived)
+    // Archiving holds the rows of several items at once, which can deadlock with other writers.
+    var updated = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
-        // Archiving takes the unfinished items out of the epic, which is a change to each of them.
-        detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, actor, timeProvider.GetUtcNow(), cancellationToken);
+        // Read before the transaction starts: a read inside it would come before the statement that holds the items.
+        var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
+        if (epic is null)
+        {
+            return null;
+        }
+
+        epic.Name = normalizedName;
+        epic.Description = request.Description?.Trim();
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        List<WorkItemChange> detached = [];
+        if (request.IsArchived && !epic.IsArchived)
+        {
+            // Archiving takes the unfinished items out of the epic, which is a change to each of them.
+            detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, actor, timeProvider.GetUtcNow(), cancellationToken);
+        }
+
+        epic.IsArchived = request.IsArchived;
+        epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
+        return epic;
+    });
+    if (updated is null)
+    {
+        return Results.NotFound();
     }
 
-    epic.IsArchived = request.IsArchived;
-    epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-    await dbContext.SaveChangesAsync(cancellationToken);
-    await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
     changeNotifier.Publish();
-    return Results.Ok(ToEpicDto(epic));
+    return Results.Ok(ToEpicDto(updated));
 })
 .WithName("UpdateEpic");
 
@@ -379,11 +405,16 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
     }
 
     // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
-    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, actor, timeProvider.GetUtcNow(), cancellationToken);
-    dbContext.Epics.Remove(epic);
-    await dbContext.SaveChangesAsync(cancellationToken);
-    await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
+    // Taking them out holds the rows of several items at once, which can deadlock with other writers.
+    await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, actor, timeProvider.GetUtcNow(), cancellationToken);
+        dbContext.Epics.Remove(epic);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
+        return true;
+    });
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -524,22 +555,25 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
 {
     var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
 
-    // The item is held before it is read, so the entry of the change feed reports the item as it was deleted.
+    // The item is held before it is read, so the entry of the change feed reports the item as it was deleted. So
+    // are the dependencies in which it blocks another item: the database deletes them with it, and each is a change
+    // to the item it blocked.
     await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
     await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
+    var blocking = dbContext.WorkItemDependencies.Where(edge => edge.BlockerItemId == itemId);
+    await WorkItemDependencies.HoldAsync(blocking, cancellationToken);
     var item = await dbContext.WorkItems.FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
     {
         return Results.NotFound();
     }
 
+    var now = timeProvider.GetUtcNow();
+    var entries = await WorkItemDependencies.RemovedWithBlockersAsync(blocking, null, actor, now, cancellationToken);
+    entries.Add(WorkItemChangeLog.Entry(itemId, item.ProjectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null));
     dbContext.WorkItems.Remove(item);
     await dbContext.SaveChangesAsync(cancellationToken);
-    await WorkItemChangeLog.CommitAsync(
-        dbContext,
-        transaction,
-        WorkItemChangeLog.Entry(itemId, item.ProjectId, WorkItemChangeKinds.ItemDeleted, actor, timeProvider.GetUtcNow(), WorkItemChangeLog.Snapshot(item), null),
-        cancellationToken);
+    await WorkItemChangeLog.CommitAsync(dbContext, transaction, entries, cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })

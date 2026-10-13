@@ -555,6 +555,145 @@ public sealed class WorkItemChangeFeedApiTests
         Assert.Equal(writes.Length, seen.Count);
     }
 
+    [Fact]
+    public async Task Deleting_a_blocking_item_or_its_project_logs_dependency_removed_on_every_item_it_blocked_that_is_left()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var actor = await ActorAsync(api, "Factory");
+        var p1 = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "One", key = "CASCA" });
+        var p2 = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Two", key = "CASCB" });
+        Task<WorkItemDto> Item(ProjectSummaryDto project, string title) =>
+            PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title, type = "Task", status = "Backlog", priority = "Medium" });
+        var a = await Item(p1, "A");
+        var b = await Item(p1, "B");
+        var c = await Item(p2, "C");
+        var d = await Item(p1, "D");
+        // C (of the other project) is blocked by B and by A; D (of the same project) by B and by A as well.
+        foreach (var (blocked, blocker) in new[] { (c, b), (c, a), (d, b), (d, a) })
+        {
+            await PostAsync<WorkItemDto>(client, $"/api/items/{blocked.Id}/dependencies", new AddWorkItemDependencyRequest(blocker.Id));
+        }
+
+        var head = await HeadAsync(client);
+
+        (await client.DeleteAsync($"/api/items/{b.Id}")).EnsureSuccessStatusCode();
+        var afterItem = (await ReadAsync(client, head)).Items;
+        (await client.DeleteAsync($"/api/projects/{p1.Id}")).EnsureSuccessStatusCode();
+        var all = (await ReadAsync(client, head)).Items;
+        var ofP2 = (await ReadAsync(client, head, p2.Id)).Items;
+
+        // Deleting B: both items it blocked are left, each in its own project.
+        Assert.Equal(
+            new[] { ("dependency_removed", c.Id, p2.Id, $"blocked_by: {b.Id} > null"), ("dependency_removed", d.Id, p1.Id, $"blocked_by: {b.Id} > null") }.OrderBy(entry => entry.Item2),
+            afterItem.Take(2).Select(entry => (entry.Kind, entry.ItemId, entry.ProjectId, Describe(entry))));
+        Assert.Equal(("item_deleted", b.Id), (afterItem[2].Kind, afterItem[2].ItemId));
+        Assert.Equal(3, afterItem.Count);
+        // Deleting the project: C is left and loses A; D goes with its blocker, which is no change to D's dependencies.
+        Assert.Equal(
+            [("dependency_removed", c.Id, $"blocked_by: {b.Id} > null"), ("dependency_removed", c.Id, $"blocked_by: {a.Id} > null")],
+            ofP2.Select(entry => (entry.Kind, entry.ItemId, Describe(entry))).ToArray());
+        Assert.Equal(["dependency_removed", "item_deleted", "item_deleted"], all.Skip(3).Select(entry => entry.Kind).ToArray());
+        Assert.Equal(new[] { a.Id, d.Id }.Order(), all.Skip(4).Select(entry => entry.ItemId).Order());
+        Assert.All(all, entry => Assert.Equal(actor, entry.Actor));
+        // The feed says what the item says.
+        Assert.Empty((await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{c.Id}", Json))!.Blockers);
+    }
+
+    [Fact]
+    public async Task A_text_longer_than_the_limit_is_stored_cut_and_marked_and_the_write_and_the_item_keep_all_of_it()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "LARGE" });
+        var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "Item", description = "short", type = "Task", status = "Backlog", priority = "Medium" });
+        var head = await HeadAsync(client);
+        const int nineMegabytes = 9 * 1024 * 1024;
+        var first = new string('a', nineMegabytes);
+        // Differs from the first one only after the limit: still a change.
+        var second = new string('a', nineMegabytes - 1) + "b";
+        var limit = WorkItemChangeLog.MaxStoredTextLength;
+
+        await SendAsync<WorkItemDto>(client, HttpMethod.Patch, $"/api/items/{item.Id}", new { description = first });
+        var updated = await SendAsync<WorkItemDto>(client, HttpMethod.Patch, $"/api/items/{item.Id}", new { description = second });
+        await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/comments", new { author = "tester", body = new string('c', limit + 1) });
+        (await client.DeleteAsync($"/api/items/{item.Id}")).EnsureSuccessStatusCode();
+
+        Assert.Equal(second, updated.Description);
+        var entries = (await ReadAsync(client, head)).Items;
+        Assert.Equal(["item_updated", "item_updated", "comment_added", "item_deleted"], entries.Select(entry => entry.Kind).ToArray());
+        JsonElement Change(int entry, string field) => entries[entry].Changes.EnumerateArray().Single(change => change.GetProperty("field").GetString() == field);
+        var cut = new string('a', limit);
+        // A short value is stored whole, without a marker; a long one cut to the limit, with one.
+        Assert.Equal($$"""{"field":"description","old":"short","new":"{{cut}}","new_truncated":true}""", Change(0, "description").GetRawText());
+        Assert.Equal($$"""{"field":"description","old":"{{cut}}","new":"{{cut}}","old_truncated":true,"new_truncated":true}""", Change(1, "description").GetRawText());
+        Assert.Equal("""{"field":"version","old":2,"new":3}""", Change(1, "version").GetRawText());
+        // A text inside a value is cut the same way.
+        var comment = Change(2, "comment");
+        Assert.Equal(new string('c', limit), comment.GetProperty("new").GetProperty("body").GetString());
+        Assert.Equal("tester", comment.GetProperty("new").GetProperty("author").GetString());
+        Assert.True(comment.GetProperty("new_truncated").GetBoolean());
+        Assert.False(comment.TryGetProperty("old_truncated", out _));
+        Assert.Equal($$"""{"field":"description","old":"{{cut}}","new":null,"old_truncated":true}""", Change(3, "description").GetRawText());
+        Assert.Equal("""{"field":"title","old":"Item","new":null}""", Change(3, "title").GetRawText());
+    }
+
+    [Fact]
+    public void An_entry_keeps_a_text_of_exactly_the_limit_whole_and_never_cuts_between_the_halves_of_one_character()
+    {
+        var limit = WorkItemChangeLog.MaxStoredTextLength;
+        // Part of the contract: the README and the description of list_changes name it.
+        Assert.Equal(16_384, limit);
+        var exact = new string('x', limit);
+        // The character at the limit is the first half of a pair.
+        var pair = new string('x', limit - 1) + "\U0001F600";
+
+        var entry = WorkItemChangeLog.Entry(
+            Guid.NewGuid(), Guid.NewGuid(), WorkItemChangeKinds.ItemUpdated, null, DateTimeOffset.UtcNow,
+            new Dictionary<string, object?> { ["title"] = exact, ["description"] = pair, ["link"] = new { Id = 1, Url = exact + "y" } },
+            new Dictionary<string, object?> { ["title"] = exact + "y", ["description"] = null, ["link"] = new { Id = 1, Url = exact } });
+
+        Assert.Equal(
+            $$"""[{"field":"title","old":"{{exact}}","new":"{{exact}}","new_truncated":true},{"field":"description","old":"{{exact[1..]}}","new":null,"old_truncated":true},{"field":"link","old":{"id":1,"url":"{{exact}}"},"new":{"id":1,"url":"{{exact}}"},"old_truncated":true}]""",
+            entry.Changes);
+    }
+
+    [Fact]
+    public async Task A_cursor_ahead_of_the_newest_entry_is_refused_and_the_place_to_start_from_never_is()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "AHEAD" });
+
+        // An empty feed: its place to start from is accepted, any position after it is not.
+        var empty = await HeadAsync(client);
+        Assert.Equal(WorkItemChangeLog.EncodeCursor(0), empty);
+        Assert.Empty((await ReadAsync(client, empty)).Items);
+        using (var aheadOfNothing = await client.GetAsync($"/api/items/changes?cursor={WorkItemChangeLog.EncodeCursor(1)}"))
+        {
+            await AssertErrorAsync(aheadOfNothing, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        }
+
+        await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "Item", type = "Task", status = "Backlog", priority = "Medium" });
+        var head = await HeadAsync(client);
+        Assert.True(WorkItemChangeLog.TryDecodeCursor(head, out var newest));
+
+        // At the newest entry there is nothing to read yet, with or without a project; that is not ahead.
+        Assert.Equal(head, (await ReadAsync(client, head)).NextCursor);
+        Assert.Equal(head, (await ReadAsync(client, head, Guid.NewGuid())).NextCursor);
+        // A project no project has is a filter that matches nothing: no entries, and the cursor that was passed.
+        Assert.Equal(empty, (await ReadAsync(client, empty, Guid.NewGuid())).NextCursor);
+        foreach (var query in new[] { string.Empty, $"&projectId={project.Id}", $"&projectId={Guid.NewGuid()}" })
+        {
+            using var ahead = await client.GetAsync($"/api/items/changes?cursor={WorkItemChangeLog.EncodeCursor(newest + 1)}{query}");
+            var body = await ahead.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.BadRequest, ahead.StatusCode);
+            var error = JsonSerializer.Deserialize<KanbanErrorDto>(body, Json)!;
+            Assert.Equal(KanbanErrorCodes.InvalidArgument, error.Code);
+            Assert.Contains("ahead of the change feed", error.Message, StringComparison.Ordinal);
+        }
+    }
+
     private static async Task<string> HeadAsync(HttpClient client)
     {
         var head = await client.GetFromJsonAsync<WorkItemChangePageDto>("/api/items/changes", Json);

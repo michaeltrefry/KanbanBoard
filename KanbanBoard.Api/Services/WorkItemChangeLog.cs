@@ -9,6 +9,7 @@ using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using MySql.Data.MySqlClient;
 
 namespace KanbanBoard.Api.Services;
 
@@ -73,6 +74,17 @@ public static class WorkItemChangeLog
     public const string LockName = "kanban_work_item_changes";
     public const int LockTimeoutSeconds = 10;
 
+    /// <summary>
+    /// The most characters of one text an entry stores. A longer <c>old</c> or <c>new</c> value is cut to this many
+    /// and marked (<c>old_truncated</c> / <c>new_truncated</c>); the item itself holds the whole text.
+    /// </summary>
+    public const int MaxStoredTextLength = 16_384;
+
+    /// <summary>How many times a write that MariaDB picked as the victim of a deadlock is run before it is refused <c>busy</c>.</summary>
+    public const int DeadlockAttempts = 3;
+
+    private const int MySqlDeadlock = 1213;
+
     /// <summary>The kind of a cursor of <c>GET /api/items/changes</c> (see <see cref="WorkItemCursor"/> for the others).</summary>
     public const string CursorKind = "h";
 
@@ -129,12 +141,24 @@ public static class WorkItemChangeLog
             var newValue = after?.GetValueOrDefault(field);
             if (!Equals(oldValue, newValue))
             {
-                changes.Add(new JsonObject
+                var change = new JsonObject
                 {
                     ["field"] = field,
-                    ["old"] = JsonSerializer.SerializeToNode(oldValue, JsonOptions),
-                    ["new"] = JsonSerializer.SerializeToNode(newValue, JsonOptions)
-                });
+                    ["old"] = Stored(oldValue, out var oldTruncated),
+                    ["new"] = Stored(newValue, out var newTruncated)
+                };
+                // Present only when true: the two values are compared whole, so both can be cut to the same text.
+                if (oldTruncated)
+                {
+                    change["old_truncated"] = true;
+                }
+
+                if (newTruncated)
+                {
+                    change["new_truncated"] = true;
+                }
+
+                changes.Add(change);
             }
         }
 
@@ -149,6 +173,84 @@ public static class WorkItemChangeLog
             // The precision MariaDB stores.
             CreatedAtUtc = now.AddTicks(-(now.Ticks % TimeSpan.TicksPerMicrosecond))
         };
+    }
+
+    // A value as an entry stores it: every text in it (the value itself, or a field of a comment or a link) is cut
+    // to MaxStoredTextLength characters. An update of a 9 MB description would otherwise store 18 MB in one row,
+    // which MariaDB refuses (max_allowed_packet), and a page of the feed would be as large as its largest items.
+    private static JsonNode? Stored(object? value, out bool truncated)
+    {
+        truncated = false;
+        if (value is string text)
+        {
+            return JsonValue.Create(Cut(text, ref truncated));
+        }
+
+        var node = JsonSerializer.SerializeToNode(value, JsonOptions);
+        if (node is JsonObject fields)
+        {
+            foreach (var (name, inner) in fields.ToList())
+            {
+                if (inner is JsonValue innerValue && innerValue.TryGetValue<string>(out var innerText) && innerText.Length > MaxStoredTextLength)
+                {
+                    fields[name] = Cut(innerText, ref truncated);
+                }
+            }
+        }
+
+        return node;
+    }
+
+    private static string Cut(string text, ref bool truncated)
+    {
+        if (text.Length <= MaxStoredTextLength)
+        {
+            return text;
+        }
+
+        truncated = true;
+        // Not between the two halves of one character.
+        return text[..(char.IsHighSurrogate(text[MaxStoredTextLength - 1]) ? MaxStoredTextLength - 1 : MaxStoredTextLength)];
+    }
+
+    /// <summary>
+    /// Runs <paramref name="write"/>, which starts and commits its own transaction, and runs it again when MariaDB
+    /// rolled it back as the victim of a deadlock (error 1213): a write whose first statement takes the rows of
+    /// several items can meet writers that hold one of them and wait for another. After
+    /// <see cref="DeadlockAttempts"/> deadlocks the write is refused <c>busy</c>; nothing of it is stored.
+    /// </summary>
+    public static async Task<T> RetryDeadlocksAsync<T>(KanbanDbContext dbContext, Func<Task<T>> write)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await write();
+            }
+            catch (Exception exception) when (IsDeadlock(exception))
+            {
+                // The server has rolled the transaction back; what the attempt tracked is not stored.
+                dbContext.ChangeTracker.Clear();
+                if (attempt == DeadlockAttempts)
+                {
+                    throw new KanbanBusyException(
+                        $"Other writes to the same work items deadlocked with this one {DeadlockAttempts} times. Nothing was changed; try again.");
+                }
+            }
+        }
+    }
+
+    private static bool IsDeadlock(Exception? exception)
+    {
+        for (; exception is not null; exception = exception.InnerException)
+        {
+            if (exception is MySqlException { Number: MySqlDeadlock })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>

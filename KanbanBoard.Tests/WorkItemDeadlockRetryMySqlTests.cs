@@ -1,0 +1,240 @@
+using System.Data;
+using System.Data.Common;
+using System.Net;
+using System.Net.Http.Json;
+using System.Reflection;
+using KanbanBoard.Api.Configuration;
+using KanbanBoard.Api.Data;
+using KanbanBoard.Api.Services;
+using KanbanBoard.Shared.Contracts;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using MySql.Data.MySqlClient;
+using static KanbanBoard.Tests.StartupMigrationTests;
+
+namespace KanbanBoard.Tests;
+
+// The writes that hold the rows of several items at once (deleting a project, archiving or deleting an epic), on
+// the real application (Program.cs) with the SQL MySql.EntityFrameworkCore writes: MariaDB can pick them as the
+// victim of a deadlock (error 1213), which SQLite never does. FakeDatabase records each command and answers it.
+public sealed class WorkItemDeadlockRetryMySqlTests
+{
+    private const string HoldItems = "SET `Version` = `w`.`Version`";
+    private const string HoldBlockedByProject =
+        "UPDATE `WorkItems` AS `i` STRAIGHT_JOIN `WorkItemDependencies` AS `d` ON `d`.`BlockerItemId` = `i`.`Id` SET `d`.`BlockerItemId` = `d`.`BlockerItemId` WHERE `i`.`ProjectId` = @p0";
+    private static readonly Guid ProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid EpicId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+    private static readonly Guid BlockedItemId = Guid.Parse("55555555-5555-5555-5555-555555555555");
+    private static readonly Guid OtherProjectId = Guid.Parse("66666666-6666-6666-6666-666666666666");
+    private static readonly DateTime Created = new(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+
+    public static TheoryData<string, string, bool, int> Writes => new()
+    {
+        // Deleting the project: one entry for its item and one for the item of another project that item blocked.
+        { "DELETE", $"/api/projects/{ProjectId}", false, 2 },
+        { "DELETE", $"/api/epics/{EpicId}", false, 1 },
+        // Archiving the epic.
+        { "PUT", $"/api/epics/{EpicId}", true, 1 }
+    };
+
+    [Theory]
+    [MemberData(nameof(Writes))]
+    public async Task A_write_that_was_the_victim_of_one_deadlock_is_run_again_and_records_its_entries_once(string method, string path, bool hasBody, int entries)
+    {
+        var deadlocks = 1;
+        var database = Database(() => deadlocks-- > 0);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, method, path, hasBody);
+
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        // The statement that holds the items was sent twice: the attempt that deadlocked, and the one that went through.
+        Assert.Equal(2, texts.Count(text => text.Contains(HoldItems, StringComparison.Ordinal)));
+        var insert = Assert.Single(texts, text => text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.Equal(entries, insert.Split("INSERT INTO `WorkItemChanges`").Length - 1);
+        Assert.Equal([$"GET {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemChangeLog.LockName}"], LocksAroundTheCommit(database));
+    }
+
+    [Theory]
+    [MemberData(nameof(Writes))]
+    public async Task A_write_that_deadlocks_three_times_is_refused_busy_and_stores_nothing(string method, string path, bool hasBody, int entries)
+    {
+        var database = Database(() => true);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, method, path, hasBody);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>();
+        Assert.Equal(KanbanErrorCodes.Busy, error!.Code);
+        Assert.Contains("Nothing was changed", error.Message, StringComparison.Ordinal);
+        var texts = database.Commands.Select(command => command.Text).ToList();
+        // The first attempt and two more.
+        Assert.Equal(3, texts.Count(text => text.Contains(HoldItems, StringComparison.Ordinal)));
+        Assert.True(entries > 0);
+        Assert.DoesNotContain(texts, text =>
+            text.Contains("INSERT INTO", StringComparison.Ordinal) || text.Contains("DELETE FROM", StringComparison.Ordinal) || text.Contains("UPDATE `Epics`", StringComparison.Ordinal));
+        Assert.DoesNotContain("COMMIT", database.Locks);
+    }
+
+    [Fact]
+    public async Task A_failure_that_is_not_a_deadlock_is_not_run_again()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer)
+        {
+            NonQueryResult = 1,
+            Fail = command => command.CommandText.Contains(HoldItems, StringComparison.Ordinal) ? MySqlFailure(1205) : null
+        };
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, "DELETE", $"/api/projects/{ProjectId}", false);
+
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        Assert.Single(database.Commands, command => command.Text.Contains(HoldItems, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Deleting_a_project_holds_its_items_and_the_dependencies_they_block_before_it_reads_anything()
+    {
+        var database = Database(() => false);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, "DELETE", $"/api/projects/{ProjectId}", false);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        Assert.True(texts.Count == 9, string.Join("\n---\n", texts));
+        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`ProjectId` = @projectId", texts[0]);
+        // Written by hand: starts from the project's items, which are held, and reaches the edges through their index.
+        Assert.Equal(HoldBlockedByProject, texts[1]);
+        // The first read comes after both: what it sees cannot change before the delete commits.
+        Assert.All(texts.Skip(2).Take(3), text => Assert.StartsWith("SELECT ", text, StringComparison.Ordinal));
+        Assert.Contains("FROM `Projects`", texts[2], StringComparison.Ordinal);
+        Assert.Contains("FROM `WorkItemDependencies` AS `w`\nINNER JOIN `WorkItems` AS `w0` ON `w`.`BlockerItemId` = `w0`.`Id`", texts[4], StringComparison.Ordinal);
+        Assert.StartsWith("DELETE FROM `Projects`", texts[5], StringComparison.Ordinal);
+        Assert.Empty(WithoutChangeLogEntry(texts.Skip(6).ToList(), readsProject: false));
+    }
+
+    [Fact]
+    public async Task Deleting_an_item_holds_it_and_the_dependencies_it_blocks_before_it_reads_anything_and_records_both()
+    {
+        var database = Database(() => false);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", false);
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        Assert.True(texts.Count == 8, string.Join("\n---\n", texts));
+        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId", texts[0]);
+        // IX_WorkItemDependencies_BlockerItemId: only the edges in which the item blocks another one.
+        Assert.Equal("UPDATE `WorkItemDependencies` AS `w`\nSET `BlockerItemId` = `w`.`BlockerItemId`\nWHERE `w`.`BlockerItemId` = @itemId", texts[1]);
+        Assert.StartsWith("SELECT ", texts[2], StringComparison.Ordinal);
+        Assert.StartsWith("SELECT `w`.`BlockedItemId`, `w`.`BlockerItemId`, `w0`.`ProjectId`\nFROM `WorkItemDependencies` AS `w`", texts[3], StringComparison.Ordinal);
+        Assert.StartsWith("DELETE FROM `WorkItems`", texts[4], StringComparison.Ordinal);
+        // One entry for the item that was blocked, one for the item that was deleted.
+        Assert.Equal(2, texts[6].Split("INSERT INTO `WorkItemChanges`").Length - 1);
+        Assert.Empty(WithoutChangeLogEntry(texts.Skip(5).ToList(), readsProject: false));
+    }
+
+    private static FakeDatabase Database(Func<bool> deadlock) =>
+        new(lockResult: 1, Answer)
+        {
+            NonQueryResult = 1,
+            Fail = command => command.CommandText.Contains(HoldItems, StringComparison.Ordinal) && deadlock() ? MySqlFailure(1213) : null
+        };
+
+    // MySqlException has no public constructor that takes the server's error number.
+    private static MySqlException MySqlFailure(int number) =>
+        (MySqlException)typeof(MySqlException)
+            .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, [typeof(string), typeof(int)])!
+            .Invoke(["Deadlock found when trying to get lock; try restarting transaction", number]);
+
+    private static async Task<HttpResponseMessage> SendAsync(FakeBackedApplication api, string method, string path, bool hasBody)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (hasBody)
+        {
+            request.Content = JsonContent.Create(new UpdateEpicRequest("Epic", null, true));
+        }
+
+        return await api.CreateClient().SendAsync(request);
+    }
+
+    // One project with one epic and one item, which blocks an item of another project.
+    private static DataTable? Answer(DbCommand command)
+    {
+        var text = command.CommandText.ReplaceLineEndings("\n").TrimEnd();
+        if (text.StartsWith("SELECT EXISTS", StringComparison.Ordinal))
+        {
+            return Row("SELECT `e`", new() { ["e"] = true });
+        }
+
+        if (text.StartsWith("SELECT ", StringComparison.Ordinal) && text.Contains("FROM `WorkItemDependencies`", StringComparison.Ordinal))
+        {
+            return Row("SELECT `BlockedItemId`, `BlockerItemId`, `ProjectId`", new()
+            {
+                ["BlockedItemId"] = BlockedItemId.ToString(),
+                ["BlockerItemId"] = WorkItemUpdateMySqlTests.ItemId.ToString(),
+                ["ProjectId"] = OtherProjectId.ToString()
+            });
+        }
+
+        if (text.StartsWith("SELECT ", StringComparison.Ordinal) && text.Contains("FROM `Projects`", StringComparison.Ordinal))
+        {
+            return Row(text, new() { ["Id"] = ProjectId.ToString(), ["CreatedAtUtc"] = Created, ["IsArchived"] = false, ["Key"] = "APP", ["Name"] = "App" });
+        }
+
+        if (text.StartsWith("SELECT ", StringComparison.Ordinal) && text.Contains("FROM `Epics`", StringComparison.Ordinal))
+        {
+            return Row(text, new()
+            {
+                ["Id"] = EpicId.ToString(), ["ProjectId"] = ProjectId.ToString(), ["Name"] = "Epic", ["IsArchived"] = false,
+                ["CreatedAtUtc"] = Created, ["UpdatedAtUtc"] = Created
+            });
+        }
+
+        return WorkItemUpdateMySqlTests.Answer(command);
+    }
+
+    // A row with the columns the SELECT lists on its first line, by name; a column without a value is NULL.
+    private static DataTable Row(string select, Dictionary<string, object> values)
+    {
+        var firstLine = select.Split('\n')[0];
+        var table = new DataTable();
+        var columns = firstLine["SELECT ".Length..].Split(", ").Select(column => column[(column.IndexOf('.', StringComparison.Ordinal) + 1)..].Trim('`')).ToList();
+        foreach (var column in columns)
+        {
+            table.Columns.Add(column, typeof(object));
+        }
+
+        table.Rows.Add(columns.Select(column => values.GetValueOrDefault(column, DBNull.Value)).ToArray());
+        return table;
+    }
+
+    // Program.cs as it is, with every connection, command and transaction answered by FakeDatabase.
+    private sealed class FakeBackedApplication(FakeDatabase database) : WebApplicationFactory<KanbanDbContext>
+    {
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("ConnectionStrings:Kanban", "Server=unused;Database=unused");
+            builder.UseSetting("Database:MigrateOnStartup", "false");
+            builder.UseSetting("Auth:Enabled", "false");
+            builder.ConfigureTestServices(services =>
+            {
+                foreach (var registration in services
+                    .Where(service => service.ServiceType == typeof(KanbanDbContext) ||
+                        (service.ServiceType.IsGenericType && service.ServiceType.GenericTypeArguments.Contains(typeof(KanbanDbContext))))
+                    .ToList())
+                {
+                    services.Remove(registration);
+                }
+
+                services.AddScoped(_ => CreatePipelineContext(new DatabaseOptions(), database));
+            });
+        }
+    }
+}

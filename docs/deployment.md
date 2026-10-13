@@ -180,7 +180,7 @@ Store both now. They are not shown again.
 Give the orchestrator the full-scope token (and the read-scope token where it only reads) as `Authorization: Bearer <token>` on `https://kanban-mcp.trefry.net/mcp`. Items it claims show `factory` as `claimant`. The command exits without serving HTTP; the output of an `exec` is not written to the container log.
 
 - Running it again with the same name (case-insensitive) adds a new token pair to the same identity and leaves the old tokens valid.
-- Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so a revoked token can still be accepted for that long.
+- Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so the MCP server can still accept a revoked token for that long; the API does not: it looks the forwarded token up on every call and refuses a revoked or expired one `scope_denied`, read or write.
 - `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
 
 Open inbound ports:
