@@ -341,6 +341,24 @@ public sealed class CreateIdempotencyApiTests
         }
     }
 
+    // Found on MariaDB with imports racing delete_project: the update answered 500.
+    [Fact]
+    public async Task An_update_of_an_epic_that_is_deleted_while_the_update_runs_is_not_found()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var scenario = await StartAsync(api, client, "item");
+        api.BeforeNextTransaction = () =>
+        {
+            using var dbContext = api.OpenDatabase();
+            dbContext.Epics.Where(epic => epic.Id == scenario.Epic).ExecuteDelete();
+        };
+
+        using var response = await client.PutAsJsonAsync($"/api/epics/{scenario.Epic}", new { name = "Renamed", isArchived = true });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     private static async Task<T> PostAsync<T>(HttpClient client, string path, object body, HttpStatusCode expected)
     {
         using var response = await client.PostAsJsonAsync(path, body);

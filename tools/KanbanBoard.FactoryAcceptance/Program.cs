@@ -15,8 +15,8 @@
 // acceptance test (PASS, FAIL or SKIP), which can be pasted onto the epic.
 //
 // Every scratch project the script creates (keys ACC, ACI and ACE plus 20 random hex characters) is left archived,
-// which keeps it out of list_projects; the script can be run again against the same database. Run it against a
-// stack of your own: it writes.
+// which keeps it out of list_projects; the script can be run again against the same database. It writes only into
+// those scratch projects, and into KANBAN_ACCEPTANCE_PROJECT_ID when that is set.
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //

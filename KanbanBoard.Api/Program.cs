@@ -384,7 +384,18 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
         epic.IsArchived = request.IsArchived;
         epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The epic was deleted, alone or with its project, after it was read: there is nothing to update.
+            // Leaving the transaction uncommitted takes back what was done to its items.
+            dbContext.ChangeTracker.Clear();
+            return null;
+        }
+
         await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
         return epic;
     });
