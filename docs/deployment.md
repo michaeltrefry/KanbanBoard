@@ -150,6 +150,8 @@ For the comment record change (sc-25863) the API alters `WorkItemComments` on it
 
 For the project target change (sc-25864) the API alters `Projects` on its first start (`20261013000421_AddProjectRepositoryAndIdempotencyKey`): the nullable `RepositoryUrl`, `DefaultBranch` and `IdempotencyKeyHash` columns and a unique index on `IdempotencyKeyHash` are added. Existing projects keep their rows and get `NULL` in all three; set a project's repository afterwards with the MCP tool `update_project`. `deploy/sql/007_project_repository_and_idempotency_key.sql` is the manual equivalent.
 
+For the work item update change (sc-25865) the API alters `WorkItems` on its first start (`20261013004410_AddWorkItemVersionAndLongerLabels`): `Labels` widens from 240 to 4000 characters and `Version` (`bigint NOT NULL DEFAULT 1`) is added. Existing items keep their labels and get version 1. `deploy/sql/008_work_item_version_and_longer_labels.sql` is the manual equivalent.
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:

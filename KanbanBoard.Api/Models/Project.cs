@@ -58,7 +58,10 @@ public sealed class WorkItem
     public WorkItemPriority Priority { get; set; } = WorkItemPriority.Medium;
     public int Order { get; set; }
     public int? Estimate { get; set; }
+    // Comma-separated, without spaces around the commas (WorkItemWrites.TryNormalizeLabels).
     public string? Labels { get; set; }
+    // Counts the writes to the item's own fields. Written only by WorkItemWrites, as Version + 1 inside the UPDATE.
+    public long Version { get; set; } = 1;
     public List<WorkItemComment> Comments { get; set; } = [];
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;

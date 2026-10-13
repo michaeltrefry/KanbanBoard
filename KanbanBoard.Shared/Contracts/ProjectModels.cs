@@ -108,7 +108,9 @@ public sealed record WorkItemDto(
     WorkItemStatus Status,
     WorkItemPriority Priority,
     int Order,
-    int? Estimate,
+    // Always written, also as null: the MCP server leaves null fields out unless told otherwise.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? Estimate,
+    // The labels as one comma-separated string, as it has always been; LabelList is the same labels as a list.
     string? Labels,
     IReadOnlyList<WorkItemCommentDto> Comments,
     DateTimeOffset CreatedAtUtc,
@@ -130,6 +132,18 @@ public sealed record WorkItemDto(
     /// <summary>External links attached to this item, oldest first.</summary>
     [JsonPropertyName("links")]
     public IReadOnlyList<WorkItemLinkDto> Links { get; init; } = [];
+
+    /// <summary>
+    /// Counts the writes to the item's own fields: 1 when the item is created, one more for every update and every
+    /// move of the item. Pass it back as the expected version of an update or a move to refuse the write when the
+    /// item was changed in between.
+    /// </summary>
+    [JsonPropertyName("version")]
+    public long Version { get; init; }
+
+    /// <summary>The labels of <see cref="Labels"/> as a list, in the same order; empty when the item has none.</summary>
+    [JsonPropertyName("label_list")]
+    public IReadOnlyList<string> LabelList { get; init; } = [];
 
     /// <summary>
     /// Only on the answer to adding a comment: the id of the comment that was added, or of the earlier comment the
@@ -168,7 +182,10 @@ public sealed record WorkItemSearchResultDto(
     Guid ProjectId,
     string Title,
     WorkItemType Type,
-    WorkItemStatus Status);
+    WorkItemStatus Status,
+    // Always written, also as null.
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? Estimate = null,
+    [property: JsonPropertyName("version")] long Version = 0);
 
 public sealed record CurrentUserDto(
     Guid Id,
@@ -236,21 +253,15 @@ public sealed record CreateWorkItemRequest(
     WorkItemStatus Status,
     WorkItemPriority Priority,
     int? Estimate,
-    string? Labels);
+    string? Labels,
+    // The labels as a list, in place of the comma-separated Labels; passing both is refused.
+    IReadOnlyList<string>? LabelList = null);
 
-public sealed record UpdateWorkItemRequest(
-    Guid? EpicId,
-    string Title,
-    string? Description,
-    WorkItemType Type,
-    WorkItemStatus Status,
-    WorkItemPriority Priority,
-    int? Estimate,
-    string? Labels);
-
+/// <param name="ExpectedVersion">When set, the move is refused unless the item still has this version.</param>
 public sealed record MoveWorkItemRequest(
     WorkItemStatus Status,
-    int Order);
+    int Order,
+    long? ExpectedVersion = null);
 
 /// <param name="Author">Used only when the request carries no token identity; a token's comment is its identity's.</param>
 public sealed record CreateWorkItemCommentRequest(

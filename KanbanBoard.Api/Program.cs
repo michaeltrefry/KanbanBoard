@@ -7,7 +7,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Scalar.AspNetCore;
-using System.Text.Json;
 using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -122,6 +121,7 @@ app.MapKanbanDependencyEndpoints();
 app.MapKanbanLinkEndpoints();
 app.MapKanbanCommentEndpoints();
 app.MapKanbanWorkItemReadEndpoints();
+app.MapKanbanWorkItemWriteEndpoints();
 app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
@@ -333,23 +333,18 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
 
     epic.Name = normalizedName;
     epic.Description = request.Description?.Trim();
+    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
     if (request.IsArchived && !epic.IsArchived)
     {
-        var unfinishedItems = await dbContext.WorkItems
-            .Where(item => item.EpicId == epicId && item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed)
-            .ToListAsync(cancellationToken);
-
-        foreach (var item in unfinishedItems)
-        {
-            item.EpicId = null;
-            item.UpdatedAtUtc = DateTimeOffset.UtcNow;
-        }
+        // Archiving takes the unfinished items out of the epic, which is a change to each of them.
+        await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, DateTimeOffset.UtcNow, cancellationToken);
     }
 
     epic.IsArchived = request.IsArchived;
     epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
     await dbContext.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     changeNotifier.Publish();
     return Results.Ok(ToEpicDto(epic));
 })
@@ -363,8 +358,12 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext db
         return Results.NotFound();
     }
 
+    // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
+    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+    await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, DateTimeOffset.UtcNow, cancellationToken);
     dbContext.Epics.Remove(epic);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await transaction.CommitAsync(cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -453,7 +452,17 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
         }
     }
 
-    var order = await GetNextOrderAsync(dbContext, request.ProjectId, request.Status, cancellationToken);
+    if (normalizedTitle.Length > WorkItemLimits.MaxTitleLength)
+    {
+        return Results.BadRequest(new { message = $"Argument 'title' must be at most {WorkItemLimits.MaxTitleLength} characters." });
+    }
+
+    if (!WorkItemWrites.TryNormalizeLabels(request.Labels, request.LabelList, out var labels, out var labelError))
+    {
+        return Results.BadRequest(new { message = labelError });
+    }
+
+    var order = await WorkItemWrites.NextOrderAsync(dbContext, request.ProjectId, request.Status, cancellationToken);
     var item = new WorkItem
     {
         ProjectId = request.ProjectId,
@@ -465,7 +474,7 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
         Priority = request.Priority,
         Order = order,
         Estimate = request.Estimate,
-        Labels = NormalizeLabels(request.Labels),
+        Labels = labels,
         UpdatedAtUtc = DateTimeOffset.UtcNow
     };
 
@@ -481,126 +490,6 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
     return Results.Created($"/api/items/{item.Id}", ToWorkItemDto(item));
 })
 .WithName("CreateWorkItem");
-
-app.MapPut("/api/items/{itemId:guid}", async (Guid itemId, JsonElement payload, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
-{
-    var item = await dbContext.WorkItems
-        .Include(workItem => workItem.Epic)
-        .Include(workItem => workItem.Comments)
-        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-    if (item is null)
-    {
-        return Results.NotFound();
-    }
-
-    if (!UpdateWorkItemPatch.TryParse(payload, out var patch, out var parseError))
-    {
-        return Results.BadRequest(new { message = parseError });
-    }
-
-    var normalizedTitle = patch!.HasTitle
-        ? patch.Title?.Trim()
-        : item.Title;
-    var validationError = ValidateRequiredText(("title", normalizedTitle));
-    if (validationError is not null)
-    {
-        return Results.BadRequest(new { message = validationError });
-    }
-
-    var nextEpicId = patch.HasEpicId
-        ? patch.EpicId
-        : item.EpicId;
-
-    if (nextEpicId is not null)
-    {
-        var epicExists = await dbContext.Epics.AnyAsync(
-            epic => epic.Id == nextEpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived,
-            cancellationToken);
-
-        if (!epicExists)
-        {
-            return Results.BadRequest(new { message = "Epic must belong to the same project as the work item and be active." });
-        }
-    }
-
-    var nextType = patch.HasType ? patch.Type : item.Type;
-    if (nextType is null)
-    {
-        return Results.BadRequest(new { message = "Field 'type' is required." });
-    }
-
-    var nextStatus = patch.HasStatus ? patch.Status : item.Status;
-    if (nextStatus is null)
-    {
-        return Results.BadRequest(new { message = "Field 'status' is required." });
-    }
-
-    var nextPriority = patch.HasPriority ? patch.Priority : item.Priority;
-    if (nextPriority is null)
-    {
-        return Results.BadRequest(new { message = "Field 'priority' is required." });
-    }
-
-    var statusChanged = item.Status != nextStatus;
-    item.EpicId = nextEpicId;
-    item.Title = normalizedTitle!;
-    item.Description = patch.HasDescription
-        ? patch.Description?.Trim()
-        : item.Description;
-    item.Type = nextType.Value;
-    item.Status = nextStatus.Value;
-    item.Priority = nextPriority.Value;
-    item.Estimate = patch.HasEstimate
-        ? patch.Estimate
-        : item.Estimate;
-    item.Labels = patch.HasLabels
-        ? NormalizeLabels(patch.Labels)
-        : item.Labels;
-    item.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-    if (statusChanged)
-    {
-        item.Order = await GetNextOrderAsync(dbContext, item.ProjectId, item.Status, cancellationToken);
-    }
-
-    await dbContext.SaveChangesAsync(cancellationToken);
-
-    if (item.EpicId is null)
-    {
-        item.Epic = null;
-    }
-    else
-    {
-        await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
-    }
-
-    changeNotifier.Publish();
-    return Results.Ok(await ToWorkItemDtoWithDependenciesAsync(dbContext, item, cancellationToken));
-})
-.WithName("UpdateWorkItem");
-
-app.MapPost("/api/items/{itemId:guid}/move", async (Guid itemId, MoveWorkItemRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
-{
-    var item = await dbContext.WorkItems
-        .Include(workItem => workItem.Epic)
-        .Include(workItem => workItem.Comments)
-        .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-    if (item is null)
-    {
-        return Results.NotFound();
-    }
-
-    item.Status = request.Status;
-    item.Order = request.Order;
-    item.UpdatedAtUtc = DateTimeOffset.UtcNow;
-
-    await NormalizeColumnOrderingAsync(dbContext, item.ProjectId, request.Status, item.Id, request.Order, cancellationToken);
-    await dbContext.SaveChangesAsync(cancellationToken);
-
-    changeNotifier.Publish();
-    return Results.Ok(await ToWorkItemDtoWithDependenciesAsync(dbContext, item, cancellationToken));
-})
-.WithName("MoveWorkItem");
 
 app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
@@ -659,64 +548,8 @@ static EpicDocumentDto ToEpicDocumentDto(EpicDocument document) =>
 static WorkItemDto ToWorkItemDto(WorkItem item) =>
     WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
 
-static async Task<WorkItemDto> ToWorkItemDtoWithDependenciesAsync(KanbanDbContext dbContext, WorkItem item, CancellationToken cancellationToken) =>
-    WorkItemDtoMapper.ToDto(
-        item,
-        DateTimeOffset.UtcNow,
-        await WorkItemDependencies.LoadAsync(dbContext, item.Id, cancellationToken),
-        await WorkItemLinks.LoadAsync(dbContext, item.Id, cancellationToken));
-
-static string? NormalizeLabels(string? labels) =>
-    string.IsNullOrWhiteSpace(labels)
-        ? null
-        : string.Join(',', labels.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Distinct(StringComparer.OrdinalIgnoreCase));
-
 static Task WriteServerSentChangeAsync(HttpResponse response, BoardChangeEvent change, CancellationToken cancellationToken) =>
     response.WriteAsync($"event: changed\ndata: {change.Sequence}\n\n", cancellationToken);
-
-static async Task<int> GetNextOrderAsync(KanbanDbContext dbContext, Guid projectId, WorkItemStatus status, CancellationToken cancellationToken)
-{
-    var maxOrder = await dbContext.WorkItems
-        .Where(item => item.ProjectId == projectId && item.Status == status)
-        .Select(item => (int?)item.Order)
-        .MaxAsync(cancellationToken);
-
-    return maxOrder.GetValueOrDefault(-1) + 1;
-}
-
-static async Task NormalizeColumnOrderingAsync(
-    KanbanDbContext dbContext,
-    Guid projectId,
-    WorkItemStatus status,
-    Guid movedItemId,
-    int desiredOrder,
-    CancellationToken cancellationToken)
-{
-    var items = await dbContext.WorkItems
-        .Where(item => item.ProjectId == projectId && item.Status == status && item.Id != movedItemId)
-        .OrderBy(item => item.Order)
-        .ToListAsync(cancellationToken);
-
-    // Keep column order deterministic before reassigning contiguous order values.
-    items = items
-        .OrderBy(item => item.Order)
-        .ThenBy(item => item.CreatedAtUtc)
-        .ToList();
-
-    desiredOrder = Math.Clamp(desiredOrder, 0, items.Count);
-    var index = 0;
-
-    foreach (var item in items)
-    {
-        if (index == desiredOrder)
-        {
-            index++;
-        }
-
-        // Order only: a sibling that merely shifts has not changed, so its UpdatedAtUtc stays.
-        item.Order = index++;
-    }
-}
 
 static string? ValidateRequiredText(params (string FieldName, string? Value)[] fields)
 {

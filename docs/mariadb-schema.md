@@ -30,6 +30,7 @@ mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/004_work_item_dependenc
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/005_work_item_links.sql
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/006_work_item_comment_author_and_idempotency_key.sql
 mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/007_project_repository_and_idempotency_key.sql
+mariadb -h HOST -P 3306 -u kanban -p kanban < deploy/sql/008_work_item_version_and_longer_labels.sql
 ```
 
 Each script records its migration id in `__EFMigrationsHistory`, so the API skips migrations already applied by hand. A test (`StartupMigrationTests.Deploy_sql_history_rows_match_every_ef_migration`) fails if the ids in `deploy/sql` drift from the migrations in `KanbanBoard.Api/Data/Migrations`; add a numbered script with each new migration.
@@ -53,6 +54,10 @@ The API writes a comment like a link: the `UPDATE` that stamps the item comes fi
 `007` adds three nullable columns to `Projects`; existing projects keep their rows and get `NULL` in all three. `RepositoryUrl` (up to 2048 characters) is the http, https or ssh URL of the repository the project's work is done in, and `DefaultBranch` (up to 255 characters) the branch of it that work starts from. The API validates both on write (no credentials in the URL, a branch name git accepts), so do not set them by hand to values it would refuse. `IdempotencyKeyHash` is the SHA-256, in lowercase hex, of the creating caller's user id and idempotency key, as for comments; the unique key `IX_Projects_IdempotencyKeyHash` allows one project per key and any number without one (`NULL`). It is safe to re-run.
 
 A project has no parent row to lock, so the API serialises creates that carry an idempotency key with the MariaDB named lock `kanban_project_creates` (`GET_LOCK`, 10 s timeout), the same way as dependency adds: the look-up of the key and the `INSERT` of two concurrent creates cannot interleave, the later one finds the first one's project, and the unique key is never hit. A keyed create that waits the full 10 s is refused with HTTP 503 and code `busy`, and writes nothing. Creates without a key take no lock.
+
+`008` changes `WorkItems`: `Labels` grows from 240 to 4000 characters, and `Version` (`bigint NOT NULL DEFAULT 1`) is added. `Labels` is still one comma-separated string without spaces around the commas, so the labels already stored are kept as they are and the label filter of `GET /api/items` (`LOCATE` of `,label,` in the lowered, comma-wrapped string) is unchanged. Every existing item gets version 1, like a new item. It is safe to re-run.
+
+`Version` counts the writes to an item's own fields. The API only ever writes it as `Version = Version + 1` inside an `UPDATE`, never from a value it read, so two writes cannot give an item the same version; do not set it by hand to a lower value. An update starts a transaction with `UPDATE WorkItems SET Version = Version + 1, UpdatedAtUtc = … WHERE Id = … [AND Version = …]`: that statement decides an `expected_version` (no row matched means HTTP 409 `conflict` and nothing written) and holds the item's row until the transaction ends, so the updates of one item run one at a time and each reads the item only after the one before it committed. A move is the same single conditional `UPDATE`, which also sets `Status` and `Order`, in a transaction with nothing but the read of the item it returns; the siblings it displaces are renumbered afterwards in a separate save that writes only their `Order`, in the order of their keys, without holding the moved item's row. Claims, comments, links and dependencies do not touch `Version`.
 
 `001` creates the EF migrations history table and the initial Kanban schema:
 

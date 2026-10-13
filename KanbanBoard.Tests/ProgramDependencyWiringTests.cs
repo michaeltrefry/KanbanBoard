@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using KanbanBoard.Api.Data;
+using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -180,6 +181,7 @@ public sealed class ProgramDependencyWiringTests
         private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"kanban-program-{Guid.NewGuid():N}.db");
         private readonly CommandRecorder recorder = new();
         private readonly TransactionHook transactionHook = new();
+        private readonly SaveFailure saveFailure = new();
 
         /// <summary>The text of every SQL command the application has run, in order.</summary>
         public List<string> Commands => recorder.Commands;
@@ -188,6 +190,35 @@ public sealed class ProgramDependencyWiringTests
         public Action? BeforeNextTransaction
         {
             set => transactionHook.BeforeNext = value;
+        }
+
+        /// <summary>Makes the application's next SaveChanges throw, once. False again once it has thrown.</summary>
+        public bool FailNextSave
+        {
+            get => saveFailure.Armed;
+            set => saveFailure.Armed = value;
+        }
+
+        /// <summary>The secret that makes a request one of the MCP server's.</summary>
+        public static string InternalSecret { get; } = new('s', 32);
+
+        /// <summary>Stores a user with a full-scope token and returns a client that calls as the MCP server does for that token.</summary>
+        public HttpClient CreateCallerClient()
+        {
+            var user = new AppUser { Issuer = "issuer", Subject = "caller", DisplayName = "Caller" };
+            var token = new PersonalAccessToken { AppUserId = user.Id, Name = "token", TokenPrefix = "kbp", TokenHash = Guid.NewGuid().ToString("N"), EncryptedSecret = "unused" };
+            using (var dbContext = new KanbanDbContext(new DbContextOptionsBuilder<KanbanDbContext>().UseSqlite($"Data Source={databasePath};Pooling=False").Options))
+            {
+                dbContext.AppUsers.Add(user);
+                dbContext.PersonalAccessTokens.Add(token);
+                dbContext.SaveChanges();
+            }
+
+            var client = CreateClient();
+            client.DefaultRequestHeaders.Add(KanbanInternalAuth.SecretHeaderName, InternalSecret);
+            client.DefaultRequestHeaders.Add(KanbanInternalAuth.AppUserIdHeaderName, user.Id.ToString());
+            client.DefaultRequestHeaders.Add(KanbanInternalAuth.PersonalAccessTokenIdHeaderName, token.Id.ToString());
+            return client;
         }
 
         /// <summary>Deletes the item behind the application's back; returns the number of rows deleted.</summary>
@@ -208,6 +239,7 @@ public sealed class ProgramDependencyWiringTests
             builder.UseSetting("ConnectionStrings:Kanban", "Server=unused;Database=unused");
             builder.UseSetting("Database:MigrateOnStartup", "false");
             builder.UseSetting("Auth:Enabled", "false");
+            builder.UseSetting("InternalApi:SharedSecret", InternalSecret);
             builder.ConfigureTestServices(services =>
             {
                 foreach (var registration in services
@@ -218,7 +250,7 @@ public sealed class ProgramDependencyWiringTests
                     services.Remove(registration);
                 }
 
-                services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False").AddInterceptors(recorder, transactionHook));
+                services.AddDbContext<KanbanDbContext>(options => options.UseSqlite($"Data Source={databasePath};Pooling=False").AddInterceptors(recorder, transactionHook, saveFailure));
             });
         }
 
@@ -226,6 +258,23 @@ public sealed class ProgramDependencyWiringTests
         {
             base.Dispose(disposing);
             File.Delete(databasePath);
+        }
+    }
+
+    private sealed class SaveFailure : SaveChangesInterceptor
+    {
+        public bool Armed { get; set; }
+
+        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+            DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!Armed)
+            {
+                return ValueTask.FromResult(result);
+            }
+
+            Armed = false;
+            throw new DbUpdateException("The save was made to fail by the test.");
         }
     }
 

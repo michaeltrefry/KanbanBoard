@@ -10,11 +10,12 @@ namespace KanbanBoard.Tests;
 public sealed class KanbanToolsListTests
 {
     private const string ItemJson =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
 
-    // ItemJson as the tools return it: in an array, with the null properties left out.
+    // ItemJson as the tools return it: in an array, with the null properties left out. estimate is never left out,
+    // and version and label_list come after the fields an item has always had.
     private const string ExpectedArrayText =
-        """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[],"links":[]}]""";
+        """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}]""";
 
     private static readonly string[] OriginalArguments = ["epicId", "includeArchivedEpics", "projectId", "status", "type", "unblocked_only"];
 
