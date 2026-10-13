@@ -262,6 +262,12 @@ public sealed class ProgramDependencyWiringTests
             set => transactionHook.BeforeNext = value;
         }
 
+        /// <summary>Runs once, just before the application's next SaveChanges sends anything.</summary>
+        public Action? BeforeNextSave
+        {
+            set => saveFailure.BeforeNext = value;
+        }
+
         /// <summary>
         /// Makes the application's next SaveChanges throw, once. False again once it has thrown. A save that only
         /// records entries of the change feed is let through.
@@ -369,9 +375,15 @@ public sealed class ProgramDependencyWiringTests
 
         public int ItemsToDelete { get; set; }
 
+        public Action? BeforeNext { get; set; }
+
         public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
+            var action = BeforeNext;
+            BeforeNext = null;
+            action?.Invoke();
+
             var changed = eventData.Context!.ChangeTracker.Entries<WorkItem>().FirstOrDefault(entry => entry.State == EntityState.Modified)?.Entity.Id;
             if (ItemsToDelete > 0 && changed is { } id)
             {

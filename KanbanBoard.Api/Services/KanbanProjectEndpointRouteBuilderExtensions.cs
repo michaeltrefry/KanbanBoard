@@ -154,7 +154,17 @@ public static class KanbanProjectEndpointRouteBuilderExtensions
             return InvalidArgument(refusal);
         }
 
-        var result = await Projects.UpdateAsync(dbContext, project, cancellationToken);
+        ProjectWriteResult result;
+        try
+        {
+            result = await Projects.UpdateAsync(dbContext, project, cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The project was deleted after it was read: the save matched no row, and nothing was written.
+            return NotFound(projectId);
+        }
+
         if (result.Outcome == ProjectWriteOutcome.KeyTaken)
         {
             return KeyTaken(project.Key);
