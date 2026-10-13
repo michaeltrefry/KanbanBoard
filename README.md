@@ -345,7 +345,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 
 Every tool, read or write, uses this envelope for every refusal: a scope refusal, an id the API does not know (`get_epic`, `get_epic_document`, `get_board`, `list_epics`, `list_epic_documents` and `create_epic_work_item` with an unknown id answer `not_found`, like `get_work_item`), a malformed argument, a blank `search_work_items` query (`invalid_argument`). `delete_project`, `delete_epic`, `delete_work_item`, `update_epic` and `update_epic_document` with an unknown id answer `not_found` with a message that names the object and the id (`Epic 6f0c… was not found.`). A message that refuses an argument names it the same way everywhere: `Argument 'marker' is required…`. The successful results of the read tools are unchanged, apart from the fields that were added to them.
 
-**The scope is checked first.** A write tool called with a `read` token (or without a token) answers `scope_denied` whatever its arguments are: also when an argument is missing, misspelt or of the wrong type. A `full` token gets `invalid_argument` for the same call.
+**The scope is checked first.** A write tool called with a `read` token answers `scope_denied` whatever its arguments are: also when an argument is missing, misspelt or of the wrong type. A `full` token gets `invalid_argument` for the same call.
 
 Two kinds of call are refused `invalid_argument` before the tool runs, so nothing was read, written or created and no `idempotency_key` was used up:
 

@@ -763,7 +763,7 @@ A refused call returns a tool result with `isError: true` whose `structuredConte
 
 | Code | When | Retry? |
 | --- | --- | --- |
-| `scope_denied` | A write tool was called with a `read` token or without a token; or the token was revoked or has expired (any tool, read or write); or a claim tool was called on a server that does not require tokens, without one. | No. Use a `full` token that is valid. |
+| `scope_denied` | A write tool was called with a `read` token; or the token was revoked or has expired (any tool, read or write); or a claim tool was called on a server that does not require tokens, without one. | No. Use a `full` token that is valid. |
 | `not_found` | The id that addresses the call (project, epic, epic document, work item) is not known. The message names the object and the id. | No. |
 | `conflict` | The object is no longer in the state the call depends on: a stale `expected_version` on `update_work_item` or `move_work_item`; a renew or release of a claim the caller no longer holds; a project `key` another project has; an `import_epic_plan` whose epic was deleted while the call ran. | Not as it is. Read again, decide, then call again. |
 | `already_claimed` | `claim_work_item`, `renew_work_item_claim` or `release_work_item_claim` on an item with a live claim of another identity or another marker. | Later: after the claim is released or has expired. |
