@@ -8,25 +8,33 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
 {
     public static IEndpointRouteBuilder MapKanbanDependencyEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapPost("/api/items/{itemId:guid}/dependencies", (
+        endpoints.MapPost("/api/items/{itemId:guid}/dependencies", async (
             Guid itemId,
             AddWorkItemDependencyRequest request,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            HandleAsync(itemId, request.BlockedByItemId, dbContext, changeNotifier,
-                WorkItemDependencies.AddAsync(dbContext, itemId, request.BlockedByItemId, cancellationToken),
+            await HandleAsync(itemId, request.BlockedByItemId, dbContext, changeNotifier,
+                WorkItemDependencies.AddAsync(
+                    dbContext, itemId, request.BlockedByItemId,
+                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
                 cancellationToken))
             .WithName("AddWorkItemDependency");
 
-        endpoints.MapDelete("/api/items/{itemId:guid}/dependencies/{blockedByItemId:guid}", (
+        endpoints.MapDelete("/api/items/{itemId:guid}/dependencies/{blockedByItemId:guid}", async (
             Guid itemId,
             Guid blockedByItemId,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            HandleAsync(itemId, blockedByItemId, dbContext, changeNotifier,
-                WorkItemDependencies.RemoveAsync(dbContext, itemId, blockedByItemId, cancellationToken),
+            await HandleAsync(itemId, blockedByItemId, dbContext, changeNotifier,
+                WorkItemDependencies.RemoveAsync(
+                    dbContext, itemId, blockedByItemId,
+                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
                 cancellationToken))
             .WithName("RemoveWorkItemDependency");
 

@@ -322,6 +322,49 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.ToTable("WorkItems");
                 });
 
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemChange", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ActorName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("Changes")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("ProjectId", "Sequence");
+
+                    b.ToTable("WorkItemChanges");
+                });
+
             modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemComment", b =>
                 {
                     b.Property<string>("Id")

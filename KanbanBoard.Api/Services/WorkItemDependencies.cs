@@ -33,6 +33,8 @@ public static class WorkItemDependencies
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         // Two adds can each pass the cycle check and together close a loop, even when they share no item, so the
@@ -40,17 +42,18 @@ public static class WorkItemDependencies
         return await MariaDbNamedLock.RunAsync(dbContext, LockName, LockTimeoutSeconds, WorkItemDependencyOutcome.Busy, async () =>
         {
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-            var outcome = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
-            if (outcome == WorkItemDependencyOutcome.Succeeded)
+            var (outcome, added) = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
+            if (added)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyAdded, blockedItemId, blockerItemId, actor, now, cancellationToken);
             }
 
             return outcome;
         }, cancellationToken);
     }
 
-    private static async Task<WorkItemDependencyOutcome> AddLockedAsync(
+    // Whether the edge was inserted: an edge that was already there succeeds without a write.
+    private static async Task<(WorkItemDependencyOutcome Outcome, bool Added)> AddLockedAsync(
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
@@ -58,13 +61,13 @@ public static class WorkItemDependencies
     {
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
-            return WorkItemDependencyOutcome.NotFound;
+            return (WorkItemDependencyOutcome.NotFound, false);
         }
 
         if (blockedItemId == blockerItemId ||
             await IsBlockedByAsync(dbContext, blockerItemId, blockedItemId, cancellationToken))
         {
-            return WorkItemDependencyOutcome.Cycle;
+            return (WorkItemDependencyOutcome.Cycle, false);
         }
 
         var exists = await dbContext.WorkItemDependencies.AnyAsync(
@@ -72,7 +75,7 @@ public static class WorkItemDependencies
             cancellationToken);
         if (exists)
         {
-            return WorkItemDependencyOutcome.Succeeded;
+            return (WorkItemDependencyOutcome.Succeeded, false);
         }
 
         dbContext.WorkItemDependencies.Add(new WorkItemDependency
@@ -90,13 +93,13 @@ public static class WorkItemDependencies
             dbContext.ChangeTracker.Clear();
             if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
             {
-                return WorkItemDependencyOutcome.NotFound;
+                return (WorkItemDependencyOutcome.NotFound, false);
             }
 
             throw;
         }
 
-        return WorkItemDependencyOutcome.Succeeded;
+        return (WorkItemDependencyOutcome.Succeeded, true);
     }
 
     /// <summary>Deletes the edge. Removing an edge that does not exist succeeds and changes nothing.</summary>
@@ -104,8 +107,11 @@ public static class WorkItemDependencies
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
             return WorkItemDependencyOutcome.NotFound;
@@ -123,12 +129,42 @@ public static class WorkItemDependencies
             }
             catch (DbUpdateConcurrencyException)
             {
-                // Another caller removed the edge first.
+                // Another caller removed the edge first: this call changed nothing and records nothing.
                 dbContext.ChangeTracker.Clear();
+                return WorkItemDependencyOutcome.Succeeded;
             }
+
+            await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyRemoved, blockedItemId, blockerItemId, actor, now, cancellationToken);
         }
 
         return WorkItemDependencyOutcome.Succeeded;
+    }
+
+    // One edge is one entry of the change feed, on the blocked item: the edge is that item's "blocked by".
+    private static async Task CommitAsync(
+        KanbanDbContext dbContext,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction,
+        string changeKind,
+        Guid blockedItemId,
+        Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var edge = new Dictionary<string, object?> { ["blocked_by"] = blockerItemId };
+        var added = changeKind == WorkItemChangeKinds.DependencyAdded;
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(
+                blockedItemId,
+                await WorkItemChangeLog.ProjectIdAsync(dbContext, blockedItemId, cancellationToken),
+                changeKind,
+                actor,
+                now,
+                added ? null : edge,
+                added ? edge : null),
+            cancellationToken);
     }
 
     /// <summary>Keeps only items whose blockers are all Done (items without blockers included).</summary>

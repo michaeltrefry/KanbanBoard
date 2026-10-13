@@ -152,6 +152,8 @@ For the project target change (sc-25864) the API alters `Projects` on its first 
 
 For the work item update change (sc-25865) the API alters `WorkItems` on its first start (`20261013004410_AddWorkItemVersionAndLongerLabels`): `Labels` widens from 240 to 4000 characters and `Version` (`bigint NOT NULL DEFAULT 1`) is added. Existing items keep their labels and get version 1. `deploy/sql/008_work_item_version_and_longer_labels.sql` is the manual equivalent.
 
+For the change feed (sc-25866) the API creates the `WorkItemChanges` table on its first start (`20261013013744_AddWorkItemChanges`). Existing data is not touched and gets no rows: the feed holds the writes made from then on, and it is never pruned. `deploy/sql/009_work_item_changes.sql` is the manual equivalent. From this release every write to a work item also takes the MariaDB named lock `kanban_work_item_changes` for the moment it records its entry (see [mariadb-schema.md](mariadb-schema.md)).
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:

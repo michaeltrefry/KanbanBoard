@@ -58,6 +58,7 @@ public static class WorkItemLinks
         Guid itemId,
         string kind,
         string url,
+        ChangeActor? actor,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -77,16 +78,17 @@ public static class WorkItemLinks
             return WorkItemLinkOutcome.Unchanged;
         }
 
-        dbContext.WorkItemLinks.Add(new WorkItemLink
+        var added = new WorkItemLink
         {
             WorkItemId = itemId,
             Kind = kind,
             Url = url,
             UrlHash = urlHash,
             CreatedAtUtc = now
-        });
+        };
+        dbContext.WorkItemLinks.Add(added);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await CommitAsync(dbContext, transaction, WorkItemChangeKinds.LinkAdded, actor, now, null, added, cancellationToken);
         return WorkItemLinkOutcome.Succeeded;
     }
 
@@ -101,6 +103,7 @@ public static class WorkItemLinks
         Guid? linkId,
         string? kind,
         string? url,
+        ChangeActor? actor,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -125,8 +128,36 @@ public static class WorkItemLinks
         // which MariaDB rejects.
         dbContext.WorkItemLinks.Remove(link);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await CommitAsync(dbContext, transaction, WorkItemChangeKinds.LinkRemoved, actor, now, link, null, cancellationToken);
         return WorkItemLinkOutcome.Succeeded;
+    }
+
+    private static async Task CommitAsync(
+        KanbanDbContext dbContext,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction,
+        string changeKind,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        WorkItemLink? removed,
+        WorkItemLink? added,
+        CancellationToken cancellationToken)
+    {
+        static Dictionary<string, object?>? Describe(WorkItemLink? link) =>
+            link is null ? null : new() { ["link"] = new { link.Id, link.Kind, link.Url } };
+
+        var itemId = (removed ?? added)!.WorkItemId;
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(
+                itemId,
+                await WorkItemChangeLog.ProjectIdAsync(dbContext, itemId, cancellationToken),
+                changeKind,
+                actor,
+                now,
+                Describe(removed),
+                Describe(added)),
+            cancellationToken);
     }
 
     // Must be the first statement of the transaction. The UPDATE holds the item's row until the transaction ends, so

@@ -53,8 +53,9 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
                 return InvalidArgument(IdempotencyKeys.InvalidMessage);
             }
 
+            var actor = identity is null ? await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken) : ChangeActor.From(identity);
             var result = await WorkItemComments.AddAsync(
-                dbContext, itemId, identity?.Id, author, body, request.IdempotencyKey, now, cancellationToken);
+                dbContext, itemId, identity?.Id, author, body, request.IdempotencyKey, actor, now, cancellationToken);
             var item = result.Outcome == WorkItemCommentOutcome.NotFound
                 ? null
                 : await dbContext.WorkItems

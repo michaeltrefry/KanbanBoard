@@ -80,6 +80,7 @@ The MCP service exposes tools for:
 - Fetching issue items
 - Fetching a single work item with its description and comments
 - Adding comments to work items and listing a work item's comments
+- Following every change to work items from a cursor (the change feed)
 - Searching work items by words in titles and descriptions
 - Creating work items
 - Updating work items
@@ -211,6 +212,62 @@ Work item reads embed the same records in `comments`, oldest first. `id` is a GU
 - A comment that is added stamps the item's `updatedAtUtc` with the comment's `createdAtUtc`, so `updated_since` reports it.
 - `add_work_item_comment` is a write tool: a `read` token is refused `scope_denied` before the API is called. `list_work_item_comments` is a read tool. `add_issue_comment(itemId, author, body)` is the older form of the add, without a key; it stamps the author the same way.
 
+### Change feed
+
+`list_changes(cursor?, project_id?, limit?, from_start?)` reads the persisted change feed: one entry for every change to a work item, in the order the changes were written. It is how a caller follows the board without re-reading it, and picks up where it stopped after a restart. It is backed by `GET /api/items/changes` and is unrelated to `GET /api/changes`, the in-memory event stream that only tells the web UI that something changed.
+
+```json
+{
+  "items": [
+    {
+      "sequence": 4812,
+      "item_id": "e086…",
+      "project_id": "0b5c…",
+      "kind": "item_moved",
+      "actor": { "id": "3cac…", "name": "factory" },
+      "changes": [
+        { "field": "status", "old": "Backlog", "new": "InProgress" },
+        { "field": "version", "old": 1, "new": 2 }
+      ],
+      "created_at_utc": "2026-10-13T01:41:52.674522+00:00"
+    }
+  ],
+  "next_cursor": "aC40ODEy"
+}
+```
+
+- **Start by taking a cursor.** Called without `cursor`, the tool returns no entries and the cursor of the newest entry in the feed: save it, make your writes, and read from it. `from_start: true` starts at the oldest entry instead (`cursor` and `from_start` together are refused `invalid_argument`).
+- **`next_cursor` is always there**, also when `items` is empty: it is the position after the last entry returned, or the position that was asked for when there was none. A poller passes it to its next call whatever came back. Fewer entries than `limit` (1 to 200, 50 when left out) means the end of the feed was reached.
+- **Nothing lands behind a cursor.** Every entry has a higher `sequence` than every entry committed before it, so a caller that has read up to a cursor gets each later entry exactly once, in write order, however many callers write at the same time. Reading again from the same cursor returns the same entries, also after the API restarts: entries are stored in the database, in the transaction of the write they describe, and are never changed. `sequence` may skip numbers; do not derive anything from the gaps.
+- **`project_id`** keeps only the entries of work items of that project. A cursor is a position in the whole feed, not in a filtered one: the cursor a filtered call returned can be passed to an unfiltered call, and the other way round. The cursor is opaque and belongs to this tool; a cursor of `list_work_items` or `list_work_item_comments` is refused `invalid_argument`, as is a malformed one.
+- **`kind`** is one of:
+
+  | Kind | Written by | `changes` holds |
+  | --- | --- | --- |
+  | `item_created` | `create_work_item`, `create_epic_work_item` | every field the new item has a value for, with `old` null |
+  | `item_updated` | `update_work_item`; archiving or deleting an epic, for each item it takes out of the epic | the fields whose value changed, and `version` |
+  | `item_moved` | `move_work_item` | `status` and `order` when they changed, and `version` |
+  | `item_deleted` | `delete_work_item`; `delete_project`, for each item of the project | every field the item had a value for, with `new` null |
+  | `claimed` | `claim_work_item` | the claim fields that changed |
+  | `claim_renewed` | `renew_work_item_claim` | `claim_expires_at_utc` |
+  | `claim_released` | `release_work_item_claim` | the claim fields, with `new` null |
+  | `comment_added` | `add_work_item_comment`, `add_issue_comment` | `comment`: `old` null, `new` `{id, author, body}` |
+  | `link_added` | `add_work_item_link` | `link`: `old` null, `new` `{id, kind, url}` |
+  | `link_removed` | `remove_work_item_link` | `link`: `old` `{id, kind, url}`, `new` null |
+  | `dependency_added` | `add_work_item_dependency` | `blocked_by`: `old` null, `new` the id of the blocking item |
+  | `dependency_removed` | `remove_work_item_dependency` | `blocked_by`: `old` the id of the blocking item, `new` null |
+
+  The same writes made from the web UI are in the feed as well. Kinds are a contract: new ones may be added, none is renamed.
+- **`changes`** lists `{field, old, new}` for each field the write changed, and only those; `old` and `new` are always present and are `null` for "no value". The item's own fields are `title`, `description`, `type`, `status`, `priority`, `order`, `estimate`, `labels` (the comma-separated string), `epic_id` and `version`; the claim fields are `claimant_id`, `claimant`, `claim_marker` and `claim_expires_at_utc`. `old` is the value the write replaced, read while the write held the item, not a value read earlier. For a claim that is the claim as it was stored: a claim that had expired without being released shows up as the `old` values of the claim that takes the item over.
+- **`actor`** is who made the change, taken from the request and never from an argument: `{id, name}` of the identity behind the personal access token (the same id and name as `claimant_id` and `claimant`), or of the signed-in user for a change made in the web UI. It is left out when the write carried neither (an installation without authentication). The `author` of a comment written without a token is content of the comment, not the actor.
+- **One write, one entry.** A dependency is one entry, on the blocked item (the `id` argument of the tool), and so in that item's project. Moving an item is one entry for that item; the items it displaces are renumbered without an entry, as without a new `version`. Archiving an epic is one `item_updated` per item it takes out and none for the epic.
+- **A write that is refused, or that changes nothing, has no entry**: `conflict`, `already_claimed`, `cycle`, `not_found`, `invalid_argument`, a repeated `idempotency_key`, a link or dependency that was already there, a remove of one that was not.
+- **Entries outlive their item.** Deleting a work item, or its project, leaves its entries in the feed, ending with `item_deleted`; `get_work_item` for `item_id` is then refused `not_found`.
+- **Not in the feed:** changes to a project or an epic themselves (create, rename, archive, delete; only their effect on work items is), epic documents, and tokens. Writes made before this feature existed have no entries.
+- **Retention:** entries are never pruned. The feed grows by one row per write; there is no tool or job that removes entries.
+- **Cost:** to keep the order above, the API records entries one at a time: every write to a work item ends by taking one lock for the `INSERT` of its entry and its `COMMIT` (see [docs/mariadb-schema.md](docs/mariadb-schema.md)). Writes to different items, which used to commit side by side, now commit one after the other. A write that waited 10 s for that lock is refused `busy` and changes nothing.
+- `list_changes` is a read tool: a `read` token can call it.
+
 ### Tool errors
 
 A refused tool call returns a tool result with `isError: true`. Its `structuredContent` is `{"code": "...", "message": "..."}` and its single text block holds the same JSON. Branch on `code`; `message` is for people and may change.
@@ -223,7 +280,7 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `conflict` | The entity is no longer in the state the call depends on (for example: the work item no longer has the `expected_version` of an update or a move); nothing was changed. |
 | `invalid_argument` | An argument is missing or out of range. |
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
-| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, or `create_project` with an `idempotency_key` waited 10 s for other keyed creates); nothing was changed and the call can be retried. |
+| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, `create_project` with an `idempotency_key` waited 10 s for other keyed creates, or any write to a work item waited 10 s to record its entry in the [change feed](#change-feed)); nothing was changed and the call can be retried. |
 
 Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from `create_project`, `update_project`, `update_work_item`, `move_work_item`, `create_work_item`, `create_epic_work_item` and the claim, dependency, link and comment tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
@@ -263,6 +320,7 @@ The names below are the C# method names; on the wire each tool is its snake_case
 - `AddWorkItemComment`
 - `AddIssueComment`
 - `ListWorkItemComments`
+- `ListChanges`
 - `CreateWorkItem`
 - `CreateEpicWorkItem`
 - `UpdateWorkItem`

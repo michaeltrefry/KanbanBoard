@@ -112,6 +112,7 @@ else
     app.UseKanbanInternalApiAuthentication(internalApiOptions);
 }
 
+app.UseKanbanBusyRefusal();
 app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
@@ -120,6 +121,7 @@ app.MapKanbanClaimEndpoints();
 app.MapKanbanDependencyEndpoints();
 app.MapKanbanLinkEndpoints();
 app.MapKanbanCommentEndpoints();
+app.MapKanbanChangeFeedEndpoints();
 app.MapKanbanWorkItemReadEndpoints();
 app.MapKanbanWorkItemWriteEndpoints();
 app.MapOpenApi();
@@ -269,16 +271,31 @@ app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limi
 })
 .WithName("SearchWorkItems");
 
-app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
+    var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
+    var now = timeProvider.GetUtcNow();
+
+    // Deleting the project deletes its items, which is a change to each of them. They are held first, so the
+    // entries of the change feed report the items as they were deleted.
+    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+    await dbContext.WorkItems
+        .Where(item => item.ProjectId == projectId)
+        .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
     var project = await dbContext.Projects.FirstOrDefaultAsync(candidate => candidate.Id == projectId, cancellationToken);
     if (project is null)
     {
         return Results.NotFound();
     }
 
+    var items = await dbContext.WorkItems.AsNoTracking().Where(item => item.ProjectId == projectId).ToListAsync(cancellationToken);
     dbContext.Projects.Remove(project);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await WorkItemChangeLog.CommitAsync(
+        dbContext,
+        transaction,
+        items.Select(item => WorkItemChangeLog.Entry(item.Id, projectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null)).ToList(),
+        cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -316,8 +333,9 @@ app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, Creat
 })
 .WithName("CreateEpic");
 
-app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
+    var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
     {
@@ -334,24 +352,26 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     epic.Name = normalizedName;
     epic.Description = request.Description?.Trim();
     await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+    List<WorkItemChange> detached = [];
     if (request.IsArchived && !epic.IsArchived)
     {
         // Archiving takes the unfinished items out of the epic, which is a change to each of them.
-        await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, DateTimeOffset.UtcNow, cancellationToken);
+        detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, actor, timeProvider.GetUtcNow(), cancellationToken);
     }
 
     epic.IsArchived = request.IsArchived;
     epic.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
     await dbContext.SaveChangesAsync(cancellationToken);
-    await transaction.CommitAsync(cancellationToken);
+    await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
     changeNotifier.Publish();
     return Results.Ok(ToEpicDto(epic));
 })
 .WithName("UpdateEpic");
 
-app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
+    var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
     {
@@ -360,10 +380,10 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, KanbanDbContext db
 
     // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
     await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, DateTimeOffset.UtcNow, cancellationToken);
+    var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, actor, timeProvider.GetUtcNow(), cancellationToken);
     dbContext.Epics.Remove(epic);
     await dbContext.SaveChangesAsync(cancellationToken);
-    await transaction.CommitAsync(cancellationToken);
+    await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -425,7 +445,7 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
 })
 .WithName("UpdateEpicDocument");
 
-app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+app.MapPost("/api/items", async (CreateWorkItemRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     var normalizedTitle = request.Title.Trim();
     var validationError = ValidateRequiredText(("title", normalizedTitle));
@@ -462,6 +482,7 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
         return Results.BadRequest(new { message = labelError });
     }
 
+    var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
     var order = await WorkItemWrites.NextOrderAsync(dbContext, request.ProjectId, request.Status, cancellationToken);
     var item = new WorkItem
     {
@@ -478,8 +499,16 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
         UpdatedAtUtc = DateTimeOffset.UtcNow
     };
 
-    dbContext.WorkItems.Add(item);
-    await dbContext.SaveChangesAsync(cancellationToken);
+    await using (var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken))
+    {
+        dbContext.WorkItems.Add(item);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemCreated, actor, timeProvider.GetUtcNow(), null, WorkItemChangeLog.Snapshot(item)),
+            cancellationToken);
+    }
 
     if (item.EpicId is not null)
     {
@@ -491,8 +520,13 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, KanbanDbContext 
 })
 .WithName("CreateWorkItem");
 
-app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
+    var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
+
+    // The item is held before it is read, so the entry of the change feed reports the item as it was deleted.
+    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+    await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
     var item = await dbContext.WorkItems.FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
     if (item is null)
     {
@@ -501,6 +535,11 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext db
 
     dbContext.WorkItems.Remove(item);
     await dbContext.SaveChangesAsync(cancellationToken);
+    await WorkItemChangeLog.CommitAsync(
+        dbContext,
+        transaction,
+        WorkItemChangeLog.Entry(itemId, item.ProjectId, WorkItemChangeKinds.ItemDeleted, actor, timeProvider.GetUtcNow(), WorkItemChangeLog.Snapshot(item), null),
+        cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })

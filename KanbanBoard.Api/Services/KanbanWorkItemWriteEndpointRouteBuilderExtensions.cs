@@ -13,11 +13,12 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         endpoints.MapPut("/api/items/{itemId:guid}", (
             Guid itemId,
             JsonElement payload,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            UpdateAsync(itemId, payload, strict: false, dbContext, changeNotifier, timeProvider, cancellationToken))
+            UpdateAsync(itemId, payload, strict: false, httpContext, dbContext, changeNotifier, timeProvider, cancellationToken))
         .WithName("UpdateWorkItem");
 
         // The partial update: a field that is present is written, null clears it, an absent field is left alone.
@@ -26,16 +27,18 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         endpoints.MapPatch("/api/items/{itemId:guid}", (
             Guid itemId,
             JsonElement payload,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            UpdateAsync(itemId, payload, strict: true, dbContext, changeNotifier, timeProvider, cancellationToken))
+            UpdateAsync(itemId, payload, strict: true, httpContext, dbContext, changeNotifier, timeProvider, cancellationToken))
         .WithName("PatchWorkItem");
 
         endpoints.MapPost("/api/items/{itemId:guid}/move", async (
             Guid itemId,
             MoveWorkItemRequest request,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
@@ -43,7 +46,9 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             CancellationToken cancellationToken) =>
             await AnswerAsync(
                 itemId,
-                await WorkItemWrites.MoveAsync(dbContext, itemId, request.Status, request.Order, request.ExpectedVersion, timeProvider.GetUtcNow(), loggerFactory.CreateLogger(typeof(WorkItemWrites)), cancellationToken),
+                await WorkItemWrites.MoveAsync(
+                    dbContext, itemId, request.Status, request.Order, request.ExpectedVersion,
+                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), loggerFactory.CreateLogger(typeof(WorkItemWrites)), cancellationToken),
                 dbContext, changeNotifier, timeProvider, cancellationToken))
         .WithName("MoveWorkItem");
 
@@ -54,6 +59,7 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         Guid itemId,
         JsonElement payload,
         bool strict,
+        HttpContext httpContext,
         KanbanDbContext dbContext,
         BoardChangeNotifier changeNotifier,
         TimeProvider timeProvider,
@@ -71,7 +77,8 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
 
         return await AnswerAsync(
             itemId,
-            await WorkItemWrites.UpdateAsync(dbContext, itemId, patch!, timeProvider.GetUtcNow(), cancellationToken),
+            await WorkItemWrites.UpdateAsync(
+                dbContext, itemId, patch!, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
             dbContext, changeNotifier, timeProvider, cancellationToken);
     }
 

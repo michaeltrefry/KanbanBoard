@@ -29,10 +29,10 @@ public sealed class WorkItemLinkMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(linkExists: false)) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, Now, CancellationToken.None);
+        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemLinkOutcome.Succeeded, outcome);
-        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var texts = WithoutChangeLogEntry(database.Commands.Select(command => Normalize(command.Text)).ToList());
         Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
         // The UPDATE comes first: it is what makes two identical adds run one after the other.
         Assert.StartsWith("UPDATE `WorkItems` AS `w`\nSET `UpdatedAtUtc` = @p\nWHERE `w`.`Id` = @itemId", texts[0], StringComparison.Ordinal);
@@ -46,7 +46,7 @@ public sealed class WorkItemLinkMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(linkExists: true)) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, Now, CancellationToken.None);
+        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemLinkOutcome.Unchanged, outcome);
         Assert.DoesNotContain(database.Commands, command => command.Text.Contains("INSERT", StringComparison.Ordinal));
@@ -58,7 +58,7 @@ public sealed class WorkItemLinkMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(linkExists: false));
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, Now, CancellationToken.None);
+        var outcome = await WorkItemLinks.AddAsync(dbContext, ItemId, "pr", Url, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemLinkOutcome.NotFound, outcome);
         Assert.StartsWith("UPDATE `WorkItems`", Assert.Single(database.Commands).Text, StringComparison.Ordinal);
@@ -73,11 +73,11 @@ public sealed class WorkItemLinkMySqlTests
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
         var outcome = byLinkId
-            ? await WorkItemLinks.RemoveAsync(dbContext, ItemId, LinkId, null, null, Now, CancellationToken.None)
-            : await WorkItemLinks.RemoveAsync(dbContext, ItemId, null, "pr", Url, Now, CancellationToken.None);
+            ? await WorkItemLinks.RemoveAsync(dbContext, ItemId, LinkId, null, null, null, Now, CancellationToken.None)
+            : await WorkItemLinks.RemoveAsync(dbContext, ItemId, null, "pr", Url, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemLinkOutcome.Succeeded, outcome);
-        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var texts = WithoutChangeLogEntry(database.Commands.Select(command => Normalize(command.Text)).ToList());
         Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
         Assert.StartsWith("UPDATE `WorkItems` AS `w`\nSET `UpdatedAtUtc` = @p\nWHERE `w`.`Id` = @itemId", texts[0], StringComparison.Ordinal);
         Assert.Matches(

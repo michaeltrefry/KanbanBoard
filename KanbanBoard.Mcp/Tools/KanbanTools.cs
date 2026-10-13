@@ -528,6 +528,41 @@ public sealed class KanbanTools(
             ?? new WorkItemCommentPageDto([], null);
     }
 
+    [McpServerTool, Description("Read the change feed: every change to a work item, oldest first, as an object {\"items\": [...], \"next_cursor\": \"...\"}. next_cursor is always set, also when items is empty: pass it as cursor to the next call to get the entries written since, each exactly once and in the order they were written. Called without cursor it returns no entries and the cursor of the newest entry, which is where to start following from; from_start true starts at the oldest entry instead. Reading again from the same cursor returns the same entries; fewer entries than limit means the end of the feed was reached. Each entry is {sequence, item_id, project_id, kind, actor, changes, created_at_utc}. kind is one of item_created, item_updated, item_moved, item_deleted, claimed, claim_renewed, claim_released, comment_added, link_added, link_removed, dependency_added, dependency_removed. actor is {id, name} of the identity whose token or browser session made the change, and is left out when the write carried neither. changes lists {field, old, new} for each field the write changed: the item's own fields (title, description, type, status, priority, order, estimate, labels, epic_id, version), the stored claim (claimant_id, claimant, claim_marker, claim_expires_at_utc), comment ({id, author, body}), link ({id, kind, url}), or blocked_by (the id of the blocking item; the entry is on the blocked item). Entries stay after their item is deleted. A write that was refused or changed nothing has no entry, and neither has a change to a project or an epic itself. A malformed cursor, a cursor of another tool, cursor together with from_start, or a limit outside 1 to 200 is refused with code invalid_argument.")]
+    public async Task<WorkItemChangePageDto> ListChanges(
+        [Description("next_cursor of an earlier call, passed back unchanged")] string? cursor = null,
+        [Description("Only entries of work items of this project. The cursor is a position in the whole feed, so one cursor can be used with any project_id or with none.")] Guid? project_id = null,
+        [Description("Most entries to return, 1 to 200. 50 when not passed.")] int? limit = null,
+        [Description("true reads from the oldest entry of the feed. Cannot be combined with cursor.")] bool from_start = false)
+    {
+        var parameters = new List<string>();
+        if (cursor is not null)
+        {
+            parameters.Add($"cursor={Uri.EscapeDataString(cursor)}");
+        }
+
+        if (project_id is not null)
+        {
+            parameters.Add($"projectId={project_id}");
+        }
+
+        if (limit is not null)
+        {
+            parameters.Add($"limit={limit.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+        }
+
+        if (from_start)
+        {
+            parameters.Add("fromStart=true");
+        }
+
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.GetAsync($"/api/items/changes{(parameters.Count == 0 ? string.Empty : "?" + string.Join('&', parameters))}");
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<WorkItemChangePageDto>(JsonOptions)
+            ?? throw new InvalidOperationException("The Kanban API returned no page of the change feed.");
+    }
+
     [McpServerTool, Description("Create a story, issue, or task in a project backlog. Pass epicId to attach it to a specific epic backlog.")]
     public async Task<WorkItemDto?> CreateWorkItem(
         [Description("Project id")] Guid projectId,

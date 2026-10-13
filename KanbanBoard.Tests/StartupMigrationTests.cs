@@ -3,6 +3,7 @@ using System.Data.Common;
 using System.Text.RegularExpressions;
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
+using KanbanBoard.Api.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -251,7 +252,47 @@ public sealed class StartupMigrationTests
         private object? Scalar(DbCommand command) =>
             command.CommandText.Contains("GET_LOCK('__EFMigrationsLock'", StringComparison.Ordinal) ? lockResult : null;
 
-        private DbDataReader Rows(DbCommand command) => rows?.Invoke(command)?.CreateDataReader() ?? EmptyHistory();
+        /// <summary>
+        /// The named locks the commands took and released and the commits between them, in order: "GET name",
+        /// "COMMIT" and "RELEASE name". With this fake every SaveChanges commits as well, which it does not inside a
+        /// transaction on a real server: only the place of the last commit says something.
+        /// </summary>
+        public List<string> Locks { get; } = [];
+
+        private DbDataReader Rows(DbCommand command)
+        {
+            var text = command.CommandText;
+            var isGet = text.Contains("GET_LOCK(", StringComparison.Ordinal);
+            if ((isGet || text.Contains("RELEASE_LOCK(", StringComparison.Ordinal)) && command.Parameters.Count > 0)
+            {
+                Locks.Add($"{(isGet ? "GET" : "RELEASE")} {command.Parameters[0].Value}");
+            }
+
+            // The entry of the change feed that ends every logged write gets a sequence, whatever the test answers
+            // to other inserts.
+            var answer = text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal)
+                ? Single("Sequence", 1L)
+                : rows?.Invoke(command) ?? ChangeLogAnswer(command);
+            return answer?.CreateDataReader() ?? EmptyHistory();
+        }
+
+        // What a logged write asks before that insert, answered when the test's own rows do not: the item's project
+        // is found and the change log lock is free.
+        private static DataTable? ChangeLogAnswer(DbCommand command)
+        {
+            var text = command.CommandText;
+            return text.StartsWith("SELECT `w`.`ProjectId`", StringComparison.Ordinal) ? Single("ProjectId", ChangeLogProjectId.ToString())
+                : command.Parameters.Count > 0 && Equals(command.Parameters[0].Value, WorkItemChangeLog.LockName) ? Single("Value", 1L)
+                : null;
+        }
+
+        private static DataTable Single(string name, object value)
+        {
+            var table = new DataTable();
+            table.Columns.Add(name, value.GetType());
+            table.Rows.Add(value);
+            return table;
+        }
 
         private static DbDataReader EmptyHistory()
         {
@@ -332,12 +373,18 @@ public sealed class StartupMigrationTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection)));
 
-        public InterceptionResult TransactionCommitting(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result) =>
-            InterceptionResult.Suppress();
+        public InterceptionResult TransactionCommitting(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result)
+        {
+            Locks.Add("COMMIT");
+            return InterceptionResult.Suppress();
+        }
 
         public ValueTask<InterceptionResult> TransactionCommittingAsync(
-            DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(InterceptionResult.Suppress());
+            DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default)
+        {
+            Locks.Add("COMMIT");
+            return ValueTask.FromResult(InterceptionResult.Suppress());
+        }
 
         public InterceptionResult TransactionRollingBack(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result) =>
             InterceptionResult.Suppress();
@@ -345,6 +392,45 @@ public sealed class StartupMigrationTests
         public ValueTask<InterceptionResult> TransactionRollingBackAsync(
             DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default) =>
             ValueTask.FromResult(InterceptionResult.Suppress());
+    }
+
+    /// <summary>The project FakeDatabase reports for an item when a logged write asks for it.</summary>
+    internal static readonly Guid ChangeLogProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+
+    /// <summary>
+    /// Checks that <paramref name="texts"/> (MySQL commands) end with the statements that record one entry of the
+    /// change feed, in the order that makes the feed safe to follow: the named lock, the INSERT, and the release
+    /// only after it. Returns the commands before them.
+    /// </summary>
+    internal static List<string> WithoutChangeLogEntry(List<string> texts, bool readsProject = true)
+    {
+        var tail = readsProject ? 4 : 3;
+        Assert.True(texts.Count >= tail, string.Join("\n---\n", texts));
+        var last = texts.TakeLast(tail).ToList();
+        if (readsProject)
+        {
+            Assert.StartsWith("SELECT `w`.`ProjectId`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", last[0].ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        }
+
+        Assert.Contains("GET_LOCK(", last[^3], StringComparison.Ordinal);
+        Assert.StartsWith(
+            "INSERT INTO `WorkItemChanges` (`ActorName`, `ActorUserId`, `Changes`, `CreatedAtUtc`, `Kind`, `ProjectId`, `WorkItemId`)",
+            last[^2], StringComparison.Ordinal);
+        Assert.Contains("RELEASE_LOCK(", last[^1], StringComparison.Ordinal);
+        return texts.SkipLast(tail).ToList();
+    }
+
+    /// <summary>
+    /// Checks that the change log lock was taken, that the transaction was committed while it was held, and that
+    /// nothing was committed after it was released. Returns the locks without the commits.
+    /// </summary>
+    internal static List<string> LocksAroundTheCommit(FakeDatabase database)
+    {
+        var locks = database.Locks;
+        var taken = locks.IndexOf($"GET {WorkItemChangeLog.LockName}");
+        var released = locks.IndexOf($"RELEASE {WorkItemChangeLog.LockName}");
+        Assert.True(taken >= 0 && released == locks.LastIndexOf("COMMIT") + 1 && locks[taken..released].Contains("COMMIT"), string.Join(", ", locks));
+        return locks.Where(entry => entry != "COMMIT").ToList();
     }
 
     internal static string FindRepoFile(string relativePath)

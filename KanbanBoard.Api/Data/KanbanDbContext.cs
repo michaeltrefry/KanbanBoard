@@ -14,6 +14,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
     public DbSet<WorkItemDependency> WorkItemDependencies => Set<WorkItemDependency>();
     public DbSet<WorkItemLink> WorkItemLinks => Set<WorkItemLink>();
+    public DbSet<WorkItemChange> WorkItemChanges => Set<WorkItemChange>();
     public DbSet<AppUser> AppUsers => Set<AppUser>();
     public DbSet<PersonalAccessToken> PersonalAccessTokens => Set<PersonalAccessToken>();
 
@@ -153,6 +154,22 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
                 .WithMany()
                 .HasForeignKey(link => link.WorkItemId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<WorkItemChange>(entity =>
+        {
+            entity.HasKey(change => change.Sequence);
+            entity.Property(change => change.Sequence).ValueGeneratedOnAdd();
+            // No foreign keys: an entry stays readable after its item or its project is deleted.
+            entity.Property(change => change.WorkItemId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(change => change.ProjectId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(change => change.Kind).HasMaxLength(32).IsRequired();
+            entity.Property(change => change.ActorUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
+            entity.Property(change => change.ActorName).HasMaxLength(WorkItemClaimLimits.MaxClaimantNameLength);
+            entity.Property(change => change.Changes).IsRequired();
+            entity.Property(change => change.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
+            // The feed of one project, in feed order.
+            entity.HasIndex(change => new { change.ProjectId, change.Sequence });
         });
 
         modelBuilder.Entity<AppUser>(entity =>

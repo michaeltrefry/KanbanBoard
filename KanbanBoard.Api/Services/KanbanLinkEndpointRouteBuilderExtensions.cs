@@ -15,6 +15,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
         endpoints.MapPost("/api/items/{itemId:guid}/links", async (
             Guid itemId,
             AddWorkItemLinkRequest request,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
@@ -35,7 +36,8 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
 
             return await RespondAsync(
                 itemId,
-                await WorkItemLinks.AddAsync(dbContext, itemId, kind, url, timeProvider.GetUtcNow(), cancellationToken),
+                await WorkItemLinks.AddAsync(
+                    dbContext, itemId, kind, url, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
                 dbContext, changeNotifier, timeProvider, cancellationToken);
         })
         .WithName("AddWorkItemLink");
@@ -46,6 +48,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
             Guid? linkId,
             string? kind,
             string? url,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
@@ -70,7 +73,9 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
 
             return await RespondAsync(
                 itemId,
-                await WorkItemLinks.RemoveAsync(dbContext, itemId, linkId, normalizedKind, linkId is null ? normalizedUrl : null, timeProvider.GetUtcNow(), cancellationToken),
+                await WorkItemLinks.RemoveAsync(
+                    dbContext, itemId, linkId, normalizedKind, linkId is null ? normalizedUrl : null,
+                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
                 dbContext, changeNotifier, timeProvider, cancellationToken);
         })
         .WithName("RemoveWorkItemLink");

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace KanbanBoard.Shared.Contracts;
@@ -164,6 +165,37 @@ public sealed record WorkItemDto(
 public sealed record WorkItemPageDto(
     [property: JsonPropertyName("items")] IReadOnlyList<WorkItemDto> Items,
     [property: JsonPropertyName("next_cursor")] string? NextCursor);
+
+/// <summary>Who made a change: the user behind the token or the browser session that wrote it.</summary>
+public sealed record WorkItemChangeActorDto(
+    [property: JsonPropertyName("id")] Guid? Id,
+    [property: JsonPropertyName("name")] string? Name);
+
+/// <summary>
+/// One entry of the change feed: one change to one work item. Entries are never changed or removed, and they stay
+/// after their item is deleted.
+/// </summary>
+/// <param name="Sequence">The position in the feed: every later entry has a higher one. Sequences may skip numbers.</param>
+/// <param name="Kind">One of <see cref="WorkItemChangeKinds"/>.</param>
+/// <param name="Actor">Null when the write carried neither a token nor a browser session.</param>
+/// <param name="Changes">A JSON array of <c>{"field", "old", "new"}</c>, one per field the write changed.</param>
+public sealed record WorkItemChangeDto(
+    [property: JsonPropertyName("sequence")] long Sequence,
+    [property: JsonPropertyName("item_id")] Guid ItemId,
+    [property: JsonPropertyName("project_id")] Guid ProjectId,
+    [property: JsonPropertyName("kind")] string Kind,
+    [property: JsonPropertyName("actor")] WorkItemChangeActorDto? Actor,
+    [property: JsonPropertyName("changes")] JsonElement Changes,
+    [property: JsonPropertyName("created_at_utc")] DateTimeOffset CreatedAtUtc);
+
+/// <summary>
+/// The entries of the change feed after a cursor, oldest first. Unlike the other pages, <see cref="NextCursor"/> is
+/// always set: it is the position after the last entry returned, or the position that was asked for when there was
+/// none, so a poller passes it to its next call whatever came back.
+/// </summary>
+public sealed record WorkItemChangePageDto(
+    [property: JsonPropertyName("items")] IReadOnlyList<WorkItemChangeDto> Items,
+    [property: JsonPropertyName("next_cursor")] string NextCursor);
 
 public sealed record WorkItemDependencyRefDto(
     Guid Id,
