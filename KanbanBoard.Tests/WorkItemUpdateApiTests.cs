@@ -601,6 +601,31 @@ public sealed class WorkItemUpdateApiTests
         Assert.Equal([WorkItemChangeKinds.ItemUpdated], Entries(api).Skip(entriesBefore));
     }
 
+    // The save of an update that names an epic reads the epic's row while it holds the item's; the archive of the
+    // epic holds the epic's row and then takes the items. Behind the project's row the two run one after the other.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_update_that_names_an_epic_holds_the_project_first_and_one_that_names_neither_epic_nor_status_does_not(bool set)
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "HOLD");
+        var item = await CreateAsync(client, project, new { title = "Item", type = "Task", status = "Backlog", priority = "Medium", epicId = set ? (Guid?)null : epic });
+        api.Commands.Clear();
+
+        var updated = await PatchAsync(client, item.Id, new { epicId = set ? (Guid?)epic : null });
+        var writes = Writes(api);
+        api.Commands.Clear();
+        await PatchAsync(client, item.Id, new { title = "Renamed" });
+
+        Assert.Equal((set ? epic : null, 2L), (updated.EpicId, updated.Version));
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"WorkItems\" AS \"w\"", writes[1], StringComparison.Ordinal);
+        Assert.Equal(4, writes.Count);
+        Assert.DoesNotContain(Writes(api), write => write.StartsWith("UPDATE \"Projects\"", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_new_status_puts_the_item_at_the_end_of_that_column_and_the_same_status_leaves_its_place()
     {
