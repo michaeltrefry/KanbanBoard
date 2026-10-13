@@ -427,7 +427,7 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
 
     // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
     // Taking them out holds the rows of several items at once, which can deadlock with other writers.
-    await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         // The project's row, the epic's, then the items, as when the epic is archived.
@@ -435,10 +435,26 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
         await Epics.LockAsync(dbContext, epicId, cancellationToken);
         var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, actor, timeProvider.GetUtcNow(), cancellationToken);
         dbContext.Epics.Remove(epic);
-        await dbContext.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // The epic was deleted, alone or with its project, after it was read: there is nothing to delete.
+            // Leaving the transaction uncommitted takes back what was done to its items.
+            dbContext.ChangeTracker.Clear();
+            return false;
+        }
+
         await WorkItemChangeLog.CommitAsync(dbContext, transaction, detached, cancellationToken);
         return true;
     });
+    if (!deleted)
+    {
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
+    }
+
     changeNotifier.Publish();
     return Results.NoContent();
 })
@@ -497,7 +513,16 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
     document.Body = request.Body;
     document.UpdatedAtUtc = DateTimeOffset.UtcNow;
 
-    await dbContext.SaveChangesAsync(cancellationToken);
+    try
+    {
+        await dbContext.SaveChangesAsync(cancellationToken);
+    }
+    catch (DbUpdateConcurrencyException)
+    {
+        // The document was deleted, with its epic, after it was read: the save matched no row, and nothing was written.
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic document {documentId} was not found.");
+    }
+
     changeNotifier.Publish();
     return Results.Ok(ToEpicDocumentDto(document));
 })
