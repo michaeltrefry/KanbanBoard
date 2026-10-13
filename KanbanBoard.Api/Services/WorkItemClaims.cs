@@ -148,7 +148,8 @@ public static class WorkItemClaims
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
-        var before = await LoadAsync(dbContext, itemId, cancellationToken);
+        // The item alone: its claim is all that is needed of it, here and for a refusal.
+        var before = await dbContext.WorkItems.AsNoTracking().FirstOrDefaultAsync(item => item.Id == itemId, cancellationToken);
         if (before is null)
         {
             return new(WorkItemClaimOutcome.NotFound, null);

@@ -76,9 +76,12 @@ public static class WorkItemChangeLog
     /// <summary>The kind of a cursor of <c>GET /api/items/changes</c> (see <see cref="WorkItemCursor"/> for the others).</summary>
     public const string CursorKind = "h";
 
+    // The JSON is stored, not put into a page: text is kept as it is rather than escaped character by character,
+    // which would make a comment in a non-Latin script six times its size.
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
-        Converters = { new JsonStringEnumConverter() }
+        Converters = { new JsonStringEnumConverter() },
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
     /// <summary>The fields of an item that an update, a move, a create or a delete can change, as the feed names them.</summary>
@@ -142,7 +145,7 @@ public static class WorkItemChangeLog
             Kind = kind,
             ActorUserId = actor?.Id,
             ActorName = actor?.Name,
-            Changes = changes.ToJsonString(),
+            Changes = changes.ToJsonString(JsonOptions),
             // The precision MariaDB stores.
             CreatedAtUtc = now.AddTicks(-(now.Ticks % TimeSpan.TicksPerMicrosecond))
         };

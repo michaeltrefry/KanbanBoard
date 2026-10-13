@@ -34,6 +34,11 @@ public sealed class WorkItemDependencyMySqlTests
         // MariaDB has no DELETE FROM `t` AS `alias`, which is what ExecuteDelete produces.
         Assert.DoesNotContain("DELETE FROM `WorkItemDependencies` AS", delete, StringComparison.Ordinal);
         Assert.StartsWith("DELETE FROM `WorkItemDependencies`\nWHERE `BlockedItemId` = @", delete.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        // The blocked item's row is held before anything is read, so two removes of one edge run one after the other.
+        Assert.Equal(
+            "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId",
+            database.Commands[0].Text.ReplaceLineEndings("\n").TrimEnd());
+        WithoutChangeLogEntry(database.Commands.Select(command => command.Text).ToList());
     }
 
     [Fact]
@@ -66,6 +71,11 @@ public sealed class WorkItemDependencyMySqlTests
         var insert = Assert.Single(Indexes(texts, "INSERT INTO `WorkItemDependencies`"));
         Assert.Equal(0, getLock);
         Assert.True(getLock < insert, string.Join("\n---\n", all));
+        // Both items are held, in one statement, before anything is read and before the INSERT locks them for its
+        // foreign keys: a move renumbering the two items at the same time then waits instead of deadlocking.
+        Assert.Equal(
+            "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE (`w`.`Id` = @blockedItemId) OR (`w`.`Id` = @blockerItemId)",
+            texts[1].ReplaceLineEndings("\n").TrimEnd());
         Assert.Equal(
             [
                 $"GET {WorkItemDependencies.LockName}", $"GET {WorkItemChangeLog.LockName}",

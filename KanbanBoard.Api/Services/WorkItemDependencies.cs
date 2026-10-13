@@ -59,6 +59,14 @@ public static class WorkItemDependencies
         Guid blockerItemId,
         CancellationToken cancellationToken)
     {
+        // Must be the first statement of the transaction. It changes nothing and holds the rows of both items, in
+        // the order of their keys. Without it the INSERT below takes a shared lock on each of the two rows for its
+        // foreign keys, one after the other, and deadlocks on MariaDB (error 1213) with a move that is renumbering
+        // the same two items in the other order.
+        await dbContext.WorkItems
+            .Where(item => item.Id == blockedItemId || item.Id == blockerItemId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
+
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
             return (WorkItemDependencyOutcome.NotFound, false);
@@ -111,7 +119,10 @@ public static class WorkItemDependencies
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        // The blocked item's row is held first, like every write that records an entry for an item: the removes of
+        // one edge then run one at a time, and the second one reads the edge only after the first has committed.
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemChangeLog.LockItemAsync(dbContext, blockedItemId, cancellationToken);
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
             return WorkItemDependencyOutcome.NotFound;

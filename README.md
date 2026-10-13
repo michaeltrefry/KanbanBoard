@@ -265,7 +265,7 @@ Work item reads embed the same records in `comments`, oldest first. `id` is a GU
 - **Entries outlive their item.** Deleting a work item, or its project, leaves its entries in the feed, ending with `item_deleted`; `get_work_item` for `item_id` is then refused `not_found`.
 - **Not in the feed:** changes to a project or an epic themselves (create, rename, archive, delete; only their effect on work items is), epic documents, and tokens. Writes made before this feature existed have no entries.
 - **Retention:** entries are never pruned. The feed grows by one row per write; there is no tool or job that removes entries.
-- **Cost:** to keep the order above, the API records entries one at a time: every write to a work item ends by taking one lock for the `INSERT` of its entry and its `COMMIT` (see [docs/mariadb-schema.md](docs/mariadb-schema.md)). Writes to different items, which used to commit side by side, now commit one after the other. A write that waited 10 s for that lock is refused `busy` and changes nothing.
+- **Cost:** to keep the order above, the API records entries one at a time: every write to a work item ends by taking one lock for the `INSERT` of its entry and its `COMMIT` (see [docs/mariadb-schema.md](docs/mariadb-schema.md)). Writes to different items, which used to commit side by side, now commit one after the other: with many writers at once the API as a whole completes roughly half as many writes per second as before (about 250 against a local MariaDB). A write that waited 10 s for that lock is refused `busy` and changes nothing.
 - `list_changes` is a read tool: a `read` token can call it.
 
 ### Tool errors

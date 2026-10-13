@@ -60,13 +60,15 @@ public sealed class WorkItemChangeFeedMySqlTests
         await using var transaction = await dbContext.Database.BeginTransactionAsync();
         var entry = WorkItemChangeLog.Entry(
             ItemId, ProjectId, WorkItemChangeKinds.ItemUpdated, new ChangeActor(ProjectId, "Factory"), Now,
-            new Dictionary<string, object?> { ["status"] = WorkItemStatus.Backlog, ["estimate"] = null, ["title"] = "Same" },
-            new Dictionary<string, object?> { ["status"] = WorkItemStatus.Done, ["estimate"] = 3, ["title"] = "Same" });
+            new Dictionary<string, object?> { ["status"] = WorkItemStatus.Backlog, ["estimate"] = null, ["title"] = "Same", ["description"] = null, ["at"] = null },
+            new Dictionary<string, object?> { ["status"] = WorkItemStatus.Done, ["estimate"] = 3, ["title"] = "Same", ["description"] = "\"é\" + <日本>", ["at"] = Now });
 
         await WorkItemChangeLog.CommitAsync(dbContext, transaction, entry, CancellationToken.None);
 
-        // A field that kept its value is not listed.
-        Assert.Equal("""[{"field":"status","old":"Backlog","new":"Done"},{"field":"estimate","old":null,"new":3}]""", entry.Changes);
+        // A field that kept its value is not listed, and text is stored as it is: only what JSON requires is escaped.
+        Assert.Equal(
+            """[{"field":"status","old":"Backlog","new":"Done"},{"field":"estimate","old":null,"new":3},{"field":"description","old":null,"new":"\"é\" + <日本>"},{"field":"at","old":null,"new":"2026-10-12T12:00:00+00:00"}]""",
+            entry.Changes);
         Assert.Equal(1L, entry.Sequence);
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.Empty(WithoutChangeLogEntry(texts, readsProject: false));

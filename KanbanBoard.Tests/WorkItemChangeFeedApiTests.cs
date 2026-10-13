@@ -218,7 +218,7 @@ public sealed class WorkItemChangeFeedApiTests
             Assert.Equal(
                 ["item_created", "comment_added", "comment_added", "comment_added", "comment_added"],
                 entries.Select(entry => entry.Kind).ToArray());
-            Assert.Equal(["note 0", "note 1", "note 2", "note 3"], entries.Skip(1).Select(entry => entry.Changes[0].GetProperty("new").GetProperty("body").GetString()).ToArray());
+            Assert.Equal(["note 0", "note 1", "note 2", "note 3"], entries.Skip(1).Select(entry => entry.Changes[0].GetProperty("new").GetProperty("body").GetString()!).ToArray());
             Assert.Equal(Raw(page), Raw(again));
             // Pages follow each other without a gap or a repeat, and the last cursor is the place to wait at.
             Assert.Equal(Sequences(entries), Sequences(firstTwo.Items.Concat(rest.Items).Concat(end.Items)));
@@ -426,7 +426,7 @@ public sealed class WorkItemChangeFeedApiTests
 
         var entries = (await ReadAsync(client, head)).Items;
         Assert.Equal(["claimed", "claimed", "claimed"], entries.Select(entry => entry.Kind).ToArray());
-        Assert.Equal([factory, factory, otherActor], entries.Select(entry => entry.Actor).ToArray());
+        Assert.Equal([factory, factory, otherActor], entries.Select(entry => entry.Actor!).ToArray());
         Assert.Equal($"claim_expires_at_utc: {Iso(first.ClaimExpiresAtUtc)} > {Iso(repeated.ClaimExpiresAtUtc)}", Describe(entries[1]));
         Assert.Equal(
             $"claimant_id: {factory.Id} > {otherActor.Id}; claimant: Factory > Other; claim_marker: run-1 > run-2; claim_expires_at_utc: {Iso(repeated.ClaimExpiresAtUtc)} > {Iso(takenOver.ClaimExpiresAtUtc)}",
