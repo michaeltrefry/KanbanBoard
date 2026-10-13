@@ -74,6 +74,10 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("longtext");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<bool>("IsArchived")
                         .HasColumnType("tinyint(1)");
 
@@ -91,6 +95,9 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasColumnType("datetime(6)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("ProjectId", "Name");
 
@@ -116,6 +123,10 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasMaxLength(36)
                         .HasColumnType("varchar(36)");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -128,7 +139,38 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.HasIndex("EpicId", "CreatedAtUtc");
 
+                    b.HasIndex("EpicId", "IdempotencyKeyHash")
+                        .IsUnique();
+
                     b.ToTable("EpicDocuments");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.EpicPlanImport", b =>
+                {
+                    b.Property<string>("EpicId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.HasKey("EpicId");
+
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
+
+                    b.ToTable("EpicPlanImports");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.PersonalAccessToken", b =>
@@ -279,6 +321,10 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<int?>("Estimate")
                         .HasColumnType("int");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<string>("Labels")
                         .HasMaxLength(4000)
                         .HasColumnType("varchar(4000)");
@@ -316,6 +362,9 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.HasKey("Id");
 
                     b.HasIndex("EpicId");
+
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("ProjectId", "Status", "Order");
 
@@ -480,6 +529,17 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.HasOne("KanbanBoard.Api.Models.Epic", "Epic")
                         .WithMany("Documents")
                         .HasForeignKey("EpicId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Epic");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.EpicPlanImport", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.Epic", "Epic")
+                        .WithOne()
+                        .HasForeignKey("KanbanBoard.Api.Models.EpicPlanImport", "EpicId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 

@@ -32,6 +32,133 @@ public sealed record WorkItemWriteResult(WorkItemWriteOutcome Outcome, WorkItem?
 /// </summary>
 public static class WorkItemWrites
 {
+    // The unique index on the idempotency key, as the server names it in error 1062.
+    public const string IdempotencyIndexName = "IX_WorkItems_ProjectId_IdempotencyKeyHash";
+
+    public const string EpicRefusal = "Epic must belong to the same project as the work item and be active.";
+
+    /// <summary>
+    /// A new item with its fields as they are stored, or why they are refused. Its place in its column is not set:
+    /// <see cref="CreateAsync"/> and the import of an epic plan give it one. Every way of creating an item goes
+    /// through here, so they all apply the same rules.
+    /// </summary>
+    public static bool TryNew(
+        Guid projectId,
+        Guid? epicId,
+        string? title,
+        string? description,
+        WorkItemType type,
+        WorkItemStatus status,
+        WorkItemPriority priority,
+        int? estimate,
+        string? labels,
+        IReadOnlyList<string>? labelList,
+        out WorkItem item,
+        out string error)
+    {
+        var normalizedTitle = title?.Trim() ?? string.Empty;
+        item = new WorkItem
+        {
+            ProjectId = projectId,
+            EpicId = epicId,
+            Title = normalizedTitle,
+            Description = description?.Trim(),
+            Type = type,
+            Status = status,
+            Priority = priority,
+            Estimate = estimate,
+            UpdatedAtUtc = DateTimeOffset.UtcNow
+        };
+        if (normalizedTitle.Length == 0)
+        {
+            error = "Field 'title' is required.";
+            return false;
+        }
+
+        if (normalizedTitle.Length > WorkItemLimits.MaxTitleLength)
+        {
+            error = $"Argument 'title' must be at most {WorkItemLimits.MaxTitleLength} characters.";
+            return false;
+        }
+
+        if (!TryNormalizeLabels(labels, labelList, out var stored, out error))
+        {
+            return false;
+        }
+
+        item.Labels = stored;
+        return true;
+    }
+
+    /// <summary>
+    /// Stores a new item at the end of its column and records it in the change feed. With an
+    /// <paramref name="idempotencyKeyHash"/> that already belongs to an item of the project, nothing is written, no
+    /// entry is recorded and that item is reported, whatever its fields.
+    /// </summary>
+    public static async Task<KeyedCreateResult> CreateAsync(
+        KanbanDbContext dbContext,
+        WorkItem item,
+        string? idempotencyKeyHash,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        async Task<KeyedCreateResult> InsertAsync(Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction)
+        {
+            dbContext.WorkItems.Add(item);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await WorkItemChangeLog.CommitAsync(
+                dbContext,
+                transaction,
+                WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemCreated, actor, now, null, WorkItemChangeLog.Snapshot(item)),
+                cancellationToken);
+            return new(KeyedCreateOutcome.Created, item.Id);
+        }
+
+        Task<bool> EpicIsUsableAsync() =>
+            dbContext.Epics.AnyAsync(epic => epic.Id == item.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived, cancellationToken);
+
+        if (idempotencyKeyHash is null)
+        {
+            if (!await dbContext.Projects.AnyAsync(project => project.Id == item.ProjectId, cancellationToken))
+            {
+                return new(KeyedCreateOutcome.NotFound);
+            }
+
+            if (item.EpicId is not null && !await EpicIsUsableAsync())
+            {
+                return new(KeyedCreateOutcome.Invalid, Message: EpicRefusal);
+            }
+
+            item.Order = await NextOrderAsync(dbContext, item.ProjectId, item.Status, cancellationToken);
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            return await InsertAsync(transaction);
+        }
+
+        item.IdempotencyKeyHash = idempotencyKeyHash;
+        return await IdempotencyKeys.CreateOnceAsync(
+            dbContext,
+            () => Projects.LockAsync(dbContext, item.ProjectId, cancellationToken),
+            async () => (await dbContext.WorkItems
+                .AsNoTracking()
+                .Where(candidate => candidate.ProjectId == item.ProjectId && candidate.IdempotencyKeyHash == idempotencyKeyHash)
+                .Select(candidate => new { candidate.Id })
+                .FirstOrDefaultAsync(cancellationToken))?.Id,
+            async transaction =>
+            {
+                // After the look-up of the key: a repeat is not refused because its epic has been archived since.
+                if (item.EpicId is not null && !await EpicIsUsableAsync())
+                {
+                    return new(KeyedCreateOutcome.Invalid, Message: EpicRefusal);
+                }
+
+                item.Order = await NextOrderAsync(dbContext, item.ProjectId, item.Status, cancellationToken);
+                return await InsertAsync(transaction);
+            },
+            IdempotencyIndexName,
+            cancellationToken);
+    }
+
     /// <summary>
     /// Writes the set fields of <paramref name="patch"/> to the item, or writes nothing and says why. With an
     /// expected version, the first statement is one conditional UPDATE, so the database decides between concurrent
@@ -88,7 +215,7 @@ public static class WorkItemWrites
             !await dbContext.Epics.AnyAsync(epic => epic.Id == patch.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived, cancellationToken))
         {
             // Leaving the transaction uncommitted takes the version and the stamp back.
-            return Invalid("Epic must belong to the same project as the work item and be active.");
+            return Invalid(EpicRefusal);
         }
 
         if (patch.HasEpicId)

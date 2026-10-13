@@ -75,6 +75,7 @@ The MCP service exposes tools for:
 - Creating projects, and updating them (target repository, rename, archive)
 - Fetching a board
 - Listing, creating, updating, and retrieving epics
+- Importing an epic plan: an epic, its documents, its work items and their dependencies in one call
 - Deleting epics
 - Listing, creating, updating, and retrieving epic documents
 - Fetching issue items
@@ -120,9 +121,57 @@ A project says where its work is done. `list_projects(includeArchived?)` returns
 - **`default_branch`** is a branch name of at most 255 characters that git accepts: no whitespace or control character, none of `~ ^ : ? * [ \`, no `..`, `@{` or `//`, not starting with `/` or `-`, not ending with `/` or `.`, no part between slashes starting with `.` or ending with `.lock` (`.hidden`, `a/.b`, `a.lock/b`, `main.lock`), and not `@` alone. Anything else is refused `invalid_argument`. Whether the branch exists in the repository is not checked.
 - **Rename and key.** `name` (at most 160 characters) renames; several projects may share a name. `key` (at most 24 characters, stored in upper case) is unique: a key another project has is refused `conflict`, by `create_project` as well, and nothing is changed.
 - **Archive.** `is_archived: true` archives a project and `is_archived: false` restores it, exactly as the checkbox in the web UI does. An archived project is left out of `list_projects` unless `includeArchived` is `true`; nothing else changes: `get_board` and the work item tools still answer for it, and its items, epics and target are kept.
-- **`idempotency_key` makes `create_project` safe to repeat.** It follows the rules of a [comment](#comments) key: 1 to 128 printable ASCII characters without spaces, compared exactly, anything else refused `invalid_argument`. A key belongs to the calling identity (a project has no parent, so nothing else scopes it; callers without a token share one identity). When that identity already used the key, nothing is created, no board-change event is sent, and the answer is the project the key created, as it is now, with `created: false`; the other arguments are not compared, so a repeat with another name or key still returns the first project. Two calls with one key at the same moment create one project and both report its id. A keyed create that waits 10 s for other keyed creates is refused `busy`, with nothing created, and can be retried. Deleting the project frees its key. Without a key every call creates a project (`created: true`).
+- **`idempotency_key` makes `create_project` safe to repeat** (see [Idempotent creates](#idempotent-creates) for the other create tools). It follows the rules of a [comment](#comments) key: 1 to 128 printable ASCII characters without spaces, compared exactly, anything else refused `invalid_argument`. A key belongs to the calling identity (a project has no parent, so nothing else scopes it; callers without a token share one identity). When that identity already used the key, nothing is created, no board-change event is sent, and the answer is the project the key created, as it is now, with `created: false`; the other arguments are not compared, so a repeat with another name or key still returns the first project. Two calls with one key at the same moment create one project and both report its id. A keyed create that waits 10 s for other keyed creates is refused `busy`, with nothing created, and can be retried. Deleting the project frees its key. Without a key every call creates a project (`created: true`).
 - An unknown `id` is refused `not_found` by `update_project`. An update that changes nothing sends no board-change event.
 - `create_project` and `update_project` are write tools: a `read` token is refused `scope_denied` before the API is called. `list_projects` is a read tool and answers a call with the arguments it always had.
+
+### Importing an epic plan
+
+`import_epic_plan(project_id, epic, items, idempotency_key, documents?)` turns a plan into a board in one call: one epic in the project, the plan's documents as documents of that epic, its items as work items of that epic, and the dependencies its items name. Everything is stored in one transaction, so a plan is on the board whole or not at all.
+
+```json
+{
+  "project_id": "22222222-2222-2222-2222-222222222222",
+  "idempotency_key": "plan-2026-10-13-checkout",
+  "epic": { "name": "Checkout", "description": "optional" },
+  "documents": [{ "title": "Requirements", "body": "..." }],
+  "items": [
+    { "ref": "A", "title": "Schema", "status": "Ready" },
+    { "ref": "B", "title": "API", "status": "Ready", "type": "Task", "priority": "High", "estimate": 3, "label_list": ["api"], "blocked_by": ["A"] },
+    { "ref": "C", "title": "UI", "status": "Ready", "description": "...", "blocked_by": ["B"] }
+  ]
+}
+```
+
+It returns the ids of what it created:
+
+```json
+{ "created": true, "project_id": "...", "epic_id": "...", "document_ids": ["..."], "item_ids": { "A": "...", "B": "...", "C": "..." } }
+```
+
+- **`ref` is the caller's own name for an item.** It is 1 to 64 characters, unique within the plan and compared exactly (`a` and `A` are two refs). `blocked_by` lists the refs of the items of the same plan that block the item, and `item_ids` maps every ref to the id of the work item created for it. A ref is not stored on the item.
+- **Items follow the rules of `create_work_item`**, through the same code: `title` is required and at most 240 characters; `type` is `Story`, `Issue` or `Task` (`Story` when left out), `status` any status (`Backlog` when left out, so a plan can put its items straight into `Ready`), `priority` `Low`, `Medium`, `High` or `Critical` (`Medium` when left out); `estimate` is optional; the labels come as `labels` (comma-separated) or `label_list`, not both. The names of type, status and priority are matched ignoring case. Each item is created at `version` 1 at the end of its column, in the order of the plan, and the documents and items are also listed oldest first in the order of the plan. The epic (`name`, at most 160 characters, and `description`) and the documents (`title`, at most 200 characters, and a non-empty `body`) follow the rules of `create_epic` and `create_epic_document`.
+- **Only the structure of the plan is checked**: no model reads it. A plan with an item that breaks a rule above, a `ref` used twice, a `blocked_by` that names no item of the plan, or a field that an epic, a document or an item of a plan does not have (a misspelt `blockedBy` is refused, not dropped) is refused `invalid_argument`. A dependency that would make an item block itself, directly or through other items, is refused `cycle`. An unknown `project_id` is refused `not_found`. An archived project takes an import, as it takes `create_work_item`. A refused plan leaves nothing behind: no epic, no document, no item, no dependency and no entry in the change feed. The message names the item and the fault (`Item 'B' (items[1]): blocked_by names 'Z', which is not the ref of an item of the plan.`).
+- **Limits.** A plan holds at most 200 items, 20 documents and 500 dependencies (all `blocked_by` entries together), and is at most 2 MB (2 097 152 bytes) of JSON as the MCP server sends it to the API; more is refused `invalid_argument`, and a plan over the size limit never reaches the API. An import of the largest plan takes about 150 ms against a local MariaDB; it holds the change-feed lock only for the entries and the commit, and other writes waited at most that long for it.
+- **`idempotency_key` is required** and makes the call safe to repeat; it follows the rules of every other key (1 to 128 printable ASCII characters without spaces, compared exactly). It belongs to the calling identity and the project. When that identity already used it in that project, nothing is created, no entry is added to the change feed, and the answer is the one the first import gave, with `created: false`: the same `epic_id`, `document_ids` and `item_ids`. The plan of the repeat is not compared, so a repeat with another plan still returns the first import. The answer is the stored answer of the first import, not a reading of the board: it holds the same ids after the items were moved or edited, after one was deleted (its id is still returned, and `get_work_item` then answers `not_found`), and after the epic was archived. Deleting the epic, or its project, frees the key: the next call with it imports the plan again. Imports with one key at the same moment import once, and every caller gets the same ids.
+- **Change feed.** An import writes one `item_created` entry per item, in the order of the plan, and then one `dependency_added` entry per dependency, all with the calling identity as `actor` and all committed with the import: a reader of the [change feed](#change-feed) sees all of them or none.
+- **Concurrency.** An import first takes the row of its project, so imports into one project run one after the other and each puts its items after those of the one before; creates of single items and epics in that project wait for it. When MariaDB rolls an import back as the victim of a deadlock (for example with a `delete_project` of the same project) it is run again; after three deadlocks, or after 10 s of waiting to record its entries, it is refused `busy` with nothing created, and can be repeated with the same key.
+- `import_epic_plan` is a write tool: a `read` token is refused `scope_denied` before the API is called. It is backed by `POST /api/projects/{projectId}/epic-plans`.
+
+### Idempotent creates
+
+Every create tool takes an optional `idempotency_key` (`import_epic_plan` requires one). A key is 1 to 128 printable ASCII characters without spaces, compared exactly; anything else is refused `invalid_argument`. A key belongs to the calling identity (callers without a token share one) and to the place the object is created in; only a hash of the two is stored. When the key was already used there, nothing is created and the object it created is returned as it is now, whatever the other arguments of the repeat, with a field that says so:
+
+| Tool | The key belongs to the identity and | Answer says |
+| --- | --- | --- |
+| `create_project` | nothing else | `created` |
+| `create_epic` | the project | `created` |
+| `create_epic_document` | the epic | `created` |
+| `create_work_item`, `create_epic_work_item` | the project (the two tools share their keys) | `created` |
+| `add_work_item_comment` | the work item | `comment_created` |
+| `import_epic_plan` | the project | `created` |
+
+The keys of a project's epics, of its work items and of its imports are three separate sets: the same key can create one of each. Without a key every call creates (`created: true`). A repeat sends no board-change event and adds no entry to the change feed. Two calls with one key at the same moment create one object and both report its id. Deleting the object frees its key. A keyed `create_epic`, `create_work_item` or `create_epic_work_item` first takes the row of the project, and a keyed `create_epic_document` the row of the epic, so that the look-up of the key and the insert of two calls cannot interleave; creates without a key take no such lock. `create_epic` and `create_epic_document` now also refuse a name longer than 160 characters and a title longer than 200 `invalid_argument` (MariaDB used to refuse the row instead).
 
 ### Updating and moving work items
 
@@ -280,11 +329,11 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `not_found` | The addressed entity does not exist. |
 | `already_claimed` | The work item has a live claim held by another identity or marker. |
 | `conflict` | The entity is no longer in the state the call depends on (for example: the work item no longer has the `expected_version` of an update or a move); nothing was changed. |
-| `invalid_argument` | An argument is missing or out of range. |
-| `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
-| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, `create_project` with an `idempotency_key` waited 10 s for other keyed creates, any write to a work item waited 10 s to record its entry in the [change feed](#change-feed), or `delete_project`, `update_epic` or `delete_epic` deadlocked three times with other writers); nothing was changed and the call can be retried. |
+| `invalid_argument` | An argument is missing, out of range or not of the type the tool takes (a string where a list of plan items belongs); or a plan given to `import_epic_plan` breaks a rule. |
+| `cycle` | The dependency would make a work item block itself, directly or through other items, or the dependencies of a plan given to `import_epic_plan` would; nothing was changed. |
+| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, `create_project` with an `idempotency_key` waited 10 s for other keyed creates, any write to a work item waited 10 s to record its entry in the [change feed](#change-feed), or `delete_project`, `update_epic`, `delete_epic`, `import_epic_plan` or a create with an `idempotency_key` deadlocked three times with other writers); nothing was changed and the call can be retried. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from `create_project`, `update_project`, `delete_project`, `create_epic`, `update_epic`, `delete_epic`, `create_epic_document`, `update_epic_document`, `update_work_item`, `move_work_item`, `create_work_item`, `create_epic_work_item`, `delete_work_item` and the claim, dependency, link and comment tools use this envelope. A token that was revoked or has expired is refused by the API on its next call, read or write, with `scope_denied` (a read tool that does not use the envelope reports it as a plain MCP error): the MCP server's validation cache (30 s by default) does not keep it working. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from `create_project`, `update_project`, `delete_project`, `create_epic`, `update_epic`, `delete_epic`, `create_epic_document`, `update_epic_document`, `update_work_item`, `move_work_item`, `create_work_item`, `create_epic_work_item`, `import_epic_plan`, `delete_work_item` and the claim, dependency, link and comment tools use this envelope. So does a call to any tool whose arguments cannot be read as the tool's parameters: a required argument that is missing, or a value of another JSON type or shape, is refused `invalid_argument` before the tool runs. A token that was revoked or has expired is refused by the API on its next call, read or write, with `scope_denied` (a read tool that does not use the envelope reports it as a plain MCP error): the MCP server's validation cache (30 s by default) does not keep it working. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 
@@ -325,6 +374,7 @@ The names below are the C# method names; on the wire each tool is its snake_case
 - `ListChanges`
 - `CreateWorkItem`
 - `CreateEpicWorkItem`
+- `ImportEpicPlan`
 - `UpdateWorkItem`
 - `MoveWorkItem`
 - `DeleteWorkItem`

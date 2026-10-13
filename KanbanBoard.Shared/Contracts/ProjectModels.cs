@@ -64,7 +64,12 @@ public sealed record EpicDto(
     string? Description,
     bool IsArchived,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc)
+{
+    /// <summary>Only on the answer to creating an epic: false when the idempotency key was a repeat and nothing was created.</summary>
+    [JsonPropertyName("created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Created { get; init; }
+}
 
 public sealed record EpicDocumentDto(
     Guid Id,
@@ -72,7 +77,12 @@ public sealed record EpicDocumentDto(
     string Title,
     string Body,
     DateTimeOffset CreatedAtUtc,
-    DateTimeOffset UpdatedAtUtc);
+    DateTimeOffset UpdatedAtUtc)
+{
+    /// <summary>Only on the answer to creating an epic document: false when the idempotency key was a repeat and nothing was created.</summary>
+    [JsonPropertyName("created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Created { get; init; }
+}
 
 public sealed record EpicReferenceDto(
     Guid Id,
@@ -156,6 +166,10 @@ public sealed record WorkItemDto(
     /// <summary>Only on the answer to adding a comment: false when the idempotency key was a repeat and nothing was added.</summary>
     [JsonPropertyName("comment_created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? CommentCreated { get; init; }
+
+    /// <summary>Only on the answer to creating a work item: false when the idempotency key was a repeat and nothing was created.</summary>
+    [JsonPropertyName("created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Created { get; init; }
 }
 
 /// <summary>
@@ -258,19 +272,23 @@ public sealed record UpdateProjectRequest(
     string? Description,
     bool IsArchived = false);
 
+/// <param name="IdempotencyKey">Makes the create safe to repeat: a key the caller already used in the project returns that epic.</param>
 public sealed record CreateEpicRequest(
     string Name,
     string? Description,
-    bool IsArchived = false);
+    bool IsArchived = false,
+    string? IdempotencyKey = null);
 
 public sealed record UpdateEpicRequest(
     string Name,
     string? Description,
     bool IsArchived = false);
 
+/// <param name="IdempotencyKey">Makes the create safe to repeat: a key the caller already used on the epic returns that document.</param>
 public sealed record CreateEpicDocumentRequest(
     string Title,
-    string Body);
+    string Body,
+    string? IdempotencyKey = null);
 
 public sealed record UpdateEpicDocumentRequest(
     string Title,
@@ -287,7 +305,74 @@ public sealed record CreateWorkItemRequest(
     int? Estimate,
     string? Labels,
     // The labels as a list, in place of the comma-separated Labels; passing both is refused.
-    IReadOnlyList<string>? LabelList = null);
+    IReadOnlyList<string>? LabelList = null,
+    // Makes the create safe to repeat: a key the caller already used in the project returns that item.
+    string? IdempotencyKey = null);
+
+/// <summary>The epic of a plan given to <c>import_epic_plan</c>.</summary>
+public sealed record ImportEpicPlanEpic(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("description")] string? Description = null)
+{
+    /// <summary>The fields the epic of a plan does not have. A plan that carries one is refused: a misspelt field is not silently dropped.</summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Unknown { get; init; }
+}
+
+/// <summary>A document of a plan: it becomes a document of the epic.</summary>
+public sealed record ImportEpicPlanDocument(
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("body")] string Body)
+{
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Unknown { get; init; }
+}
+
+/// <summary>
+/// A work item of a plan. <see cref="Ref"/> is the caller's own name for it, unique within the plan: the other items
+/// name it in <see cref="BlockedBy"/>, and the answer maps it to the id of the item that was created. The type, the
+/// status and the priority are the names of <see cref="WorkItemType"/>, <see cref="WorkItemStatus"/> and
+/// <see cref="WorkItemPriority"/>; left out they are Story, Backlog and Medium.
+/// </summary>
+public sealed record ImportEpicPlanItem(
+    [property: JsonPropertyName("ref")] string Ref,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("type")] string? Type = null,
+    [property: JsonPropertyName("status")] string? Status = null,
+    [property: JsonPropertyName("priority")] string? Priority = null,
+    [property: JsonPropertyName("description")] string? Description = null,
+    [property: JsonPropertyName("estimate")] int? Estimate = null,
+    [property: JsonPropertyName("labels")] string? Labels = null,
+    [property: JsonPropertyName("label_list")] IReadOnlyList<string>? LabelList = null,
+    [property: JsonPropertyName("blocked_by")] IReadOnlyList<string>? BlockedBy = null)
+{
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Unknown { get; init; }
+}
+
+/// <summary>The body of <c>POST /api/projects/{projectId}/epic-plans</c>: an epic, its documents, its items and their dependencies.</summary>
+public sealed record ImportEpicPlanRequest(
+    [property: JsonPropertyName("epic")] ImportEpicPlanEpic Epic,
+    [property: JsonPropertyName("items")] IReadOnlyList<ImportEpicPlanItem> Items,
+    [property: JsonPropertyName("idempotency_key")] string IdempotencyKey,
+    [property: JsonPropertyName("documents")] IReadOnlyList<ImportEpicPlanDocument>? Documents = null)
+{
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Unknown { get; init; }
+}
+
+/// <summary>
+/// What an import created, or what the first import with the same idempotency key created.
+/// </summary>
+/// <param name="Created">False when the idempotency key was a repeat: nothing was created and the ids are those of the first import.</param>
+/// <param name="DocumentIds">The documents, in the order of the plan.</param>
+/// <param name="ItemIds">The id of the work item created for each <c>ref</c> of the plan.</param>
+public sealed record ImportEpicPlanResultDto(
+    [property: JsonPropertyName("created")] bool Created,
+    [property: JsonPropertyName("project_id")] Guid ProjectId,
+    [property: JsonPropertyName("epic_id")] Guid EpicId,
+    [property: JsonPropertyName("document_ids")] IReadOnlyList<Guid> DocumentIds,
+    [property: JsonPropertyName("item_ids")] IReadOnlyDictionary<string, Guid> ItemIds);
 
 /// <param name="ExpectedVersion">When set, the move is refused unless the item still has this version.</param>
 public sealed record MoveWorkItemRequest(

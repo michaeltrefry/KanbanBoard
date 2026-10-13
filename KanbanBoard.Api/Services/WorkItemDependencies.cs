@@ -291,25 +291,39 @@ public static class WorkItemDependencies
         return found == (firstItemId == secondItemId ? 1 : 2);
     }
 
-    // Walks the blockers of itemId looking for candidateBlockerId. One query per visited item:
-    // MySql.EntityFrameworkCore cannot translate Contains over a list of ids.
+    // One query per visited item: MySql.EntityFrameworkCore cannot translate Contains over a list of ids.
     private static async Task<bool> IsBlockedByAsync(
         KanbanDbContext dbContext,
         Guid itemId,
         Guid candidateBlockerId,
-        CancellationToken cancellationToken)
-    {
-        var seen = new HashSet<Guid> { itemId };
-        var pending = new Stack<Guid>([itemId]);
-        while (pending.TryPop(out var current))
-        {
-            var blockers = await dbContext.WorkItemDependencies
+        CancellationToken cancellationToken) =>
+        await IsBlockedByAsync(
+            itemId,
+            candidateBlockerId,
+            async current => await dbContext.WorkItemDependencies
                 .Where(dependency => dependency.BlockedItemId == current)
                 .Select(dependency => dependency.BlockerItemId)
-                .ToListAsync(cancellationToken);
-            foreach (var blocker in blockers)
+                .ToListAsync(cancellationToken));
+
+    /// <summary>
+    /// Whether <paramref name="item"/> is blocked by <paramref name="candidateBlocker"/>, directly or through other
+    /// items: the one rule for a cycle. Making the candidate blocked by the item would then close a loop.
+    /// <paramref name="blockersOf"/> gives the items that directly block an item: the stored edges for an add, the
+    /// plan's own edges for an import, whose items are all new.
+    /// </summary>
+    public static async ValueTask<bool> IsBlockedByAsync<TItem>(
+        TItem item,
+        TItem candidateBlocker,
+        Func<TItem, ValueTask<IReadOnlyCollection<TItem>>> blockersOf)
+        where TItem : notnull
+    {
+        var seen = new HashSet<TItem> { item };
+        var pending = new Stack<TItem>([item]);
+        while (pending.TryPop(out var current))
+        {
+            foreach (var blocker in await blockersOf(current))
             {
-                if (blocker == candidateBlockerId)
+                if (EqualityComparer<TItem>.Default.Equals(blocker, candidateBlocker))
                 {
                     return true;
                 }

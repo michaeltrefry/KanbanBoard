@@ -41,11 +41,11 @@ public sealed class KanbanToolsWorkItemUpdateTests
         Assert.Equal(["expected_version", "itemId", "order", "status"], ArgumentNames(tools["move_work_item"]));
         Assert.Equal(["itemId", "status"], RequiredArguments(tools["move_work_item"]));
         Assert.Equal(
-            ["description", "epicId", "estimate", "label_list", "labels", "priority", "projectId", "status", "title", "type"],
+            ["description", "epicId", "estimate", "idempotency_key", "label_list", "labels", "priority", "projectId", "status", "title", "type"],
             ArgumentNames(tools["create_work_item"]));
         Assert.Equal(["projectId", "title", "type"], RequiredArguments(tools["create_work_item"]));
         Assert.Equal(
-            ["description", "epicId", "estimate", "label_list", "labels", "priority", "status", "title", "type"],
+            ["description", "epicId", "estimate", "idempotency_key", "label_list", "labels", "priority", "status", "title", "type"],
             ArgumentNames(tools["create_epic_work_item"]));
         Assert.Equal(["epicId", "title"], RequiredArguments(tools["create_epic_work_item"]));
         // The read tools take what they always took.

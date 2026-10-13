@@ -10,6 +10,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
     public DbSet<Project> Projects => Set<Project>();
     public DbSet<Epic> Epics => Set<Epic>();
     public DbSet<EpicDocument> EpicDocuments => Set<EpicDocument>();
+    public DbSet<EpicPlanImport> EpicPlanImports => Set<EpicPlanImport>();
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
     public DbSet<WorkItemComment> WorkItemComments => Set<WorkItemComment>();
     public DbSet<WorkItemDependency> WorkItemDependencies => Set<WorkItemDependency>();
@@ -41,10 +42,14 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasKey(epic => epic.Id);
             entity.Property(epic => epic.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
             entity.Property(epic => epic.ProjectId).HasConversion(GuidToStringConverter).HasMaxLength(36);
-            entity.Property(epic => epic.Name).HasMaxLength(160).IsRequired();
+            entity.Property(epic => epic.Name).HasMaxLength(EpicLimits.MaxNameLength).IsRequired();
+            entity.Property(epic => epic.IdempotencyKeyHash).HasMaxLength(64);
             entity.Property(epic => epic.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(epic => epic.UpdatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(epic => new { epic.ProjectId, epic.Name });
+            // One epic per project and idempotency key (the hash covers the caller's identity). Epics created
+            // without a key hold null here, and a unique index admits any number of nulls.
+            entity.HasIndex(epic => new { epic.ProjectId, epic.IdempotencyKeyHash }).IsUnique();
             entity.HasOne(epic => epic.Project)
                 .WithMany(project => project.Epics)
                 .HasForeignKey(epic => epic.ProjectId)
@@ -56,14 +61,33 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.HasKey(document => document.Id);
             entity.Property(document => document.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
             entity.Property(document => document.EpicId).HasConversion(GuidToStringConverter).HasMaxLength(36);
-            entity.Property(document => document.Title).HasMaxLength(200).IsRequired();
+            entity.Property(document => document.Title).HasMaxLength(EpicLimits.MaxDocumentTitleLength).IsRequired();
             entity.Property(document => document.Body).IsRequired();
+            entity.Property(document => document.IdempotencyKeyHash).HasMaxLength(64);
             entity.Property(document => document.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(document => document.UpdatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(document => new { document.EpicId, document.CreatedAtUtc });
+            // One document per epic and idempotency key; documents created without a key hold null.
+            entity.HasIndex(document => new { document.EpicId, document.IdempotencyKeyHash }).IsUnique();
             entity.HasOne(document => document.Epic)
                 .WithMany(epic => epic.Documents)
                 .HasForeignKey(document => document.EpicId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<EpicPlanImport>(entity =>
+        {
+            entity.HasKey(import => import.EpicId);
+            entity.Property(import => import.EpicId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(import => import.ProjectId).HasConversion(GuidToStringConverter).HasMaxLength(36);
+            entity.Property(import => import.IdempotencyKeyHash).HasMaxLength(64).IsRequired();
+            entity.Property(import => import.Result).IsRequired();
+            // One import per project and idempotency key (the hash covers the caller's identity).
+            entity.HasIndex(import => new { import.ProjectId, import.IdempotencyKeyHash }).IsUnique();
+            // The record goes with its epic, and with it the key: a repeat after the epic was deleted imports again.
+            entity.HasOne(import => import.Epic)
+                .WithOne()
+                .HasForeignKey<EpicPlanImport>(import => import.EpicId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -77,6 +101,7 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(item => item.Labels).HasMaxLength(WorkItemLimits.MaxLabelsLength);
             // Items that are older than the column start at 1, like a new item.
             entity.Property(item => item.Version).HasDefaultValue(1L);
+            entity.Property(item => item.IdempotencyKeyHash).HasMaxLength(64);
             entity.Property(item => item.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(item => item.UpdatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(item => item.ClaimantUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
@@ -91,6 +116,8 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(item => item.ClaimExpiresAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(item => new { item.ProjectId, item.Status, item.Order });
             entity.HasIndex(item => item.EpicId);
+            // One item per project and idempotency key; items created without a key hold null.
+            entity.HasIndex(item => new { item.ProjectId, item.IdempotencyKeyHash }).IsUnique();
             entity.HasOne(item => item.Project)
                 .WithMany(project => project.Items)
                 .HasForeignKey(item => item.ProjectId)
