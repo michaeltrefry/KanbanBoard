@@ -292,6 +292,26 @@ public sealed class WorkItemUpdateApiTests
         Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
     }
 
+    // The update of a status takes the same way out: its save finds a row gone, and it is run again.
+    [Fact]
+    public async Task An_update_of_the_status_whose_save_finds_a_row_deleted_is_run_again_and_recorded_once()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "UPD");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
+
+        api.SavesThatFindAnItemDeleted = 1;
+        using var response = await client.PatchAsJsonAsync($"/api/items/{a.Id}", new { status = "Ready", expectedVersion = 1 });
+        var updated = (await ItemsAsync(client))[a.Id];
+
+        Assert.Equal(0, api.SavesThatFindAnItemDeleted);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((WorkItemStatus.Ready, 2L), (updated.Status, updated.Version));
+        Assert.Equal([WorkItemChangeKinds.ItemUpdated], Entries(api).Skip(entriesBefore));
+    }
+
     private static List<string> Entries(ApiApplication api)
     {
         using var dbContext = api.OpenDatabase();
