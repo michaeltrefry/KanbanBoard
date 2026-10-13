@@ -142,6 +142,8 @@ public sealed class KanbanToolsProjectTests
         new Dictionary<string, object?> { ["clear"] = new[] { "name" } },
         new Dictionary<string, object?> { ["clear"] = new[] { "key" } },
         new Dictionary<string, object?> { ["clear"] = new[] { "is_archived" } },
+        new Dictionary<string, object?> { ["clear"] = new string?[] { null } },
+        new Dictionary<string, object?> { ["clear"] = new string?[] { "default_branch", null } },
         // Names are matched exactly.
         new Dictionary<string, object?> { ["clear"] = new[] { "Default_Branch" } },
         // Set and cleared in one call.

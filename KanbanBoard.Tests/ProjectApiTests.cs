@@ -240,6 +240,8 @@ public sealed class ProjectApiTests
     [InlineData("ssh://git.internal:2222/srv/git/app.git")]
     [InlineData("git@github.com:acme/app.git")]
     [InlineData("deploy.bot@git.internal:/srv/git/app.git")]
+    [InlineData("ssh://git@github.com/acme/-app.git")]
+    [InlineData("git@github.com:acme/-app.git")]
     public void A_repository_url_is_http_https_or_ssh(string url)
     {
         Assert.True(Projects.TryNormalizeRepositoryUrl($"  {url} ", out var normalized));
@@ -265,6 +267,11 @@ public sealed class ProjectApiTests
     [InlineData("-oProxyCommand=evil@github.com:acme/app.git")]
     [InlineData("git@github.com:")]
     [InlineData("git@github.com:acme/secret@app.git")]
+    [InlineData("ssh://user%3Apw@github.com/acme/app.git")]
+    [InlineData("ssh://user%3apw@github.com/acme/app.git")]
+    [InlineData("ssh://git@github.com/-oProxyCommand=evil")]
+    [InlineData("ssh://git@github.com/%2DoProxyCommand=evil")]
+    [InlineData("git@github.com:-oProxyCommand=evil")]
     public void A_repository_url_that_is_not_one_or_carries_credentials_is_refused(string url) =>
         Assert.False(Projects.TryNormalizeRepositoryUrl(url, out _));
 
@@ -300,6 +307,12 @@ public sealed class ProjectApiTests
     [InlineData("a//b", false)]
     [InlineData("main.", false)]
     [InlineData("main.lock", false)]
+    [InlineData(".hidden", false)]
+    [InlineData("a/.b", false)]
+    [InlineData("a.lock/b", false)]
+    [InlineData("@", false)]
+    [InlineData("a/@", true)]
+    [InlineData("a.b/c-d", true)]
     public void A_default_branch_is_a_name_git_accepts(string branch, bool valid) =>
         Assert.Equal(valid, Projects.TryNormalizeDefaultBranch(branch, out _));
 

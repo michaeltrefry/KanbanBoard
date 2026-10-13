@@ -650,10 +650,11 @@ public sealed class KanbanTools(
     {
         var cleared = clear ?? [];
         var clearable = fields.Where(field => field.Clearable).Select(field => field.Argument).ToArray();
-        if (cleared.FirstOrDefault(name => !clearable.Contains(name)) is { } unknown)
+        if (cleared.Any(name => !clearable.Contains(name)))
         {
+            var unknown = cleared.First(name => !clearable.Contains(name));
             throw KanbanToolErrors.InvalidArgument(
-                $"Argument 'clear' names '{unknown}', which cannot be emptied. It may name: {string.Join(", ", clearable)}.");
+                $"Argument 'clear' names {(unknown is null ? "null" : $"'{unknown}'")}, which cannot be emptied. It may name: {string.Join(", ", clearable)}.");
         }
 
         var body = new JsonObject();

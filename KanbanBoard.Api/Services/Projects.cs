@@ -4,6 +4,7 @@ using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using MySql.Data.MySqlClient;
 
 namespace KanbanBoard.Api.Services;
 
@@ -47,8 +48,13 @@ public static partial class Projects
     public const string CreateLockName = "kanban_project_creates";
     public const int CreateLockTimeoutSeconds = 10;
 
-    // user@host:path, the form git prints for an SSH remote. No password can be written in it.
-    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:[^@\s]+$")]
+    // ER_DUP_ENTRY, and the unique index on Projects.Key as the server names it in that error.
+    private const int DuplicateEntryError = 1062;
+    private const string KeyIndexName = "IX_Projects_Key";
+
+    // user@host:path, the form git prints for an SSH remote. No password can be written in it, and the path does
+    // not start with '-'.
+    [GeneratedRegex(@"^[A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*:(?!-)[^@\s]+$")]
     private static partial Regex ScpLikeUrl();
 
     /// <summary>
@@ -56,7 +62,9 @@ public static partial class Projects
     /// whitespace or control characters, in one of three forms: an http or https URL as a work item link takes it
     /// (<see cref="WorkItemLinks.TryNormalizeUrl"/>: absolute, no user name or password), an <c>ssh://</c> URL with
     /// a host and a path and at most a user name, or <c>user@host:path</c>. A URL that carries a password is refused
-    /// in every form: the URL is returned to every read token.
+    /// in every form: the URL is returned to every read token. So is an SSH URL whose user name holds a <c>%</c>
+    /// (git decodes an <c>ssh://</c> URL before use, so <c>%3A</c> would hide a password) and one whose path starts
+    /// with <c>-</c>, written out or as <c>%2D</c> (which <see cref="Uri"/> decodes).
     /// </summary>
     public static bool TryNormalizeRepositoryUrl(string? value, out string url)
     {
@@ -74,12 +82,14 @@ public static partial class Projects
 
         if (Uri.TryCreate(url, UriKind.Absolute, out var parsed) && parsed.Scheme == "ssh")
         {
-            // A host that starts with '-' would be read by ssh as an option.
+            // A host, user name or path that starts with '-' would be read by ssh or git as an option.
             return parsed.Host.Length > 0 &&
                 !parsed.Host.StartsWith('-') &&
                 !parsed.UserInfo.StartsWith('-') &&
                 !parsed.UserInfo.Contains(':') &&
-                parsed.AbsolutePath.Length > 1;
+                !parsed.UserInfo.Contains('%') &&
+                parsed.AbsolutePath.Length > 1 &&
+                !parsed.AbsolutePath.StartsWith("/-", StringComparison.Ordinal);
         }
 
         return ScpLikeUrl().IsMatch(url);
@@ -88,8 +98,9 @@ public static partial class Projects
     /// <summary>
     /// Accepts a branch name of at most <see cref="ProjectLimits.MaxDefaultBranchLength"/> characters that git
     /// accepts (git check-ref-format): no whitespace or control character, none of <c>~ ^ : ? * [ \</c>, no
-    /// <c>..</c>, <c>@{</c> or <c>//</c>, not starting or ending with <c>/</c>, not ending with <c>.</c> or
-    /// <c>.lock</c>. A name that starts with <c>-</c> is refused as well: a command line would read it as an option.
+    /// <c>..</c>, <c>@{</c> or <c>//</c>, not starting or ending with <c>/</c>, not ending with <c>.</c>, no part
+    /// between slashes starting with <c>.</c> or ending with <c>.lock</c>, and not <c>@</c> alone. A name that
+    /// starts with <c>-</c> is refused as well: a command line would read it as an option.
     /// </summary>
     public static bool TryNormalizeDefaultBranch(string? value, out string branch)
     {
@@ -100,7 +111,8 @@ public static partial class Projects
             !branch.StartsWith('/') &&
             !branch.EndsWith('/') &&
             !branch.EndsWith('.') &&
-            !branch.EndsWith(".lock", StringComparison.Ordinal) &&
+            branch != "@" &&
+            !branch.Split('/').Any(part => part.StartsWith('.') || part.EndsWith(".lock", StringComparison.Ordinal)) &&
             !branch.Contains("..", StringComparison.Ordinal) &&
             !branch.Contains("@{", StringComparison.Ordinal) &&
             !branch.Contains("//", StringComparison.Ordinal);
@@ -184,14 +196,16 @@ public static partial class Projects
         if (patch.RepositoryUrl is { IsSet: true, Value: not null } && !TryNormalizeRepositoryUrl(patch.RepositoryUrl.Value, out repositoryUrl))
         {
             return $"Argument 'repository_url' must be an http, https or ssh repository URL (https://host/path, ssh://user@host/path or user@host:path) " +
-                $"of at most {ProjectLimits.MaxRepositoryUrlLength} characters, without whitespace and without a password or, for http and https, a user name.";
+                $"of at most {ProjectLimits.MaxRepositoryUrlLength} characters, without whitespace and without a password or, for http and https, a user name. " +
+                "In an SSH URL the user name holds no '%' and the path does not start with '-'.";
         }
 
         string? defaultBranch = null;
         if (patch.DefaultBranch is { IsSet: true, Value: not null } && !TryNormalizeDefaultBranch(patch.DefaultBranch.Value, out defaultBranch))
         {
             return $"Argument 'default_branch' must be a branch name of at most {ProjectLimits.MaxDefaultBranchLength} characters that git accepts: " +
-                "no whitespace, none of ~ ^ : ? * [ \\, no '..', '@{' or '//', not starting with '-' or '/', and not ending with '/', '.' or '.lock'.";
+                "no whitespace, none of ~ ^ : ? * [ \\, no '..', '@{' or '//', not starting with '-' or '/', not ending with '/' or '.', " +
+                "no part between slashes starting with '.' or ending with '.lock', and not '@' alone.";
         }
 
         if (patch.Name.IsSet)
@@ -301,10 +315,18 @@ public static partial class Projects
             await dbContext.SaveChangesAsync(cancellationToken);
             return new(ProjectWriteOutcome.Succeeded, project.Id);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException exception)
         {
-            // Another writer took the key between the check and the save.
+            // Another writer took the key between the check and the save. On MariaDB the server says so, and it
+            // is taken at its word: a keyed create runs in a transaction whose snapshot (REPEATABLE READ) was
+            // taken before that writer committed, so the check below would not see the row.
             dbContext.ChangeTracker.Clear();
+            if (exception.InnerException is MySqlException { Number: DuplicateEntryError } duplicate &&
+                duplicate.Message.Contains(KeyIndexName, StringComparison.Ordinal))
+            {
+                return new(ProjectWriteOutcome.KeyTaken);
+            }
+
             if (await dbContext.Projects.AsNoTracking().AnyAsync(candidate => candidate.Id != project.Id && candidate.Key == project.Key, cancellationToken))
             {
                 return new(ProjectWriteOutcome.KeyTaken);

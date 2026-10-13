@@ -8,7 +8,7 @@
 //                                  that the claim, dependency, link, comment and project write tools refuse it with
 //                                  scope_denied
 //
-// The project checks create one scratch project of their own per run (key ACC plus the run id) and leave it archived,
+// The project checks create one scratch project of their own per run (key ACC plus 20 random hex characters) and leave it archived,
 // which keeps it out of list_projects; the script can be run again against the same database.
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
@@ -602,8 +602,10 @@ string? scratchProjectId = null;
 try
 {
     const string repositoryUrl = "https://github.com/acme/factory-acceptance.git";
-    var projectKey = $"ACC{run}".ToUpperInvariant();
-    var projectIdempotencyKey = $"acceptance-{run}:project";
+    // 80 random bits: a project key is unique on the board and at most 24 characters.
+    var projectRun = Guid.NewGuid().ToString("N")[..20];
+    var projectKey = $"ACC{projectRun}".ToUpperInvariant();
+    var projectIdempotencyKey = $"acceptance-{projectRun}:project";
 
     // 28. Create with a repository URL and an idempotency key; a repeat returns the same project.
     var createdProject = await CallAsync("create_project", new()

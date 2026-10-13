@@ -13,6 +13,7 @@ using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using MySql.Data.MySqlClient;
 using static KanbanBoard.Tests.StartupMigrationTests;
 
 namespace KanbanBoard.Tests;
@@ -96,6 +97,51 @@ public sealed class ProjectMySqlTests
         Assert.StartsWith("SELECT CAST(RELEASE_LOCK(", texts[1], StringComparison.Ordinal);
     }
 
+    // On MariaDB the keyed create's transaction is REPEATABLE READ: once it has read, it does not see a project
+    // that another writer (a create without a key, or a rename) commits afterwards, but its INSERT still fails on
+    // IX_Projects_Key. The fake answers as that snapshot would: "is the key taken?" stays no, and the INSERT fails.
+    [Fact]
+    public async Task A_keyed_create_that_loses_the_project_key_to_a_concurrent_writer_is_key_taken_and_releases_the_lock()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer(keyTakenByConcurrentWriter: true)) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        var result = await Projects.CreateAsync(dbContext, new Project { Name = "App", Key = "APP" }, KeyHash, CancellationToken.None);
+
+        Assert.Equal(new ProjectWriteResult(ProjectWriteOutcome.KeyTaken), result);
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count == 5, string.Join("\n---\n", texts));
+        Assert.StartsWith("INSERT INTO `Projects`", texts[3], StringComparison.Ordinal);
+        Assert.StartsWith("SELECT CAST(RELEASE_LOCK(", texts[4], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_keyed_create_that_loses_the_project_key_to_a_concurrent_writer_answers_409_conflict()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer(keyTakenByConcurrentWriter: true)) { NonQueryResult = 1 };
+        using var host = await StartApiAsync(database);
+
+        var response = await host.GetTestClient().PostAsJsonAsync("/api/projects", new { name = "App", key = "APP", idempotencyKey = "plan-1" });
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Conflict, body);
+        Assert.Contains("\"code\":\"conflict\"", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_rename_that_loses_the_project_key_to_a_concurrent_writer_answers_409_conflict()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer(keyTakenByConcurrentWriter: true)) { NonQueryResult = 1 };
+        using var host = await StartApiAsync(database);
+
+        var response = await host.GetTestClient().PatchAsJsonAsync($"/api/projects/{ProjectId}", new { key = "TAKEN" });
+
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Conflict, body);
+        Assert.Contains("\"code\":\"conflict\"", body, StringComparison.Ordinal);
+        Assert.Contains(database.Commands, command => command.Text.StartsWith("UPDATE `Projects` SET `Key` = ", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task A_create_without_a_key_takes_no_lock()
     {
@@ -156,9 +202,24 @@ public sealed class ProjectMySqlTests
 
     private static string Normalize(string sql) => sql.ReplaceLineEndings("\n").TrimEnd();
 
-    private static Func<DbCommand, DataTable?> Answer(bool keyUsed = false, int lockResult = 1) => command =>
+    // MySqlException carries the server's error number only through an internal constructor.
+    private static Exception ServerError(string message, int number) =>
+        (Exception)Activator.CreateInstance(
+            typeof(MySqlException),
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            args: [message, number],
+            culture: null)!;
+
+    private static Func<DbCommand, DataTable?> Answer(bool keyUsed = false, int lockResult = 1, bool keyTakenByConcurrentWriter = false) => command =>
     {
         var text = Normalize(command.CommandText);
+        if (keyTakenByConcurrentWriter &&
+            (text.StartsWith("INSERT INTO `Projects`", StringComparison.Ordinal) || text.StartsWith("UPDATE `Projects`", StringComparison.Ordinal)))
+        {
+            throw ServerError("Duplicate entry 'TAKEN' for key 'IX_Projects_Key'", 1062);
+        }
+
         if (text.Contains("_LOCK(", StringComparison.Ordinal))
         {
             return Table(("Value", (long)lockResult));
