@@ -280,9 +280,12 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
     // Deleting the project deletes its items, which is a change to each of them, and to every item of another
     // project that one of them blocks. The items and those dependencies are held first, so the entries of the
     // change feed report them as they were deleted. Holding many rows at once can deadlock with other writers.
+    // The project's row is held before them, as by every write that changes which items a column holds
+    // (WorkItemWrites.HoldColumnsAsync): a move into one of its columns has committed or has not started.
     var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemWrites.HoldColumnsAsync(dbContext, projectId, cancellationToken);
         await dbContext.WorkItems
             .Where(item => item.ProjectId == projectId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
@@ -554,10 +557,17 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
     // The item is held before it is read, so the entry of the change feed reports the item as it was deleted. So
     // are the dependencies in which it blocks another item: the database deletes them with it, and each is a change
     // to the item it blocked. The delete takes the item's entries out of the indexes while it holds the item's row,
-    // and a delete of the project or an archive of the epic takes the two in the other order: a deadlock is run again.
-    var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    // and an archive of the epic takes the two in the other order: a deadlock is run again.
+    //
+    // The delete takes the item out of its column, so it starts by holding the project's row, like a move
+    // (WorkItemWrites.HoldColumnsAsync): a move that is renumbering that column has committed or has not started,
+    // and does not find a sibling gone. The project is read before the transaction starts: a read inside it would
+    // come before the statement that holds the row.
+    var projectId = await WorkItemWrites.ProjectOfAsync(dbContext, itemId, cancellationToken);
+    var deleted = projectId is not null && await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemWrites.HoldColumnsAsync(dbContext, projectId.Value, cancellationToken);
         await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
         var blocking = dbContext.WorkItemDependencies.Where(edge => edge.BlockerItemId == itemId);
         await WorkItemDependencies.HoldAsync(blocking, cancellationToken);

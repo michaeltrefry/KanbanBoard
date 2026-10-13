@@ -344,6 +344,8 @@ A rollback changes the images, not the database: the schema stays as the newest 
 
 So while an older image runs, stop the orchestrator, and after rolling forward have it take a new cursor (`list_changes` without `cursor`) and re-read its items before it writes.
 
+**Columns with duplicate `order` values are not repaired at deploy.** Before the release with sc-25868, concurrent moves into one column could leave two of its items with the same `order`. No migration renumbers them. The first `move_work_item` (or drag in the web UI) into or within such a column renumbers all of its items to 0, 1, 2, …, ordered by `order` and then by creation time; from then on its values are distinct and stay so. To find such columns: `SELECT ProjectId, Status, `Order`, COUNT(*) FROM WorkItems GROUP BY ProjectId, Status, `Order` HAVING COUNT(*) > 1`.
+
 The same holds once at the first deploy: **the change feed starts empty.** Writes made before the release with sc-25866 have no entries, so `from_start: true` shows the history from that deploy on, not the board's.
 
 MariaDB data lives in the external MariaDB instance. The application container no longer stores the primary database in `/opt/kanban-board/data`.

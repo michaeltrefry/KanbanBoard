@@ -272,6 +272,17 @@ public sealed class ProgramDependencyWiringTests
             set => saveFailure.Armed = value;
         }
 
+        /// <summary>
+        /// How many of the application's next saves of a changed work item find that item deleted: the row is deleted
+        /// in the application's own transaction just before the save, which then matches no row, as when another
+        /// writer deleted it. Counts down with each such save.
+        /// </summary>
+        public int SavesThatFindAnItemDeleted
+        {
+            get => saveFailure.ItemsToDelete;
+            set => saveFailure.ItemsToDelete = value;
+        }
+
         /// <summary>Makes the application's next save of an entry of the change feed throw, once.</summary>
         public bool FailNextChangeLogSave
         {
@@ -356,15 +367,24 @@ public sealed class ProgramDependencyWiringTests
 
         public bool ChangeLogArmed { get; set; }
 
-        public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        public int ItemsToDelete { get; set; }
+
+        public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
+            var changed = eventData.Context!.ChangeTracker.Entries<WorkItem>().FirstOrDefault(entry => entry.State == EntityState.Modified)?.Entity.Id;
+            if (ItemsToDelete > 0 && changed is { } id)
+            {
+                ItemsToDelete--;
+                await eventData.Context.Set<WorkItem>().Where(item => item.Id == id).ExecuteDeleteAsync(cancellationToken);
+            }
+
             var changeLogOnly = eventData.Context!.ChangeTracker.Entries()
                 .Where(entry => entry.State != EntityState.Unchanged)
                 .All(entry => entry.Entity is WorkItemChange);
             if (changeLogOnly ? !ChangeLogArmed : !Armed)
             {
-                return ValueTask.FromResult(result);
+                return result;
             }
 
             Armed = Armed && changeLogOnly;

@@ -191,7 +191,8 @@ public static class WorkItemWrites
         // The save below can rewrite the item's entries in the indexes on its column and its epic while this
         // transaction holds the item's row; a delete of the project or an archive of the epic takes the two in the
         // other order, and MariaDB then rolls one of them back (error 1213). Everything of the attempt is rolled
-        // back with it, the version and the entry of the change feed included, so the update is run again.
+        // back with it, the version and the entry of the change feed included, so the update is run again. So it
+        // is when its save finds a row gone.
         return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
             // The UPDATE holds the item's row until the transaction ends: the updates of one item run one at a time,
@@ -279,7 +280,7 @@ public static class WorkItemWrites
             }
 
             return new WorkItemWriteResult(WorkItemWriteOutcome.Succeeded, item);
-        });
+        }, alsoWhenARowVanished: true);
     }
 
     /// <summary>
@@ -288,8 +289,9 @@ public static class WorkItemWrites
     /// UpdatedAtUtc and get no entry in the change feed.
     ///
     /// The move starts by holding the project's row (<see cref="HoldColumnsAsync"/>), like a create, an import and an
-    /// update that names a status: every write that gives an item a place in a column of the project runs one at a
-    /// time, and reads the column after the one before it has committed. So no two items of a column end up with
+    /// update that names a status, and like the deletes that take an item out of a column: every write that gives an
+    /// item a place in a column of the project or takes one out runs one at a time, and reads the column after the
+    /// one before it has committed. So no two items of a column end up with
     /// the same <see cref="WorkItem.Order"/>, and two moves in one column cannot deadlock over the rows of their
     /// siblings. The rows are taken in one order everywhere: the project, then items, then the lock of the change
     /// feed. Do not renumber outside this transaction, and do not read anything in it before the project is held.
@@ -313,7 +315,10 @@ public static class WorkItemWrites
         // The move holds the rows of several items while other writers hold one of them (a delete of the project
         // or an archive of the epic takes them in another order), and MariaDB then rolls one of the two back
         // (error 1213). The whole attempt is rolled back, the version, the renumbering and the entry of the change
-        // feed included, so the move is run again: it is recorded once and advances the version once.
+        // feed included, so the move is run again: it is recorded once and advances the version once. So it is
+        // when a sibling it read was deleted before it was renumbered (the save then throws, and leaving the
+        // transaction rolls everything back): every delete of an item holds the project first, like the move, so
+        // that only happens when a row is deleted some other way.
         return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -362,7 +367,7 @@ public static class WorkItemWrites
                 WorkItemChangeLog.Entry(itemId, written.ProjectId, WorkItemChangeKinds.ItemMoved, actor, now, WorkItemChangeLog.Snapshot(before), WorkItemChangeLog.Snapshot(written)),
                 cancellationToken);
             return new WorkItemWriteResult(WorkItemWriteOutcome.Succeeded, written);
-        });
+        }, alsoWhenARowVanished: true);
     }
 
     /// <summary>
@@ -470,7 +475,7 @@ public static class WorkItemWrites
 
     // The project of an item, or null when there is no such item. A project id never changes, so it can be read
     // before the write's transaction starts.
-    private static async Task<Guid?> ProjectOfAsync(KanbanDbContext dbContext, Guid itemId, CancellationToken cancellationToken) =>
+    public static async Task<Guid?> ProjectOfAsync(KanbanDbContext dbContext, Guid itemId, CancellationToken cancellationToken) =>
         await dbContext.WorkItems
             .AsNoTracking()
             .Where(item => item.Id == itemId)
@@ -479,12 +484,12 @@ public static class WorkItemWrites
 
     /// <summary>
     /// Holds the row of the project until the transaction ends, as its first statement: the writes that give an item
-    /// a place in a column of the project (a create, an import, a move, an update that names a status) then run one
-    /// at a time. On MariaDB (REPEATABLE READ) the reads that follow see everything the earlier holders committed;
+    /// a place in a column of the project or take one out of it (a create, an import, a move, an update that names a
+    /// status, a delete of an item or of the project) then run one at a time. On MariaDB (REPEATABLE READ) the reads that follow see everything the earlier holders committed;
     /// a read before it would fix the transaction's view too early. A project that was deleted in between holds
     /// nothing, and the write then finds no item.
     /// </summary>
-    private static Task<int> HoldColumnsAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
+    public static Task<int> HoldColumnsAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
         Projects.LockAsync(dbContext, projectId, cancellationToken);
 
     // One UPDATE that advances the version together with whatever else the write sets, and only when the item still

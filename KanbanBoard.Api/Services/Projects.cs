@@ -239,8 +239,9 @@ public static partial class Projects
 
     /// <summary>
     /// Holds the project's row until the transaction ends and changes nothing; returns 0 when there is no such
-    /// project. The keyed creates of the project's epics, every create of an item, the imports into it, and every move
-    /// and update of an item that names a status start with it, so they run one at a time (see
+    /// project. The keyed creates of the project's epics, every create of an item, the imports into it, every move
+    /// and update of an item that names a status, every delete of an item and the delete of the project start with
+    /// it, so they run one at a time (see
     /// <see cref="IdempotencyKeys.CreateOnceAsync"/> and <see cref="WorkItemWrites.MoveAsync"/>).
     /// </summary>
     public static Task<int> LockAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
