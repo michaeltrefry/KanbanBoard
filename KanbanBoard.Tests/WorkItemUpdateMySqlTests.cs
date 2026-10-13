@@ -26,6 +26,9 @@ public sealed class WorkItemUpdateMySqlTests
     // The version is only ever written by the database, as the stored value plus one.
     private const string Advance = @"^UPDATE `WorkItems` AS `w`\nSET `Version` = `w`\.`Version` \+ 1,\n    ";
     private const string HoldItem = "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId";
+    // Read outside the transaction, and then the first statement of it: the row of the item's project, held and not changed.
+    private const string ReadProject = "SELECT `w`.`ProjectId`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1";
+    internal const string HoldProject = "UPDATE `Projects` AS `p`\nSET `IsArchived` = `p`.`IsArchived`\nWHERE `p`.`Id` = @projectId";
     private static readonly DateTime Created = new(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc);
 
     [Fact]
@@ -62,7 +65,12 @@ public sealed class WorkItemUpdateMySqlTests
 
         Assert.True(response.StatusCode == HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
-        Assert.Matches(Advance + @"`UpdatedAtUtc` = @\w+\nWHERE `w`\.`Id` = @itemId$", texts[0]);
+        // An update that names a status may put the item at the end of another column: it holds the project's row
+        // as the first statement of its transaction, before the item's, like every write that places an item.
+        Assert.Equal(ReadProject, texts[0]);
+        Assert.Equal(HoldProject, texts[1]);
+        Assert.Equal(1, database.TransactionStarts[0]);
+        Assert.Matches(Advance + @"`UpdatedAtUtc` = @\w+\nWHERE `w`\.`Id` = @itemId$", texts[2]);
         // A new column: the end of it is read (it is empty, so the order stays 0) and the status is written.
         Assert.Contains("SELECT MAX(`w`.`Order`)\nFROM `WorkItems` AS `w`\nWHERE (`w`.`ProjectId` = @projectId) AND (`w`.`Status` = @status)", texts);
         Assert.Contains(texts, text => System.Text.RegularExpressions.Regex.IsMatch(text, @"^UPDATE `WorkItems` SET `Status` = @\w+\nWHERE `Id` = @\w+;"));
@@ -86,18 +94,19 @@ public sealed class WorkItemUpdateMySqlTests
         }
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
-        Assert.True(texts.Count == 6, string.Join("\n---\n", texts));
-        // The move first holds the item and reads it (see the next test); neither changes anything.
-        Assert.Equal(HoldItem, texts[2]);
-        Assert.StartsWith("SELECT ", texts[3], StringComparison.Ordinal);
-        Assert.All(new[] { texts[1], texts[5] }, text => Assert.Equal("SELECT `w`.`Version`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", text));
-        Assert.All(new[] { texts[0], texts[4] }, text => Assert.EndsWith("WHERE (`w`.`Id` = @itemId) AND (`w`.`Version` = @expected)", text, StringComparison.Ordinal));
-        // A refused write records nothing.
-        Assert.DoesNotContain(texts, text => text.Contains("WorkItemChanges", StringComparison.Ordinal) || text.Contains("GET_LOCK(", StringComparison.Ordinal));
+        Assert.True(texts.Count == 8, string.Join("\n---\n", texts));
+        // The move first holds the project and the item and reads the item (see the next test); none of it changes anything.
+        Assert.Equal([ReadProject, HoldProject, HoldItem], texts.Skip(2).Take(3));
+        Assert.StartsWith("SELECT ", texts[5], StringComparison.Ordinal);
+        Assert.All(new[] { texts[1], texts[7] }, text => Assert.Equal("SELECT `w`.`Version`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", text));
+        Assert.All(new[] { texts[0], texts[6] }, text => Assert.EndsWith("WHERE (`w`.`Id` = @itemId) AND (`w`.`Version` = @expected)", text, StringComparison.Ordinal));
+        // A refused write records nothing, renumbers no sibling and commits nothing.
+        Assert.DoesNotContain(texts, text => text.Contains("WorkItemChanges", StringComparison.Ordinal) || text.Contains("GET_LOCK(", StringComparison.Ordinal) || text.Contains("`Order` = @", StringComparison.Ordinal) && !text.Contains("`Version` + 1", StringComparison.Ordinal));
+        Assert.DoesNotContain("COMMIT", database.Locks);
     }
 
     [Fact]
-    public async Task A_move_holds_the_item_reads_it_writes_it_in_one_conditional_update_and_never_writes_a_siblings_version_or_stamp()
+    public async Task A_move_holds_the_project_then_the_item_writes_it_in_one_conditional_update_and_renumbers_the_siblings_in_the_same_transaction()
     {
         var database = new FakeDatabase(lockResult: 1, Answer) { NonQueryResult = 1 };
         using var host = await StartApiAsync(database);
@@ -106,20 +115,30 @@ public sealed class WorkItemUpdateMySqlTests
 
         Assert.True(response.StatusCode == HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        // The item's project is read before the transaction, and its row is the first thing the transaction holds:
+        // on MariaDB the moves, creates, imports and status changes of one project then run one at a time, and each
+        // reads the column after the one before it committed.
+        Assert.Equal(ReadProject, texts[0]);
+        Assert.Equal(HoldProject, texts[1]);
         // The conditional UPDATE overwrites the column and the position, so the item is held and read before it:
         // the entry of the change feed then reports the values the move replaced.
-        Assert.Equal(HoldItem, texts[0]);
-        Assert.StartsWith("SELECT ", texts[1], StringComparison.Ordinal);
+        Assert.Equal(HoldItem, texts[2]);
+        Assert.StartsWith("SELECT ", texts[3], StringComparison.Ordinal);
         Assert.Matches(
             Advance + @"`Status` = @\w+,\n    `Order` = @\w+,\n    `UpdatedAtUtc` = @\w+\nWHERE \(`w`\.`Id` = @itemId\) AND \(`w`\.`Version` = @expected\)$",
-            texts[2]);
-        // The entry is recorded in the move's transaction, before the siblings are touched.
-        var entry = texts.FindIndex(text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
-        Assert.Equal(4, WithoutChangeLogEntry(texts.Take(entry + 2).ToList(), readsProject: false).Count);
+            texts[4]);
         // The sibling the fake answers with is renumbered: its order, and nothing else of it.
-        var siblings = texts.Skip(entry + 2).Where(text => text.StartsWith("UPDATE", StringComparison.Ordinal)).ToList();
-        Assert.DoesNotContain(texts.Skip(entry + 2), text => text.Contains("WorkItemChanges", StringComparison.Ordinal));
+        var siblings = texts.Where(text => text.StartsWith("UPDATE `WorkItems` SET", StringComparison.Ordinal)).ToList();
         Assert.Matches(@"^UPDATE `WorkItems` SET `Order` = @\w+\nWHERE `Id` = @\w+;", Assert.Single(siblings));
+        // One transaction: the renumbering comes before the entry of the change feed, which is the last thing
+        // written, and the one commit is made under the lock of the feed.
+        var entry = texts.FindIndex(text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.True(texts.IndexOf(siblings[0]) < entry, string.Join("\n---\n", texts));
+        Assert.DoesNotContain(texts.Skip(entry + 1), text => text.StartsWith("UPDATE", StringComparison.Ordinal) || text.StartsWith("INSERT", StringComparison.Ordinal));
+        Assert.Equal(1, entry - texts.FindLastIndex(entry, text => text.Contains("GET_LOCK(", StringComparison.Ordinal)));
+        Assert.Equal(1, database.TransactionStarts[0]);
+        Assert.Equal([$"GET {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemChangeLog.LockName}"], LocksAroundTheCommit(database));
+        Assert.Single(texts, text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -67,7 +67,9 @@ The API container still listens on internal HTTP port `8080` so the MCP containe
 
 ## MCP tools
 
-The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, claim, comment, link, delete) return a `scope_denied` error without calling the API, and the API also refuses internal write requests made on behalf of a `read` token.
+The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mcp`. Users create PATs from the settings page; the MCP server validates them through a secret-protected internal API endpoint and forwards tool calls to the API with internal service authentication. Each PAT has a scope: `full` (default; also every token created before scopes existed) or `read`. A `read` token can use every read tool, but write tools (create, update, move, claim, comment, link, delete) return a `scope_denied` error without calling the API, whatever their arguments, and the API also refuses internal write requests made on behalf of a `read` token.
+
+**The contract is [docs/mcp-contract.md](docs/mcp-contract.md):** every tool with its wire name, whether it reads or writes, every argument with its type, default and allowed values, every shape with every field, the error codes, the conventions and the known limitations, in one file that a unit test keeps equal to the server's `tools/list`. Build a caller against that file; the sections below explain the same tools at more length.
 
 The MCP service exposes tools for:
 
@@ -89,21 +91,24 @@ The MCP service exposes tools for:
 - Deleting work items
 - Deleting projects
 
-`GetBoard` accepts an optional `status` filter so callers can request only a single column's items instead of the full board payload.
-`GetIssues` returns only issue-type work items and accepts optional `projectId` and `status` filters.
-`ListProjects` accepts an optional `includeArchived` flag so callers can include archived projects when needed. Every project carries `repository_url` and `default_branch` (see [Projects](#projects)).
-`ListEpics` accepts an optional `includeArchived` flag so callers can include archived epics when needed.
-`GetBoard` accepts an optional `includeArchivedEpics` flag so callers can include items linked to archived epics.
+`get_board` accepts an optional `status` filter so callers can request only a single column's items instead of the full board payload.
+`get_issues` returns only issue-type work items and accepts optional `projectId` and `status` filters.
+`list_projects` accepts an optional `includeArchived` flag so callers can include archived projects when needed. Every project carries `repository_url` and `default_branch` (see [Projects](#projects)).
+`list_epics` accepts an optional `includeArchived` flag so callers can include archived epics when needed.
+`get_board` accepts an optional `includeArchivedEpics` flag so callers can include items linked to archived epics.
 Epics can be managed through project-scoped list/create endpoints plus retrieve/update/delete endpoints for individual epics.
 Epic documents can be managed through epic-scoped list/create endpoints plus retrieve/update endpoints for individual documents.
-`GetWorkItem` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
-Work item reads (`GetWorkItem`, `ListWorkItems`, `ListEpicWorkItems`, `GetIssues`, `GetBoard`) include the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are `null` when the item is unclaimed or its claim has expired.
+**`update_epic` and `update_epic_document` replace the whole object and are unconditional.** `update_epic(epicId, name, description?, isArchived?)` writes all three fields with the values of the call: an argument that is left out is not kept, so `update_epic(epicId, name)` empties the description and restores an archived epic (`isArchived` defaults to `false`). `update_epic_document(documentId, title, body)` replaces the title and the whole body. Neither takes `clear` or `expected_version`, and the last writer wins: read the epic or the document first and pass every field. This is how both tools have always behaved; only `update_project` and `update_work_item` are partial updates.
+`get_work_item` returns one work item (title, description, status, comments, and other fields) and returns a not-found error for unknown ids.
+Every tool that returns a work item includes the item's live claim as `claimant`, `claimant_id`, `claim_marker` and `claim_expires_at_utc`; all four are always present, and are `null` when the item is unclaimed or its claim has expired.
+**Which fields can be missing.** The MCP server leaves a field without a value out of its answer, except the ones it promises in every answer. Always present, `null` when empty: `estimate` and the four claim fields of a work item, `estimate` of a search result, `repository_url` and `default_branch` of a project and of a board, and `old` and `new` of a change. Left out when empty, never written as `null`: `description` (project, board, epic, work item), `epicId`, `epic` and `labels` of a work item, `author_id` of a comment, `actor` of a change entry, `next_cursor` of a page of work items or comments, and the fields that belong to one tool's answer (`created`, `comment_id`, `comment_created`). Everything else is always present and never `null`; arrays are `[]` when empty. [docs/mcp-contract.md](docs/mcp-contract.md#shapes) says it field by field. (The REST API behind the web UI writes every field, `null` included.)
+`get_board` also returns the project's `repository_url` and `default_branch` (see [Projects](#projects)), after the fields it always had.
 Work item reads also include `blockers` (the items this one is blocked by) and `dependents` (the items it blocks); each entry is `{id, title, status}` with the other item's current status, and both are `[]` when there are none.
 Work item reads also include `links`, the external links attached to the item (see [Links](#links)); it is `[]` when there are none.
 Work item reads also include `estimate` (always present, `null` when not set), `label_list` (the labels as a list, `[]` when there are none; `labels` is the same labels as one comma-separated string) and `version` (see [Updating and moving work items](#updating-and-moving-work-items)).
-`ListWorkItems`, `ListEpicWorkItems` and `GetIssues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
-`ListWorkItems` also accepts the polling arguments described under [Polling work items](#polling-work-items).
-`SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, statuses, estimates (`estimate`, `null` when not set) and versions (`version`). It is backed by `GET /api/items/search`.
+`list_work_items`, `list_epic_work_items` and `get_issues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
+`list_work_items` also accepts the polling arguments described under [Polling work items](#polling-work-items).
+`search_work_items` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, statuses, estimates (`estimate`, `null` when not set) and versions (`version`). It is backed by `GET /api/items/search`.
 
 ### Projects
 
@@ -187,7 +192,10 @@ The keys of a project's epics, of its work items and of its imports are three se
 - **`version` is the item's write counter.** It is `1` on a new item (and on every item that existed before this feature) and goes up by exactly one with every `update_work_item` and every `move_work_item` of the item that is not refused, with the same writes made from the web UI, and when archiving or deleting an epic takes the item out of it. It does **not** change when the item is claimed, renewed or released or its claim expires, when a comment, a link or a dependency is added or removed, or when another item is moved or reordered around it (the sibling's `order` changes; its `version` and `updatedAtUtc` do not). An update that passes the values the item already has is still an update and advances it. Those are separate records that an update cannot overwrite, so an orchestrator that holds a claim can renew it, comment and attach its pull request between reading an item and updating it, and its update still goes through. `version` is a number that only the database writes, as the stored value plus one inside the `UPDATE`: two writes never give an item the same version, which `updatedAtUtc` (taken from a clock before the commit) cannot promise.
 - **`expected_version` makes an update or a move conditional.** Pass the `version` of the item as it was last read. The write is one `UPDATE … WHERE Id = … AND Version = …`, so the database decides: when the item still has that version the call succeeds and returns the new one; otherwise it is refused `conflict`, nothing is written (not a field, not `updatedAtUtc`, not the order of any sibling), and the message names the current version. Read the item again and decide whether the change still applies. Of several calls that pass the same `expected_version` at the same moment exactly one succeeds. Without `expected_version` an update or a move is unconditional, as before: the last writer wins.
 - **Labels are a list.** `label_list` on a read is the item's labels in order; `labels` stays the comma-separated string it has always been, with the same labels, so existing callers and the web UI are unaffected. To write, pass either `label_list` (each label a non-empty string without a comma) or `labels` (comma-separated), not both; `create_work_item` and `create_epic_work_item` take `label_list` as well. The labels replace the ones the item has. They are trimmed, duplicates that differ only in case are dropped, and together, joined with commas, they may be at most 4000 characters (240 before); more is refused `invalid_argument`. Labels stored before this feature read back as the same labels.
-- **Other rules.** `title` is at most 240 characters. `epicId` must be an active epic of the item's project, otherwise the call is refused `invalid_argument`; an update that does not name an epic is not refused because the item's epic has since been archived. An unknown `itemId` is refused `not_found`. A move writes the item first and renumbers the other items of the column afterwards, in a write of its own, so that two moves in one column cannot deadlock; if that renumbering fails, the move still stands and is answered with the moved item and its new version, the failure is logged by the API, and the next move in the column renumbers it. Both are write tools: a `read` token is refused `scope_denied` before the API is called.
+- **Other rules.** `title` is at most 240 characters. `epicId` must be an active epic of the item's project, otherwise the call is refused `invalid_argument`; an update that does not name an epic is not refused because the item's epic has since been archived. An unknown `itemId` is refused `not_found`. Both are write tools: a `read` token is refused `scope_denied` before the API is called.
+
+- **`order` is unique within a column.** A move writes the item and renumbers the other items of the column in one transaction; a move that is refused, or that fails, changes neither the item nor any sibling. Every write that gives an item a place in a column or takes one out (`move_work_item`, `update_work_item` with a `status`, `create_work_item`, `create_epic_work_item`, `import_epic_plan`, `delete_work_item`, `delete_project`, and the same writes from the web UI) first takes the row of the item's project, so these writes run one at a time per project and each reads the column after the one before it has committed: however many callers move, update, create, import and delete at once, no two items of a column end up with the same `order`. (Before, concurrent moves into one column could leave two items with one `order` until the next move there. A column that already holds such a pair keeps it until the next move into or within that column, which renumbers the whole column; nothing renumbers it at deploy.) `order` values are not always contiguous: an item that leaves a column leaves a gap, and a move stores the `order` it is given. The rows are taken in one order everywhere (project, then items, then the lock of the change feed); a move or an update that MariaDB still rolls back as the victim of a deadlock is run again, and so is a move that finds an item it was renumbering deleted under it; after three such attempts it is refused `busy`, with nothing changed.
+- **Claims do not guard an update or a move.** See [Claims](#claims).
 
 ### Polling work items
 
@@ -213,7 +221,9 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 
 - The claimant is always the identity that owns the calling token. No argument can name another one.
 - A claim succeeds when the item is unclaimed, its claim has expired, or the caller already holds it under the same marker (the expiry is reset). Any other marker or identity on a live claim is refused `already_claimed`. The write is one conditional `UPDATE`, so two concurrent claims have exactly one winner.
-- Renew is refused `conflict` when the caller's claim has lapsed or was released, and `already_claimed` when someone else now holds the item. Release is refused the same way; the holder may release its own claim after it lapsed.
+- Renew is refused `conflict` when the caller's claim has lapsed or was released, and `already_claimed` when someone else now holds the item. Release has three outcomes: it succeeds when the stored claim is the caller's own, live or lapsed; it is refused `already_claimed` when someone else holds a live claim; and it is refused `conflict` otherwise (the item has no claim, or only a lapsed claim of someone else).
+- **Claims are advisory.** A claim stops another caller's `claim_work_item`, and nothing else: `update_work_item`, `move_work_item`, `delete_work_item`, the comment, link and dependency tools and the web UI do not look at it, so another identity can change, move or delete an item that `factory` holds, without a refusal. Callers that share a board check `claimant_id` themselves before they write, and pass `expected_version` to find out that someone else wrote.
+- **Your own id** is the `claimant_id` your own claim returns. The same id is the `author_id` of the comments you add and the `actor.id` of your entries in the change feed.
 - The claim tools are write tools: a `read` token is refused `scope_denied` before the API is called.
 
 ### Dependencies
@@ -253,10 +263,10 @@ An orchestrator takes a work item with `claim_work_item(id, marker, ttl_seconds)
 
 Work item reads embed the same records in `comments`, oldest first. `id` is a GUID, like a work item id, and never changes.
 
-- **The author is the token's identity.** A comment added with a personal access token carries that identity's name as `author` (the same name as `claimant`) and its id as `author_id`; the `author` argument is accepted and ignored, so no caller can write under another name. Match your own comments by `author_id`: `author` is the name at the time of writing. A comment written without a token (the web UI, or an MCP server that does not require tokens) keeps the `author` the writer gave, which is then required, and has no `author_id`; so does every comment older than this feature.
+- **The author is the token's identity.** A comment added with a personal access token carries that identity's name as `author` (the same name as `claimant`) and its id as `author_id`; the `author` argument is accepted and ignored, so no caller can write under another name. Match your own comments by `author_id`: `author` is the name at the time of writing. Your own id is the `claimant_id` that a `claim_work_item` of yours returns, the `author_id` of a comment you added (the entry of `comments` whose `id` is the `comment_id` that `add_work_item_comment` returns), and the `actor.id` of your own entries in the change feed; all three are the same id. A comment written without a token (the web UI, or an MCP server that does not require tokens) keeps the `author` the writer gave, which is then required, and has no `author_id`; so does every comment older than this feature.
 - **`add_work_item_comment` returns the work item**, as before, with all its comments, plus `comment_id` (the id of the comment this call is about) and `comment_created`.
 - **`idempotency_key` makes the add safe to repeat.** It is 1 to 128 printable ASCII characters without spaces, compared exactly (`run-1` and `RUN-1` are two keys); anything else is refused `invalid_argument`. A key belongs to the calling identity and the work item: when that identity already used it on that item, nothing is added, `comment_id` is the earlier comment's id, `comment_created` is `false`, the item's `updatedAtUtc` does not move and no board-change event is sent. The body is not compared: a repeat with another body still returns the first comment unchanged. Two calls with one key at the same moment add one comment and both report its id. The same key used by another identity, or on another item, is another comment; callers without a token share one identity. Without a key every call adds a comment.
-- **`list_work_item_comments` returns one page**, `{"items": [...], "next_cursor": "..."}`, oldest comment first. `limit` is 1 to 200 (50 when left out). Pass `next_cursor` back unchanged as `cursor` until a page comes without one. Every comment is returned exactly once, also when comments are added during the walk: a comment's `createdAtUtc` is always later than that of every comment written to the item before it (when clocks disagree it is the latest one plus a microsecond), so a new comment lands after the cursor, never behind it. The cursor is opaque, and it belongs to this tool: a `next_cursor` of `list_work_items` is refused here, and the other way round. A malformed `cursor`, and a `limit` outside 1 to 200, is refused `invalid_argument`. A `limit` that is not an integer never reaches the tool: the MCP server fails to bind the argument and answers with a plain MCP error without a code.
+- **`list_work_item_comments` returns one page**, `{"items": [...], "next_cursor": "..."}`, oldest comment first. `limit` is 1 to 200 (50 when left out). Pass `next_cursor` back unchanged as `cursor` until a page comes without one. Every comment is returned exactly once, also when comments are added during the walk: a comment's `createdAtUtc` is always later than that of every comment written to the item before it (when clocks disagree it is the latest one plus a microsecond), so a new comment lands after the cursor, never behind it. The cursor is opaque, and it belongs to this tool: a `next_cursor` of `list_work_items` is refused here, and the other way round. A malformed `cursor`, a `limit` outside 1 to 200, and a `limit` that is not an integer are refused `invalid_argument`.
 - An unknown work item is refused `not_found` by both tools.
 - A comment that is added stamps the item's `updatedAtUtc` with the comment's `createdAtUtc`, so `updated_since` reports it.
 - `add_work_item_comment` is a write tool: a `read` token is refused `scope_denied` before the API is called. `list_work_item_comments` is a read tool. `add_issue_comment(itemId, author, body, idempotency_key?)` is the older form of the add, with `author` required; it stamps the author the same way, returns the same `comment_id` and `comment_created`, and shares its keys with `add_work_item_comment`: a key used on an item through one tool is a repeat through the other.
@@ -312,7 +322,7 @@ Work item reads embed the same records in `comments`, oldest first. `id` is a GU
 - **Long texts are cut.** An entry stores at most 16,384 characters of any one text: a `description`, a `title`, `labels`, the `body` of a comment, the `url` of a link. A longer one is stored as its first 16,384 characters and the change carries `"old_truncated": true` and/or `"new_truncated": true` (both are left out when nothing was cut), for example `{"field": "description", "old": "…", "new": "…", "new_truncated": true}`. The write itself is not limited and the item holds the whole text: read it with `get_work_item`. The two values are compared before they are cut, so a change beyond the limit is still listed, with the same `old` and `new` and both markers.
 - **`actor`** is who made the change, taken from the request and never from an argument: `{id, name}` of the identity behind the personal access token (the same id and name as `claimant_id` and `claimant`), or of the signed-in user for a change made in the web UI. It is left out when the write carried neither (an installation without authentication). The `author` of a comment written without a token is content of the comment, not the actor.
 - **One entry per item a write changes.** A dependency is one entry, on the blocked item (the `id` argument of the tool), and so in that item's project. Moving an item is one entry for that item; the items it displaces are renumbered without an entry, as without a new `version`. Archiving an epic is one `item_updated` per item it takes out and none for the epic. Deleting an item also removes the dependencies in which it blocks other items: besides its own `item_deleted`, the delete writes one `dependency_removed` on each item it blocked, in that item's project, in the same transaction. Deleting a project does the same for every item of another project that one of its items blocked; an item that is deleted together with its blocker gets its `item_deleted` only. All entries of one write carry the same `actor` and `created_at_utc`.
-- **A write that is refused, or that changes nothing, has no entry**: `conflict`, `already_claimed`, `cycle`, `not_found`, `invalid_argument`, a repeated `idempotency_key`, a link or dependency that was already there, a remove of one that was not.
+- **A write that is refused, or that changes nothing, has no entry**: `conflict`, `already_claimed`, `cycle`, `not_found`, `invalid_argument`, a repeated `idempotency_key`, a link or dependency that was already there, a remove of one that was not. The exception is `update_work_item` and `move_work_item`, which always advance `version` and record it: an update with the values the item already has, or a move to the place it already has, is an entry whose only change is `version`.
 - **Entries outlive their item.** Deleting a work item, or its project, leaves its entries in the feed, ending with `item_deleted`; `get_work_item` for `item_id` is then refused `not_found`.
 - **Not in the feed:** changes to a project or an epic themselves (create, rename, archive, delete; only their effect on work items is), epic documents, and tokens. Writes made before this feature existed have no entries.
 - **Retention:** entries are never pruned. The feed grows by one row per write; there is no tool or job that removes entries.
@@ -331,9 +341,11 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `conflict` | The entity is no longer in the state the call depends on (for example: the work item no longer has the `expected_version` of an update or a move); nothing was changed. |
 | `invalid_argument` | An argument is missing, out of range, not of the type the tool takes (a string where a list of plan items belongs) or not an argument of the tool at all; or a plan given to `import_epic_plan` breaks a rule. |
 | `cycle` | The dependency would make a work item block itself, directly or through other items, or the dependencies of a plan given to `import_epic_plan` would; nothing was changed. |
-| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, `create_project` with an `idempotency_key` waited 10 s for other keyed creates, any write to a work item waited 10 s to record its entry in the [change feed](#change-feed), or `delete_project`, `update_epic`, `delete_epic`, `import_epic_plan`, `create_work_item`, `create_epic_work_item`, `update_work_item`, `move_work_item`, `delete_work_item`, `add_work_item_dependency`, `remove_work_item_dependency` or a create with an `idempotency_key` deadlocked three times with other writers); nothing was changed and the call can be retried. |
+| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, `create_project` with an `idempotency_key` waited 10 s for other keyed creates, any write to a work item waited 10 s to record its entry in the [change feed](#change-feed), or `delete_project`, `update_epic`, `delete_epic`, `import_epic_plan`, `create_work_item`, `create_epic_work_item`, `update_work_item`, `move_work_item`, `delete_work_item`, `add_work_item_dependency`, `remove_work_item_dependency` or a create with an `idempotency_key` deadlocked three times with other writers, or `move_work_item` three times found an item it was renumbering deleted under it); nothing was changed and the call can be retried. |
 
-Every tool, read or write, uses this envelope for every refusal: a scope refusal, an id the API does not know (`get_epic`, `get_epic_document`, `get_board`, `list_epics`, `list_epic_documents` and `create_epic_work_item` with an unknown id answer `not_found`, like `get_work_item`), a malformed argument, a blank `search_work_items` query (`invalid_argument`). The successful results of the read tools are unchanged.
+Every tool, read or write, uses this envelope for every refusal: a scope refusal, an id the API does not know (`get_epic`, `get_epic_document`, `get_board`, `list_epics`, `list_epic_documents` and `create_epic_work_item` with an unknown id answer `not_found`, like `get_work_item`), a malformed argument, a blank `search_work_items` query (`invalid_argument`). `delete_project`, `delete_epic`, `delete_work_item`, `update_epic` and `update_epic_document` with an unknown id answer `not_found` with a message that names the object and the id (`Epic 6f0c… was not found.`). A message that refuses an argument names it the same way everywhere: `Argument 'marker' is required…`. The successful results of the read tools are unchanged, apart from the fields that were added to them.
+
+**The scope is checked first.** A write tool called with a `read` token answers `scope_denied` whatever its arguments are: also when an argument is missing, misspelt or of the wrong type. A `full` token gets `invalid_argument` for the same call.
 
 Two kinds of call are refused `invalid_argument` before the tool runs, so nothing was read, written or created and no `idempotency_key` was used up:
 
@@ -354,45 +366,50 @@ The name is the identity's display name and the `claimant` on the items it claim
 
 ### Available tool names
 
-The names below are the C# method names; on the wire each tool is its snake_case form (`ListProjects` is `list_projects`).
+The server lists 37 tools, by these names on the wire. [docs/mcp-contract.md](docs/mcp-contract.md#tool-reference) has every argument of each, with its type, whether it is required, its default and its allowed values.
 
-- `ListProjects`
-- `CreateProject`
-- `UpdateProject`
-- `GetBoard`
-- `ListEpics`
-- `GetEpic`
-- `CreateEpic`
-- `UpdateEpic`
-- `DeleteEpic`
-- `ListEpicDocuments`
-- `GetEpicDocument`
-- `CreateEpicDocument`
-- `UpdateEpicDocument`
-- `DeleteProject`
-- `ListWorkItems`
-- `ListEpicWorkItems`
-- `GetIssues`
-- `GetWorkItem`
-- `SearchWorkItems`
-- `AddWorkItemComment`
-- `AddIssueComment`
-- `ListWorkItemComments`
-- `ListChanges`
-- `CreateWorkItem`
-- `CreateEpicWorkItem`
-- `ImportEpicPlan`
-- `UpdateWorkItem`
-- `MoveWorkItem`
-- `DeleteWorkItem`
-- `ClaimWorkItem`
-- `RenewWorkItemClaim`
-- `ReleaseWorkItemClaim`
-- `AddWorkItemDependency`
-- `RemoveWorkItemDependency`
-- `AddWorkItemLink`
-- `RemoveWorkItemLink`
-- `FindWorkItemsByLink`
+| Read tools (14) | Write tools (23) |
+| --- | --- |
+| `list_projects` | `create_project`, `update_project`, `delete_project` |
+| `get_board` | `create_epic`, `update_epic`, `delete_epic` |
+| `list_epics`, `get_epic` | `create_epic_document`, `update_epic_document` |
+| `list_epic_documents`, `get_epic_document` | `create_work_item`, `create_epic_work_item`, `import_epic_plan` |
+| `list_work_items`, `list_epic_work_items`, `get_issues` | `update_work_item`, `move_work_item`, `delete_work_item` |
+| `get_work_item`, `search_work_items` | `claim_work_item`, `renew_work_item_claim`, `release_work_item_claim` |
+| `find_work_items_by_link` | `add_work_item_dependency`, `remove_work_item_dependency` |
+| `list_work_item_comments` | `add_work_item_link`, `remove_work_item_link` |
+| `list_changes` | `add_work_item_comment`, `add_issue_comment` |
+
+### Acceptance script
+
+`tools/KanbanBoard.FactoryAcceptance` runs the eight acceptance tests of the factory work-source epic, and finer-grained checks of every tool, against a running MCP server, as the orchestrator would call it:
+
+```bash
+KANBAN_MCP_URL=https://kanban-mcp.trefry.net/mcp \
+KANBAN_FACTORY_TOKEN=kbp_... \
+KANBAN_FACTORY_READ_TOKEN=kbp_... \
+KANBAN_FACTORY_IDENTITY_NAME=factory \
+dotnet run --project tools/KanbanBoard.FactoryAcceptance
+```
+
+| Variable | |
+| --- | --- |
+| `KANBAN_MCP_URL` | Required. The MCP endpoint. |
+| `KANBAN_FACTORY_TOKEN` | Required. The `full` token of the factory service identity. |
+| `KANBAN_FACTORY_IDENTITY_NAME` | Required. The display name of that identity, as it was given to `create-service-identity --name` (`factory`). The script asserts that the claimant of the token's claims, the author of its comments and the actor of its change-feed entries carry this name, so a token of any other identity, such as a person's from the settings page, fails tests 1, 3 and 4. |
+| `KANBAN_FACTORY_READ_TOKEN` | The `read` token of the same identity. Without it test 7 is skipped and the run is not an acceptance. |
+| `KANBAN_ACCEPTANCE_PROJECT_ID` | Optional. An existing project for the scratch items of the finer-grained checks; without it the script creates one. |
+
+It prints one line per check and ends with one line per epic acceptance test (`PASS`, `FAIL` or `SKIP`; the lines of tests 1, 3 and 4 name the identity the token turned out to be, with its id) and a verdict:
+
+| Last line | Exit code | Meaning |
+| --- | --- | --- |
+| `ACCEPTANCE PASSED` | 0 | Every check passed and all eight tests ran. |
+| `ACCEPTANCE FAILED (n failure(s))` | 1 | A check failed. |
+| a usage message | 2 | A required variable is not set. Nothing was called. |
+| `ACCEPTANCE INCOMPLETE (…)` | 3 | No check failed, but a test was skipped (no `KANBAN_FACTORY_READ_TOKEN`). |
+
+In test 7 "every read tool" is what the server's `tools/list` holds apart from the 23 write tools: a tool the script does not know, and a known tool the server no longer lists, fail the test. The script writes only into scratch projects it creates (keys `ACC`, `ACI`, `ACE` plus 20 hex characters), leaves them archived, and can be run again against the same database.
 
 ## Production deployment
 

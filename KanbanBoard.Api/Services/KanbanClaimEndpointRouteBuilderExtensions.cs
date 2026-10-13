@@ -73,13 +73,13 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
         if (string.IsNullOrEmpty(marker) || marker.Length > WorkItemClaimLimits.MaxMarkerLength)
         {
             return Error(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument,
-                $"Field 'marker' is required and must be at most {WorkItemClaimLimits.MaxMarkerLength} characters.");
+                $"Argument 'marker' is required and must be at most {WorkItemClaimLimits.MaxMarkerLength} characters.");
         }
 
         if (ttlSeconds is < WorkItemClaimLimits.MinTtlSeconds or > WorkItemClaimLimits.MaxTtlSeconds)
         {
             return Error(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument,
-                $"Field 'ttl_seconds' must be between {WorkItemClaimLimits.MinTtlSeconds} and {WorkItemClaimLimits.MaxTtlSeconds}.");
+                $"Argument 'ttl_seconds' must be between {WorkItemClaimLimits.MinTtlSeconds} and {WorkItemClaimLimits.MaxTtlSeconds}.");
         }
 
         var result = await write(claimant, marker, ttlSeconds is null ? null : TimeSpan.FromSeconds(ttlSeconds.Value), now);

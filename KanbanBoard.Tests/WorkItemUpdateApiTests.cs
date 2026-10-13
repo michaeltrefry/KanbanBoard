@@ -86,8 +86,12 @@ public sealed class WorkItemUpdateApiTests
 
         var message = await AssertErrorAsync(stale, HttpStatusCode.Conflict, KanbanErrorCodes.Conflict);
         Assert.Contains("version 2, not 1", message, StringComparison.Ordinal);
-        // The refusal is the one conditional UPDATE matching no row; nothing else is written.
-        var update = Assert.Single(writes);
+        // The update names a status, so it first holds the row of the project, which changes nothing. The refusal
+        // is the one conditional UPDATE matching no row; nothing else is written.
+        Assert.Equal(2, writes.Count);
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.Contains("SET \"IsArchived\" = \"p\".\"IsArchived\"", writes[0], StringComparison.Ordinal);
+        var update = writes[1];
         Assert.StartsWith("UPDATE \"WorkItems\"", update, StringComparison.Ordinal);
         Assert.Contains("\"Version\" = \"w\".\"Version\" + 1", update, StringComparison.Ordinal);
         Assert.Contains("\"w\".\"Version\" = @expected", update, StringComparison.Ordinal);
@@ -138,9 +142,12 @@ public sealed class WorkItemUpdateApiTests
         // The siblings were renumbered, which is not a change of theirs: version and updatedAtUtc stay.
         Assert.Equal((1L, a.UpdatedAtUtc, 1L, b.UpdatedAtUtc), (afterMove[a.Id].Version, afterMove[a.Id].UpdatedAtUtc, afterMove[b.Id].Version, afterMove[b.Id].UpdatedAtUtc));
         await AssertErrorAsync(stale, HttpStatusCode.Conflict, KanbanErrorCodes.Conflict);
-        // The statement that holds the item, then the conditional UPDATE that matches nothing.
-        Assert.Equal(2, writes.Count);
-        Assert.All(writes, write => Assert.StartsWith("UPDATE \"WorkItems\"", write, StringComparison.Ordinal));
+        // The statements that hold the project and the item, which change nothing, then the conditional UPDATE that
+        // matches nothing. No sibling is renumbered.
+        Assert.Equal(3, writes.Count);
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.All(writes.Skip(1), write => Assert.StartsWith("UPDATE \"WorkItems\" AS \"w\"", write, StringComparison.Ordinal));
+        Assert.Contains("\"w\".\"Version\" = @expected", writes[2], StringComparison.Ordinal);
         Assert.Equal(afterMove.Values.OrderBy(item => item.Id), afterStale.Values.OrderBy(item => item.Id), Same);
         Assert.Equal((WorkItemStatus.Ready, 3L), (unconditional.Status, unconditional.Version));
     }
@@ -228,34 +235,132 @@ public sealed class WorkItemUpdateApiTests
         Assert.Empty(commasOnly.LabelList);
     }
 
+    // A sibling the move read is deleted before the move renumbers it: the save of the siblings matches no row. Every
+    // delete of an item waits for the move on MariaDB (both hold the project first), so this is a row that went
+    // some other way; the move is rolled back whole and run again.
     [Fact]
-    public async Task A_move_whose_renumbering_of_the_siblings_fails_is_still_answered_with_the_moved_item_and_its_new_version()
+    public async Task A_move_that_finds_a_sibling_deleted_while_it_renumbers_is_run_again_and_recorded_once()
     {
         using var api = new ApiApplication();
         using var client = api.CreateClient();
         var (project, _) = await CreateProjectAsync(client, "SIB");
         var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
         var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
 
-        // The item is written by an UPDATE of its own; apart from the entry of the change feed, the only save of
-        // a move is the one of its siblings.
-        api.FailNextSave = true;
+        api.SavesThatFindAnItemDeleted = 1;
         using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 1 });
-        var failed = !api.FailNextSave;
-        var body = await response.Content.ReadAsStringAsync();
-        var after = await ItemsAsync(client);
-        // The next move in the column renumbers it.
-        var next = await PostAsync<WorkItemDto>(client, $"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 2 });
-        var repaired = await ItemsAsync(client);
+        var moved = await ItemsAsync(client);
 
-        Assert.True(failed);
-        Assert.True(response.StatusCode == HttpStatusCode.OK, $"{(int)response.StatusCode} {body}");
-        var moved = JsonSerializer.Deserialize<WorkItemDto>(body, Json)!;
-        Assert.Equal((b.Id, WorkItemStatus.Backlog, 0, 2L), (moved.Id, moved.Status, moved.Order, moved.Version));
-        Assert.Equal(moved, after[b.Id], Same);
-        // The sibling was not renumbered, and is otherwise untouched.
+        Assert.Equal(0, api.SavesThatFindAnItemDeleted);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // The attempt that failed left nothing: the version advanced once, and the sibling it deleted is back, renumbered.
+        Assert.Equal(2L, (await response.Content.ReadFromJsonAsync<WorkItemDto>(Json))!.Version);
+        Assert.Equal((0, 2L, 1, 1L), (moved[b.Id].Order, moved[b.Id].Version, moved[a.Id].Order, moved[a.Id].Version));
+        Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
+    }
+
+    [Fact]
+    public async Task A_move_that_finds_a_sibling_deleted_on_every_attempt_is_refused_busy_and_moves_and_records_nothing()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "SIB");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
+
+        api.SavesThatFindAnItemDeleted = WorkItemChangeLog.DeadlockAttempts + 2;
+        using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 1 });
+        var attemptsLeft = api.SavesThatFindAnItemDeleted;
+        api.SavesThatFindAnItemDeleted = 0;
+        var after = await ItemsAsync(client);
+        var entriesAfter = Entries(api).Count;
+        // Nothing of the refused move is left, so the same move, with the same version, goes through.
+        var next = await PostAsync<WorkItemDto>(client, $"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 1 });
+        var moved = await ItemsAsync(client);
+
+        // The first attempt and two more, and then a refusal a caller can read.
+        Assert.Equal(2, attemptsLeft);
+        var message = await AssertErrorAsync(response, HttpStatusCode.ServiceUnavailable, KanbanErrorCodes.Busy);
+        Assert.Contains("Nothing was changed", message, StringComparison.Ordinal);
+        // The item kept its place and its version, the sibling is there with its place, and the change feed got no entry.
+        Assert.Equal(b, after[b.Id], Same);
         Assert.Equal(a, after[a.Id], Same);
-        Assert.Equal((0, 1, 3L, 1L), (repaired[b.Id].Order, repaired[a.Id].Order, next.Version, repaired[a.Id].Version));
+        Assert.Equal(entriesBefore, entriesAfter);
+        Assert.Equal((0, 1, 2L, 1L), (moved[b.Id].Order, moved[a.Id].Order, next.Version, moved[a.Id].Version));
+        Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
+    }
+
+    // The update of a status takes the same way out: its save finds a row gone, and it is run again.
+    [Fact]
+    public async Task An_update_of_the_status_whose_save_finds_a_row_deleted_is_run_again_and_recorded_once()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "UPD");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
+
+        api.SavesThatFindAnItemDeleted = 1;
+        using var response = await client.PatchAsJsonAsync($"/api/items/{a.Id}", new { status = "Ready", expectedVersion = 1 });
+        var updated = (await ItemsAsync(client))[a.Id];
+
+        Assert.Equal(0, api.SavesThatFindAnItemDeleted);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal((WorkItemStatus.Ready, 2L), (updated.Status, updated.Version));
+        Assert.Equal([WorkItemChangeKinds.ItemUpdated], Entries(api).Skip(entriesBefore));
+    }
+
+    private static List<string> Entries(ApiApplication api)
+    {
+        using var dbContext = api.OpenDatabase();
+        return dbContext.WorkItemChanges.OrderBy(change => change.Sequence).Select(change => change.Kind).ToList();
+    }
+
+    // Eight callers move eight items into one column at once, each to the top and each with the version it read,
+    // while two more change their status to it, two are created in it and two of its items are deleted: every write
+    // succeeds, and no two items of the column share a place. Every move renumbers the column in the transaction
+    // that moves its item, behind the row of the project, which the deletes hold as well.
+    [Fact]
+    public async Task Moves_updates_creates_and_deletes_in_one_column_at_the_same_moment_leave_every_item_a_place_of_its_own()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "RACE");
+        var seeded = new List<WorkItemDto>();
+        foreach (var index in Enumerable.Range(0, 14))
+        {
+            seeded.Add(await CreateAsync(client, project, new { title = $"Item {index}", type = "Task", status = index is < 2 or >= 12 ? "Ready" : "Backlog", priority = "Medium" }));
+        }
+
+        using var entries = api.OpenDatabase();
+        var entriesBefore = entries.WorkItemChanges.Count();
+
+        var moves = seeded.Skip(2).Take(8).Select(item => Task.Run(() =>
+            client.PostAsJsonAsync($"/api/items/{item.Id}/move", new { status = "Ready", order = 0, expectedVersion = item.Version })));
+        var updates = seeded.Skip(10).Take(2).Select(item => Task.Run(() =>
+            client.PatchAsJsonAsync($"/api/items/{item.Id}", new { status = "Ready", expectedVersion = item.Version })));
+        var creates = Enumerable.Range(0, 2).Select(index => Task.Run(() =>
+            client.PostAsJsonAsync("/api/items", new { projectId = project, title = $"New {index}", type = "Task", status = "Ready", priority = "Medium" })));
+        var deletes = seeded.Skip(12).Select(item => Task.Run(() => client.DeleteAsync($"/api/items/{item.Id}")));
+        var responses = await Task.WhenAll(moves.Concat(updates).Concat(creates).Concat(deletes));
+
+        var after = await ItemsAsync(client);
+        Assert.All(responses, response => Assert.True(response.IsSuccessStatusCode, $"{(int)response.StatusCode}"));
+        var ready = after.Values.Where(item => item.Status == WorkItemStatus.Ready).ToList();
+        Assert.Equal(14, ready.Count);
+        Assert.Equal(14, ready.Select(item => item.Order).Distinct().Count());
+        Assert.DoesNotContain(seeded.Skip(12), item => after.ContainsKey(item.Id));
+        // The two items that were in the column and were only displaced keep their version and their stamp.
+        Assert.All(seeded.Take(2), item => Assert.Equal((1L, item.UpdatedAtUtc), (after[item.Id].Version, after[item.Id].UpdatedAtUtc)));
+        // One entry per write: eight moves, two updates, two creates, two deletes; none for a displaced sibling.
+        using var stored = api.OpenDatabase();
+        var written = stored.WorkItemChanges.OrderBy(change => change.Sequence).Skip(entriesBefore).Select(change => change.Kind).ToList();
+        Assert.Equal(
+            (8, 2, 2, 2, 14),
+            (written.Count(kind => kind == WorkItemChangeKinds.ItemMoved), written.Count(kind => kind == WorkItemChangeKinds.ItemUpdated),
+                written.Count(kind => kind == WorkItemChangeKinds.ItemCreated), written.Count(kind => kind == WorkItemChangeKinds.ItemDeleted), written.Count));
     }
 
     [Fact]

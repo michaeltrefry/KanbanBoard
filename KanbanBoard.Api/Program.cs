@@ -265,7 +265,7 @@ app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limi
 {
     if (!WorkItemSearch.TryNormalizeTerms(query, out _))
     {
-        return Results.BadRequest(new { message = "Field 'query' is required." });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'query' is required.");
     }
 
     return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
@@ -280,9 +280,12 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
     // Deleting the project deletes its items, which is a change to each of them, and to every item of another
     // project that one of them blocks. The items and those dependencies are held first, so the entries of the
     // change feed report them as they were deleted. Holding many rows at once can deadlock with other writers.
+    // The project's row is held before them, as by every write that changes which items a column holds
+    // (WorkItemWrites.HoldColumnsAsync): a move into one of its columns has committed or has not started.
     var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemWrites.HoldColumnsAsync(dbContext, projectId, cancellationToken);
         await dbContext.WorkItems
             .Where(item => item.ProjectId == projectId)
             .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
@@ -304,7 +307,7 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
     });
     if (!deleted)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Project {projectId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -353,12 +356,12 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     var validationError = ValidateRequiredText(("name", normalizedName));
     if (!await dbContext.Epics.AnyAsync(candidate => candidate.Id == epicId, cancellationToken))
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     if (validationError is not null)
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
     // Archiving holds the rows of several items at once, which can deadlock with other writers.
@@ -401,7 +404,7 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     });
     if (updated is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -415,7 +418,7 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
@@ -473,14 +476,14 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
     var document = await dbContext.EpicDocuments.FirstOrDefaultAsync(candidate => candidate.Id == documentId, cancellationToken);
     if (document is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic document {documentId} was not found.");
     }
 
     var normalizedTitle = request.Title.Trim();
     var validationError = ValidateRequiredText(("title", normalizedTitle), ("body", request.Body));
     if (validationError is not null)
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
     document.Title = normalizedTitle;
@@ -554,10 +557,17 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
     // The item is held before it is read, so the entry of the change feed reports the item as it was deleted. So
     // are the dependencies in which it blocks another item: the database deletes them with it, and each is a change
     // to the item it blocked. The delete takes the item's entries out of the indexes while it holds the item's row,
-    // and a delete of the project or an archive of the epic takes the two in the other order: a deadlock is run again.
-    var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    // and an archive of the epic takes the two in the other order: a deadlock is run again.
+    //
+    // The delete takes the item out of its column, so it starts by holding the project's row, like a move
+    // (WorkItemWrites.HoldColumnsAsync): a move that is renumbering that column has committed or has not started,
+    // and does not find a sibling gone. The project is read before the transaction starts: a read inside it would
+    // come before the statement that holds the row.
+    var projectId = await WorkItemWrites.ProjectOfAsync(dbContext, itemId, cancellationToken);
+    var deleted = projectId is not null && await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemWrites.HoldColumnsAsync(dbContext, projectId.Value, cancellationToken);
         await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
         var blocking = dbContext.WorkItemDependencies.Where(edge => edge.BlockerItemId == itemId);
         await WorkItemDependencies.HoldAsync(blocking, cancellationToken);
@@ -577,7 +587,7 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
     });
     if (!deleted)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Work item {itemId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -602,7 +612,9 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup depe
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)
             .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies, links))
-            .ToList());
+            .ToList(),
+        project.RepositoryUrl,
+        project.DefaultBranch);
 
 static EpicDto ToEpicDto(Epic epic) =>
     new(
@@ -635,7 +647,7 @@ static string? ValidateRequiredText(params (string FieldName, string? Value)[] f
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return $"Field '{fieldName}' is required.";
+            return $"Argument '{fieldName}' is required.";
         }
     }
 

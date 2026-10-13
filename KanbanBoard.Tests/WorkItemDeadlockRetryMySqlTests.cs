@@ -88,13 +88,20 @@ public sealed class WorkItemDeadlockRetryMySqlTests
     // A write to one item, the statement of it that deadlocks, and the entries it records.
     public static TheoryData<string, string, string?, string, int> ItemWrites => new()
     {
-        // The move, at the statement that holds the item and at the one that rewrites its column and position.
+        // The move, at the statement that holds the project, at the one that holds the item, at the one that rewrites
+        // its column and position, and at the save that renumbers its siblings.
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", WorkItemUpdateMySqlTests.HoldProject, 1 },
         { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", HoldOneItem, 1 },
         { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", AdvanceVersion, 1 },
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", "UPDATE `WorkItems` SET `Order`", 1 },
+        // The update that names a status, which holds the project first as well.
+        { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", WorkItemUpdateMySqlTests.HoldProject, 1 },
         { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", AdvanceVersion, 1 },
         // The save that moves the item to its new column, after the version was advanced.
         { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", "UPDATE `WorkItems` SET `Status`", 1 },
-        // One entry for the item that was blocked, one for the item that was deleted.
+        // The delete of an item, which holds the project first as well. One entry for the item that was blocked, one
+        // for the item that was deleted.
+        { "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", null, WorkItemUpdateMySqlTests.HoldProject, 2 },
         { "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", null, HoldOneItem, 2 },
         { "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", null, "DELETE FROM `WorkItems`", 2 }
     };
@@ -114,7 +121,8 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         // The statement that deadlocked was sent twice, and so was the first statement of the transaction: the whole
         // write was run again, not the rest of it.
         Assert.Equal(2, texts.Count(text => text.Contains(statement, StringComparison.Ordinal)));
-        Assert.Equal(2, texts.Count(text => text == texts[0]));
+        var first = texts.First(text => text.StartsWith("UPDATE", StringComparison.Ordinal));
+        Assert.Equal(2, texts.Count(text => text == first));
         // One entry per change, whatever the attempt before it did: the server rolled that one back.
         var insert = Assert.Single(texts, text => text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
         Assert.Equal(entries, insert.Split("INSERT INTO `WorkItemChanges`").Length - 1);
@@ -142,9 +150,52 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         Assert.DoesNotContain($"GET {WorkItemChangeLog.LockName}", database.Locks);
     }
 
+    private const string RenumberSibling = "UPDATE `WorkItems` SET `Order`";
+
+    // The UPDATE that renumbers a sibling matches no row: another writer deleted the sibling after the move read it.
+    // MySql.EntityFrameworkCore then throws DbUpdateConcurrencyException, which is not a deadlock.
+    [Fact]
+    public async Task A_move_whose_sibling_was_deleted_before_it_was_renumbered_is_run_again_and_recorded_once()
+    {
+        var vanished = 1;
+        var database = ItemDatabase("no statement deadlocks", () => false, siblingIsGone: () => vanished-- > 0);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""");
+
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        // The whole move was run again, from the statement that holds the project.
+        Assert.Equal(2, texts.Count(text => text.Contains(RenumberSibling, StringComparison.Ordinal)));
+        Assert.Equal(2, texts.Count(text => text == WorkItemUpdateMySqlTests.HoldProject));
+        Assert.Single(texts, text => text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.Equal([$"GET {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemChangeLog.LockName}"], LocksAroundTheCommit(database));
+    }
+
+    [Fact]
+    public async Task A_move_whose_sibling_is_gone_on_every_attempt_is_refused_busy_and_records_nothing()
+    {
+        var database = ItemDatabase("no statement deadlocks", () => false, siblingIsGone: () => true);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""");
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>();
+        Assert.Equal(KanbanErrorCodes.Busy, error!.Code);
+        Assert.Contains("Nothing was changed", error.Message, StringComparison.Ordinal);
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        Assert.Equal(WorkItemChangeLog.DeadlockAttempts, texts.Count(text => text.Contains(RenumberSibling, StringComparison.Ordinal)));
+        Assert.DoesNotContain(texts, text => text.Contains("INSERT INTO", StringComparison.Ordinal));
+        Assert.DoesNotContain($"GET {WorkItemChangeLog.LockName}", database.Locks);
+    }
+
     // The item has no dependencies to return with it once the write is done; the delete still finds the one it blocks.
-    private static FakeDatabase ItemDatabase(string statement, Func<bool> deadlock) =>
-        new(lockResult: 1, command => command.CommandText.Contains("`Title`", StringComparison.Ordinal) && command.CommandText.Contains("FROM `WorkItemDependencies`", StringComparison.Ordinal) ? null : Answer(command))
+    private static FakeDatabase ItemDatabase(string statement, Func<bool> deadlock, Func<bool>? siblingIsGone = null) =>
+        new(lockResult: 1, command =>
+            command.CommandText.Contains("`Title`", StringComparison.Ordinal) && command.CommandText.Contains("FROM `WorkItemDependencies`", StringComparison.Ordinal) ? null
+            : command.CommandText.Contains(RenumberSibling, StringComparison.Ordinal) && siblingIsGone?.Invoke() == true ? Row("SELECT `ROW_COUNT()`", new() { ["ROW_COUNT()"] = 0 })
+            : Answer(command))
         {
             NonQueryResult = 1,
             Fail = command => command.CommandText.ReplaceLineEndings("\n").Contains(statement, StringComparison.Ordinal) && deadlock() ? MySqlFailure(1213) : null
@@ -187,20 +238,24 @@ public sealed class WorkItemDeadlockRetryMySqlTests
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
-        Assert.True(texts.Count == 9, string.Join("\n---\n", texts));
-        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`ProjectId` = @projectId", texts[0]);
+        Assert.True(texts.Count == 10, string.Join("\n---\n", texts));
+        // The project's row first, as in every write that changes which items a column holds: a move into one of
+        // the project's columns has committed or has not started.
+        Assert.Equal(WorkItemUpdateMySqlTests.HoldProject, texts[0]);
+        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`ProjectId` = @projectId", texts[1]);
         // Written by hand: starts from the project's items, which are held, and reaches the edges through their index.
-        Assert.Equal(HoldBlockedByProject, texts[1]);
-        // The first read comes after both: what it sees cannot change before the delete commits.
-        Assert.All(texts.Skip(2).Take(3), text => Assert.StartsWith("SELECT ", text, StringComparison.Ordinal));
-        Assert.Contains("FROM `Projects`", texts[2], StringComparison.Ordinal);
-        Assert.Contains("FROM `WorkItemDependencies` AS `w`\nINNER JOIN `WorkItems` AS `w0` ON `w`.`BlockerItemId` = `w0`.`Id`", texts[4], StringComparison.Ordinal);
-        Assert.StartsWith("DELETE FROM `Projects`", texts[5], StringComparison.Ordinal);
-        Assert.Empty(WithoutChangeLogEntry(texts.Skip(6).ToList(), readsProject: false));
+        Assert.Equal(HoldBlockedByProject, texts[2]);
+        // The first read comes after all three: what it sees cannot change before the delete commits.
+        Assert.Equal(0, database.TransactionStarts[0]);
+        Assert.All(texts.Skip(3).Take(3), text => Assert.StartsWith("SELECT ", text, StringComparison.Ordinal));
+        Assert.Contains("FROM `Projects`", texts[3], StringComparison.Ordinal);
+        Assert.Contains("FROM `WorkItemDependencies` AS `w`\nINNER JOIN `WorkItems` AS `w0` ON `w`.`BlockerItemId` = `w0`.`Id`", texts[5], StringComparison.Ordinal);
+        Assert.StartsWith("DELETE FROM `Projects`", texts[6], StringComparison.Ordinal);
+        Assert.Empty(WithoutChangeLogEntry(texts.Skip(7).ToList(), readsProject: false));
     }
 
     [Fact]
-    public async Task Deleting_an_item_holds_it_and_the_dependencies_it_blocks_before_it_reads_anything_and_records_both()
+    public async Task Deleting_an_item_holds_its_project_then_it_and_the_dependencies_it_blocks_before_it_reads_anything_and_records_both()
     {
         var database = Database(() => false);
         using var api = new FakeBackedApplication(database);
@@ -209,16 +264,21 @@ public sealed class WorkItemDeadlockRetryMySqlTests
 
         Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
         var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
-        Assert.True(texts.Count == 8, string.Join("\n---\n", texts));
-        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId", texts[0]);
+        Assert.True(texts.Count == 10, string.Join("\n---\n", texts));
+        // The item's project is read before the transaction, and its row is the first thing the transaction holds,
+        // as in a move: the delete takes the item out of a column that a move may be renumbering.
+        Assert.Equal("SELECT `w`.`ProjectId`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", texts[0]);
+        Assert.Equal(1, database.TransactionStarts[0]);
+        Assert.Equal(WorkItemUpdateMySqlTests.HoldProject, texts[1]);
+        Assert.Equal("UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId", texts[2]);
         // IX_WorkItemDependencies_BlockerItemId: only the edges in which the item blocks another one.
-        Assert.Equal("UPDATE `WorkItemDependencies` AS `w`\nSET `BlockerItemId` = `w`.`BlockerItemId`\nWHERE `w`.`BlockerItemId` = @itemId", texts[1]);
-        Assert.StartsWith("SELECT ", texts[2], StringComparison.Ordinal);
-        Assert.StartsWith("SELECT `w`.`BlockedItemId`, `w`.`BlockerItemId`, `w0`.`ProjectId`\nFROM `WorkItemDependencies` AS `w`", texts[3], StringComparison.Ordinal);
-        Assert.StartsWith("DELETE FROM `WorkItems`", texts[4], StringComparison.Ordinal);
+        Assert.Equal("UPDATE `WorkItemDependencies` AS `w`\nSET `BlockerItemId` = `w`.`BlockerItemId`\nWHERE `w`.`BlockerItemId` = @itemId", texts[3]);
+        Assert.StartsWith("SELECT ", texts[4], StringComparison.Ordinal);
+        Assert.StartsWith("SELECT `w`.`BlockedItemId`, `w`.`BlockerItemId`, `w0`.`ProjectId`\nFROM `WorkItemDependencies` AS `w`", texts[5], StringComparison.Ordinal);
+        Assert.StartsWith("DELETE FROM `WorkItems`", texts[6], StringComparison.Ordinal);
         // One entry for the item that was blocked, one for the item that was deleted.
-        Assert.Equal(2, texts[6].Split("INSERT INTO `WorkItemChanges`").Length - 1);
-        Assert.Empty(WithoutChangeLogEntry(texts.Skip(5).ToList(), readsProject: false));
+        Assert.Equal(2, texts[8].Split("INSERT INTO `WorkItemChanges`").Length - 1);
+        Assert.Empty(WithoutChangeLogEntry(texts.Skip(7).ToList(), readsProject: false));
     }
 
     private static FakeDatabase Database(Func<bool> deadlock) =>

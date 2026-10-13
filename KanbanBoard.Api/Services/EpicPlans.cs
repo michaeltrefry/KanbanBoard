@@ -121,7 +121,7 @@ public static class EpicPlans
             var reference = planned.Ref;
             if (string.IsNullOrWhiteSpace(reference) || reference.Length > EpicPlanLimits.MaxRefLength || reference.Any(char.IsControl))
             {
-                return Invalid($"{where}: Field 'ref' is required and must be at most {EpicPlanLimits.MaxRefLength} characters, without control characters.");
+                return Invalid($"{where}: Argument 'ref' is required and must be at most {EpicPlanLimits.MaxRefLength} characters, without control characters.");
             }
 
             where = $"Item '{reference}' ({where})";
@@ -132,17 +132,17 @@ public static class EpicPlans
 
             if (!TryParse(planned.Type, WorkItemType.Story, out var type))
             {
-                return Invalid($"{where}: Field 'type' must be one of {string.Join(", ", Enum.GetNames<WorkItemType>())}.");
+                return Invalid($"{where}: Argument 'type' must be one of {string.Join(", ", Enum.GetNames<WorkItemType>())}.");
             }
 
             if (!TryParse(planned.Status, WorkItemStatus.Backlog, out var status))
             {
-                return Invalid($"{where}: Field 'status' must be one of {string.Join(", ", Enum.GetNames<WorkItemStatus>())}.");
+                return Invalid($"{where}: Argument 'status' must be one of {string.Join(", ", Enum.GetNames<WorkItemStatus>())}.");
             }
 
             if (!TryParse(planned.Priority, WorkItemPriority.Medium, out var priority))
             {
-                return Invalid($"{where}: Field 'priority' must be one of {string.Join(", ", Enum.GetNames<WorkItemPriority>())}.");
+                return Invalid($"{where}: Argument 'priority' must be one of {string.Join(", ", Enum.GetNames<WorkItemPriority>())}.");
             }
 
             if (!WorkItemWrites.TryNew(

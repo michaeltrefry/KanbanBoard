@@ -42,13 +42,12 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
-            ILoggerFactory loggerFactory,
             CancellationToken cancellationToken) =>
             await AnswerAsync(
                 itemId,
                 await WorkItemWrites.MoveAsync(
                     dbContext, itemId, request.Status, request.Order, request.ExpectedVersion,
-                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), loggerFactory.CreateLogger(typeof(WorkItemWrites)), cancellationToken),
+                    await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
                 dbContext, changeNotifier, timeProvider, cancellationToken))
         .WithName("MoveWorkItem");
 

@@ -218,8 +218,13 @@ public static class WorkItemChangeLog
     /// rolled it back as the victim of a deadlock (error 1213): a write whose first statement takes the rows of
     /// several items can meet writers that hold one of them and wait for another. After
     /// <see cref="DeadlockAttempts"/> deadlocks the write is refused <c>busy</c>; nothing of it is stored.
+    ///
+    /// With <paramref name="alsoWhenARowVanished"/> the write is run again in the same way, and counted with the
+    /// deadlocks, when a row it had read was deleted before it saved it (<see cref="DbUpdateConcurrencyException"/>):
+    /// the move renumbers the siblings it read. The write must leave its transaction uncommitted when that save
+    /// throws, so that nothing of the attempt is stored.
     /// </summary>
-    public static async Task<T> RetryDeadlocksAsync<T>(KanbanDbContext dbContext, Func<Task<T>> write)
+    public static async Task<T> RetryDeadlocksAsync<T>(KanbanDbContext dbContext, Func<Task<T>> write, bool alsoWhenARowVanished = false)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -227,14 +232,16 @@ public static class WorkItemChangeLog
             {
                 return await write();
             }
-            catch (Exception exception) when (IsDeadlock(exception))
+            catch (Exception exception) when (IsDeadlock(exception) || (alsoWhenARowVanished && exception is DbUpdateConcurrencyException))
             {
-                // The server has rolled the transaction back; what the attempt tracked is not stored.
+                // The transaction has been rolled back, by the server or when the write left it; what the attempt
+                // tracked is not stored.
                 dbContext.ChangeTracker.Clear();
                 if (attempt == DeadlockAttempts)
                 {
-                    throw new KanbanBusyException(
-                        $"Other writes to the same work items deadlocked with this one {DeadlockAttempts} times. Nothing was changed; try again.");
+                    throw new KanbanBusyException(exception is DbUpdateConcurrencyException
+                        ? $"Other writes deleted work items this one was renumbering, {DeadlockAttempts} times. Nothing was changed; try again."
+                        : $"Other writes to the same work items deadlocked with this one {DeadlockAttempts} times. Nothing was changed; try again.");
                 }
             }
         }

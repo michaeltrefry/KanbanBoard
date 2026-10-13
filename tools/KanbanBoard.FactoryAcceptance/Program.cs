@@ -3,9 +3,13 @@
 //
 //   KANBAN_MCP_URL                 MCP endpoint, for example https://kanban-mcp.example.net/mcp
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
-//   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the write tools refuse it with scope_denied and that it can use every read
-//                                  tool. Without it epic acceptance test 7 is skipped.
+//   KANBAN_FACTORY_IDENTITY_NAME   the display name of that identity, as it was given to create-service-identity
+//                                  (for example factory). The claimant of the token's claims, the author of its
+//                                  comments and the actor of its entries in the change feed must all carry this
+//                                  name: a token of any other identity, such as a person's, fails tests 1, 3 and 4.
+//   KANBAN_FACTORY_READ_TOKEN      read-scope token of the same identity; with it the script checks that every
+//                                  write tool refuses it with scope_denied and that it can use every read tool.
+//                                  Without it epic acceptance test 7 is skipped and the run ends INCOMPLETE.
 //   KANBAN_ACCEPTANCE_PROJECT_ID   optional: an existing project in which the finer-grained checks create (and
 //                                  afterwards delete) their scratch work items. Without it the script creates a
 //                                  scratch project for them.
@@ -20,7 +24,9 @@
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
-// Exit code 0 when every check passes, 1 when a check fails, 2 when the environment is incomplete.
+// The last line is ACCEPTANCE PASSED, ACCEPTANCE FAILED or ACCEPTANCE INCOMPLETE. Exit code 0 when every check passes
+// and all eight epic acceptance tests ran, 1 when a check fails, 2 when a required variable is not set (nothing is
+// called), 3 when no check failed but an epic acceptance test was skipped.
 using System.Net.Http.Headers;
 using System.Text.Json;
 using ModelContextProtocol.Client;
@@ -30,9 +36,12 @@ var mcpUrl = Environment.GetEnvironmentVariable("KANBAN_MCP_URL");
 var token = Environment.GetEnvironmentVariable("KANBAN_FACTORY_TOKEN");
 var projectId = Environment.GetEnvironmentVariable("KANBAN_ACCEPTANCE_PROJECT_ID");
 var readToken = Environment.GetEnvironmentVariable("KANBAN_FACTORY_READ_TOKEN");
-if (string.IsNullOrWhiteSpace(mcpUrl) || string.IsNullOrWhiteSpace(token))
+var identityName = Environment.GetEnvironmentVariable("KANBAN_FACTORY_IDENTITY_NAME")?.Trim();
+if (string.IsNullOrWhiteSpace(mcpUrl) || string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(identityName))
 {
-    Console.Error.WriteLine("Set KANBAN_MCP_URL and KANBAN_FACTORY_TOKEN.");
+    Console.Error.WriteLine(
+        "Usage: set KANBAN_MCP_URL, KANBAN_FACTORY_TOKEN and KANBAN_FACTORY_IDENTITY_NAME (the display name of the service identity the token belongs to, " +
+        "for example factory), and KANBAN_FACTORY_READ_TOKEN for epic acceptance test 7. Nothing was called.");
     return 2;
 }
 
@@ -83,8 +92,8 @@ try
     var first = await ClaimAsync(markerA, 60);
     Check("claim_work_item on an unclaimed item succeeds", first.Code is null, first);
     var claimant = first.Code is null ? StringField(first.Body, "claimant") : null;
-    Check("the claim records a claimant, the marker and an expiry",
-        !string.IsNullOrEmpty(claimant) &&
+    Check($"the claim records the identity '{identityName}' as claimant, the marker and an expiry",
+        claimant == identityName &&
         StringField(first.Body, "claim_marker") == markerA &&
         StringField(first.Body, "claim_expires_at_utc") is not null,
         first);
@@ -113,7 +122,7 @@ try
     // 4. The holder releases: the claim fields are null, and another marker can claim at once.
     var released = await CallAsync("release_work_item_claim", new() { ["id"] = itemId, ["marker"] = markerA });
     Check("release_work_item_claim with the holder's marker returns null claim fields",
-        released.Code is null && ClaimFields.All(field => IsNullField(released.Body, field)),
+        released.Code is null && ClaimFields.All(field => HasNullField(released.Body, field)),
         released);
     var afterRelease = await ClaimAsync(markerB, 60);
     Check("after the release, a claim with another marker succeeds",
@@ -1039,7 +1048,7 @@ try
                 feed.All(entry => entry.TryGetProperty("actor", out var actor) && StringField(actor, "id") == factoryId && StringField(actor, "name") == factoryName),
                 new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed)));
             Check("the claim entry has the marker, the claimant and the expiry as new values, with null as old",
-                ChangeOf(feed[2], "claim_marker") is { } markerChange && IsNullField(markerChange, "old") && StringField(markerChange, "new") == feedMarker &&
+                ChangeOf(feed[2], "claim_marker") is { } markerChange && HasNullField(markerChange, "old") && StringField(markerChange, "new") == feedMarker &&
                 ChangeOf(feed[2], "claimant_id") is { } claimantChange && StringField(claimantChange, "new") == factoryId &&
                 ChangeOf(feed[2], "claim_expires_at_utc") is { } expiryChange && StringField(expiryChange, "new") is not null,
                 new ToolOutcome(null, null, feed[2]));
@@ -1048,7 +1057,7 @@ try
                 ChangeOf(feed[3], "version") is { } versionChange && IntField(versionChange, "old") == 1 && IntField(versionChange, "new") == 2,
                 new ToolOutcome(null, null, feed[3]));
             Check("the comment entry has the comment's id, author and body",
-                ChangeOf(feed[4], "comment") is { } commentChange && IsNullField(commentChange, "old") &&
+                ChangeOf(feed[4], "comment") is { } commentChange && HasNullField(commentChange, "old") &&
                 commentChange.GetProperty("new") is var comment &&
                 StringField(comment, "id") == StringField(feedComment.Body, "comment_id") &&
                 StringField(comment, "author") == factoryName &&
@@ -1059,7 +1068,7 @@ try
                 StringField(linkChange.GetProperty("new"), "id") == StringField(LinksOf(feedLink.Body).FirstOrDefault(), "id") &&
                 StringField(linkChange.GetProperty("new"), "kind") == "pr" &&
                 StringField(linkChange.GetProperty("new"), "url") == feedUrl &&
-                ChangeOf(feed[6], "blocked_by") is { } edgeChange && IsNullField(edgeChange, "old") && StringField(edgeChange, "new") == feedBlockerId,
+                ChangeOf(feed[6], "blocked_by") is { } edgeChange && HasNullField(edgeChange, "old") && StringField(edgeChange, "new") == feedBlockerId,
                 new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Skip(5))));
         }
 
@@ -1085,7 +1094,7 @@ try
         Check("the cursor of an empty read finds the next change: the release, with the marker as old value",
             released.Code is null && afterReleaseFailure is null && afterRelease.Count == 1 &&
             StringField(afterRelease[0], "kind") == "claim_released" &&
-            ChangeOf(afterRelease[0], "claim_marker") is { } releasedMarker && StringField(releasedMarker, "old") == feedMarker && IsNullField(releasedMarker, "new"),
+            ChangeOf(afterRelease[0], "claim_marker") is { } releasedMarker && StringField(releasedMarker, "old") == feedMarker && HasNullField(releasedMarker, "new"),
             new ToolOutcome(null, null, JsonSerializer.SerializeToElement(afterRelease)));
 
         // 50. A malformed cursor, and the cursor of another list, are refused.
@@ -1224,7 +1233,8 @@ try
         var claimedA = await CallAsync("claim_work_item", new() { ["id"] = plan["A"], ["marker"] = epicMarker, ["ttl_seconds"] = 600 });
         factoryIdentityName = StringField(claimedA.Body, "claimant");
         factoryIdentityId = StringField(claimedA.Body, "claimant_id");
-        Check("claim_work_item claims A for the factory identity", claimedA.Code is null && StringField(claimedA.Body, "claim_marker") == epicMarker && factoryIdentityId is not null, claimedA);
+        Check($"claim_work_item claims A for the factory identity: claimant is '{identityName}', with a claimant_id",
+            claimedA.Code is null && StringField(claimedA.Body, "claim_marker") == epicMarker && factoryIdentityId is not null && factoryIdentityName == identityName, claimedA);
         var secondClaim = await CallAsync("claim_work_item", new() { ["id"] = plan["A"], ["marker"] = $"{epicMarker}-other", ["ttl_seconds"] = 600 });
         Check("a second claim of A with another marker is refused already_claimed", secondClaim.Code == "already_claimed", secondClaim);
 
@@ -1270,10 +1280,10 @@ try
         commentIdOnA = StringField(commented.Body, "comment_id");
         Check("add_work_item_comment returns the comment's id", commented.Code is null && commentIdOnA is not null, commented);
         var comments = await CallAsync("list_work_item_comments", new() { ["id"] = plan.GetValueOrDefault("A") });
-        Check("list_work_item_comments returns the comment with its id, its body and the factory identity as author and author_id",
+        Check($"list_work_item_comments returns the comment with its id, its body, '{identityName}' as author and the claimant_id of test 1 as author_id",
             comments.Code is null && factoryIdentityId is not null && CommentsOf(comments.Body, "items") is [var comment] &&
             StringField(comment, "id") == commentIdOnA && StringField(comment, "body") == $"epic test comment {run}" &&
-            StringField(comment, "author") == factoryIdentityName && StringField(comment, "author_id") == factoryIdentityId,
+            StringField(comment, "author") == identityName && StringField(comment, "author_id") == factoryIdentityId,
             comments);
         return true;
     });
@@ -1286,25 +1296,25 @@ try
         Check("the feed of the project holds the import (three items, then two dependencies), the claim, the move, the link and the comment, in that order",
             kinds.SequenceEqual(["item_created:A", "item_created:B", "item_created:C", "dependency_added:B", "dependency_added:C", "claimed:A", "item_moved:A", "link_added:A", "comment_added:A"]),
             new ToolOutcome("error", string.Join(", ", kinds), default));
-        Check("every entry has the factory identity as actor and a later sequence than the one before",
-            factoryIdentityId is not null &&
-            feed.All(entry => entry.TryGetProperty("actor", out var actor) && StringField(actor, "id") == factoryIdentityId && StringField(actor, "name") == factoryIdentityName) &&
+        Check($"every entry has the factory identity as actor ('{identityName}', with the claimant_id of test 1 as id) and a later sequence than the one before",
+            factoryIdentityId is not null && feed.Count > 0 &&
+            feed.All(entry => entry.TryGetProperty("actor", out var actor) && StringField(actor, "id") == factoryIdentityId && StringField(actor, "name") == identityName) &&
             feed.Zip(feed.Skip(1)).All(pair => IntField(pair.First, "sequence") < IntField(pair.Second, "sequence")),
             new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed)));
         if (feed.Count == 9)
         {
             Check("the import's entries carry the items as they were created and the blocking items",
-                ChangeOf(feed[0], "status") is { } createdStatus && IsNullField(createdStatus, "old") && StringField(createdStatus, "new") == "Ready" &&
+                ChangeOf(feed[0], "status") is { } createdStatus && HasNullField(createdStatus, "old") && StringField(createdStatus, "new") == "Ready" &&
                 ChangeOf(feed[0], "epic_id") is { } createdEpic && StringField(createdEpic, "new") == epicId &&
                 ChangeOf(feed[3], "blocked_by") is { } firstEdge && StringField(firstEdge, "new") == plan["A"] &&
                 ChangeOf(feed[4], "blocked_by") is { } secondEdge && StringField(secondEdge, "new") == plan["B"],
                 new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Take(5))));
             Check("the claim entry has the marker and the claimant, the move entry the old and the new status, the comment entry the comment's id, author and body",
-                ChangeOf(feed[5], "claim_marker") is { } markerChange && IsNullField(markerChange, "old") && StringField(markerChange, "new") == epicMarker &&
+                ChangeOf(feed[5], "claim_marker") is { } markerChange && HasNullField(markerChange, "old") && StringField(markerChange, "new") == epicMarker &&
                 ChangeOf(feed[5], "claimant_id") is { } claimantChange && StringField(claimantChange, "new") == factoryIdentityId &&
                 ChangeOf(feed[6], "status") is { } statusChange && StringField(statusChange, "old") == "Ready" && StringField(statusChange, "new") == "Done" &&
                 ChangeOf(feed[8], "comment") is { } commentChange && commentChange.GetProperty("new") is var comment &&
-                StringField(comment, "id") == commentIdOnA && StringField(comment, "author") == factoryIdentityName && StringField(comment, "body") == $"epic test comment {run}",
+                StringField(comment, "id") == commentIdOnA && StringField(comment, "author") == identityName && StringField(comment, "body") == $"epic test comment {run}",
                 new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Skip(5))));
         }
 
@@ -1323,7 +1333,7 @@ try
         Check("while the claim is live, another marker is refused already_claimed", whileHeld.Code == "already_claimed", whileHeld);
         await Task.Delay(TimeSpan.FromSeconds(4));
         var lapsed = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B") });
-        Check("once it lapses, B reads as unclaimed", lapsed.Code is null && ClaimFields.All(field => IsNullField(lapsed.Body, field)), lapsed);
+        Check("once it lapses, B reads as unclaimed", lapsed.Code is null && ClaimFields.All(field => HasNullField(lapsed.Body, field)), lapsed);
         var afterLapse = await CallAsync("claim_work_item", new() { ["id"] = plan.GetValueOrDefault("B"), ["marker"] = $"{epicMarker}-next", ["ttl_seconds"] = 600 });
         Check("another marker then claims B", afterLapse.Code is null && StringField(afterLapse.Body, "claim_marker") == $"{epicMarker}-next", afterLapse);
         return true;
@@ -1352,7 +1362,7 @@ try
     {
         if (string.IsNullOrWhiteSpace(readToken))
         {
-            Console.WriteLine("SKIP  KANBAN_FACTORY_READ_TOKEN is not set");
+            Console.WriteLine("SKIP  KANBAN_FACTORY_READ_TOKEN is not set: the run will end INCOMPLETE");
             return false;
         }
 
@@ -1375,8 +1385,23 @@ try
             ("list_work_item_comments", new() { ["id"] = plan.GetValueOrDefault("A") }),
             ("list_changes", new() { ["cursor"] = savedCursor, ["project_id"] = epicProjectId })
         };
-        foreach (var (tool, arguments) in reads)
+        // "Every read tool" is what the server lists, not what this script remembers: every tool of tools/list
+        // that is not a write tool is called, and a tool the script has no call for is a failure, as is a tool
+        // the script knows and the server no longer lists.
+        var listed = (await readClient.ListToolsAsync()).Select(tool => tool.Name).ToList();
+        var known = reads.Select(read => read.Tool).Concat(WriteTools).ToList();
+        Check($"tools/list holds the {reads.Length} read tools and the {WriteTools.Length} write tools of the contract, and no other tool",
+            listed.Order().SequenceEqual(known.Order()),
+            new ToolOutcome("error", $"not known to the script: [{string.Join(", ", listed.Except(known).Order())}]; not listed by the server: [{string.Join(", ", known.Except(listed).Order())}]", default));
+        foreach (var tool in listed.Except(WriteTools).Order())
         {
+            if (reads.FirstOrDefault(read => read.Tool == tool).Arguments is not { } arguments)
+            {
+                Check($"{tool} is listed and is not a write tool, so it is a read tool the read-scope token must be able to call", false,
+                    new ToolOutcome("error", "the script has no call for this tool", default));
+                continue;
+            }
+
             var answered = await CallAsync(tool, arguments, readClient);
             Check($"{tool} with the read-scope token succeeds", answered.Code is null, answered);
         }
@@ -1389,6 +1414,14 @@ try
         Check("import_epic_plan with the read-scope token is refused scope_denied", refusedImport.Code == "scope_denied", refusedImport);
         var refusedLink = await CallAsync("add_work_item_link", new() { ["id"] = plan.GetValueOrDefault("C"), ["kind"] = "pr", ["url"] = $"{prUrlOnA}-read" }, readClient);
         Check("add_work_item_link with the read-scope token is refused scope_denied", refusedLink.Code == "scope_denied", refusedLink);
+        // The scope is checked before the arguments: every write tool refuses the read token scope_denied, also a
+        // call without any argument and one with an argument the tool does not have.
+        foreach (var tool in WriteTools)
+        {
+            var bare = await CallAsync(tool, new(), readClient);
+            var misspelt = await CallAsync(tool, new() { ["no_such_argument"] = 1 }, readClient);
+            Check($"{tool} with the read-scope token is refused scope_denied whatever its arguments", bare.Code == "scope_denied" && misspelt.Code == "scope_denied", bare.Code == "scope_denied" ? misspelt : bare);
+        }
 
         var itemAfter = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("C") });
         var epics = await CallAsync("list_epics", new() { ["projectId"] = epicProjectId });
@@ -1396,7 +1429,7 @@ try
         var (feedAfter, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
         Check("the refused calls wrote nothing: C is unclaimed and unlinked as before, the project has one epic, and its change feed gained no entry",
             itemBefore.Code is null && itemAfter.Code is null && itemAfter.Body.GetRawText() == itemBefore.Body.GetRawText() &&
-            ClaimFields.All(field => IsNullField(itemAfter.Body, field)) && LinksOf(itemAfter.Body).Length == 0 &&
+            ClaimFields.All(field => HasNullField(itemAfter.Body, field)) && LinksOf(itemAfter.Body).Length == 0 &&
             epics.Code is null && epics.Body.GetArrayLength() == 1 &&
             foundRefused.Code is null && foundRefused.Body.GetArrayLength() == 0 &&
             feedBefore.Count > 0 && feedAfter.Count == feedBefore.Count,
@@ -1441,6 +1474,10 @@ try
     // Finer-grained checks of the import and of the keys of the other create tools, in the same scratch project.
     if (epicProjectId is not null && epicId is not null)
     {
+        var board = await CallAsync("get_board", new() { ["projectId"] = epicProjectId });
+        Check("get_board carries the project's repository_url and default_branch",
+            board.Code is null && StringField(board.Body, "repository_url") == epicRepositoryUrl && StringField(board.Body, "default_branch") == "main", board);
+
         var refusedPlans = new (string What, string Code, object[] Items)[]
         {
             ("a dependency cycle", "cycle", [new { @ref = "X", title = "x", blocked_by = new[] { "Y" } }, new { @ref = "Y", title = "y", blocked_by = new[] { "X" } }]),
@@ -1522,14 +1559,31 @@ finally
 
 Console.WriteLine();
 Console.WriteLine("EPIC ACCEPTANCE TESTS (sc-25857)");
+// Tests 1, 3 and 4 are about the factory identity: their lines say which identity the token turned out to be.
+var identityLine = $"  [factory identity: expected name '{identityName}'; the token's claimant is '{factoryIdentityName ?? "<none>"}', claimant_id {factoryIdentityId ?? "<none>"}]";
 foreach (var (number, text, result) in epicTests)
 {
-    Console.WriteLine($"{number}. {result}  {text}");
+    Console.WriteLine($"{number}. {result}  {text}{(number is 1 or 3 or 4 ? identityLine : string.Empty)}");
 }
 
+// A test that did not run has not passed: the run is not an acceptance until all eight ran.
+var skipped = epicTests.Where(test => test.Result == "SKIP").Select(test => test.Number).ToList();
+var missing = Enumerable.Range(1, 8).Except(epicTests.Select(test => test.Number)).ToList();
 Console.WriteLine();
-Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
-return failures == 0 ? 0 : 1;
+if (failures > 0)
+{
+    Console.WriteLine($"ACCEPTANCE FAILED ({failures} failure(s))");
+    return 1;
+}
+
+if (skipped.Count > 0 || missing.Count > 0)
+{
+    Console.WriteLine($"ACCEPTANCE INCOMPLETE (epic acceptance test(s) {string.Join(", ", skipped.Concat(missing).Order())} did not run{(skipped.Contains(7) ? "; set KANBAN_FACTORY_READ_TOKEN for test 7" : string.Empty)})");
+    return 3;
+}
+
+Console.WriteLine("ACCEPTANCE PASSED");
+return 0;
 
 // Runs one acceptance test of the epic and records whether every check in it passed. The test returns false when it
 // could not be run at all.
@@ -1714,7 +1768,8 @@ static bool IsFlag(JsonElement item, string name, bool expected) =>
     item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) &&
     value.ValueKind == (expected ? JsonValueKind.True : JsonValueKind.False);
 
-// The field is there and it is null: a project always carries its repository_url and default_branch.
+// The field is there and it is null: a project always carries its repository_url and default_branch, a work item its
+// estimate and its four claim fields, and a change its old and new.
 static bool HasNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Null;
 
@@ -1731,6 +1786,8 @@ static JsonElement? ChangeOf(JsonElement entry, string field) =>
         ? changes.EnumerateArray().Where(change => StringField(change, "field") == field).Select(change => (JsonElement?)change).FirstOrDefault()
         : null;
 
+// The field is left out or null: for the optional fields the server leaves out when they are empty (description,
+// labels, next_cursor). Not for a field that is always written: see HasNullField.
 static bool IsNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && (!item.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null);
 
@@ -1744,4 +1801,18 @@ internal sealed record ToolOutcome(string? Code, string? Message, JsonElement Bo
 internal static partial class Program
 {
     private static readonly string[] ClaimFields = ["claimant", "claimant_id", "claim_marker", "claim_expires_at_utc"];
+
+    // The tools that create, change or delete data. Every other tool the server lists is a read tool.
+    private static readonly string[] WriteTools =
+    [
+        "create_project", "update_project", "delete_project",
+        "create_epic", "update_epic", "delete_epic",
+        "create_epic_document", "update_epic_document",
+        "create_work_item", "create_epic_work_item", "import_epic_plan",
+        "update_work_item", "move_work_item", "delete_work_item",
+        "claim_work_item", "renew_work_item_claim", "release_work_item_claim",
+        "add_work_item_dependency", "remove_work_item_dependency",
+        "add_work_item_link", "remove_work_item_link",
+        "add_work_item_comment", "add_issue_comment"
+    ];
 }

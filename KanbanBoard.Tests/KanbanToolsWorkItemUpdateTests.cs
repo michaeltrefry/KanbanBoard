@@ -14,9 +14,9 @@ public sealed class KanbanToolsWorkItemUpdateTests
     private const string ItemJson =
         """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"]}""";
 
-    // ItemJson as the tools return it: null properties are left out, except estimate.
+    // ItemJson as the tools return it: null properties are left out, except estimate and the four claim fields.
     private const string ItemText =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"]}""";
 
     private const string SearchJson =
         """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":7},{"id":"33333333-3333-3333-3333-333333333333","projectId":"22222222-2222-2222-2222-222222222222","title":"Other","type":"Task","status":"Done","estimate":5,"version":1}]""";
@@ -214,7 +214,7 @@ public sealed class KanbanToolsWorkItemUpdateTests
     [InlineData(HttpStatusCode.BadRequest, """{"code":"invalid_argument","message":"Argument 'title' ..."}""", KanbanErrorCodes.InvalidArgument)]
     // An answer without a body of the API's own still has a code.
     [InlineData(HttpStatusCode.NotFound, "", KanbanErrorCodes.NotFound)]
-    [InlineData(HttpStatusCode.BadRequest, """{"message":"Field 'title' is required."}""", KanbanErrorCodes.InvalidArgument)]
+    [InlineData(HttpStatusCode.BadRequest, """{"message":"Argument 'title' is required."}""", KanbanErrorCodes.InvalidArgument)]
     public async Task Api_refusal_of_an_update_a_move_or_a_create_becomes_the_typed_error_envelope(HttpStatusCode status, string apiBody, string code)
     {
         await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(status, apiBody));

@@ -48,6 +48,8 @@ public sealed record ProjectSummaryDto(
     public bool? Created { get; init; }
 }
 
+/// <param name="RepositoryUrl">The repository the project's work is done in, or null when none is set.</param>
+/// <param name="DefaultBranch">The branch of that repository work starts from, or null when none is set.</param>
 public sealed record ProjectBoardDto(
     Guid Id,
     string Name,
@@ -55,7 +57,10 @@ public sealed record ProjectBoardDto(
     string? Description,
     bool IsArchived,
     DateTimeOffset CreatedAtUtc,
-    IReadOnlyList<WorkItemDto> Items);
+    IReadOnlyList<WorkItemDto> Items,
+    // Always written, also as null, as on ProjectSummaryDto.
+    [property: JsonPropertyName("repository_url"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? RepositoryUrl = null,
+    [property: JsonPropertyName("default_branch"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? DefaultBranch = null);
 
 public sealed record EpicDto(
     Guid Id,
@@ -126,11 +131,11 @@ public sealed record WorkItemDto(
     IReadOnlyList<WorkItemCommentDto> Comments,
     DateTimeOffset CreatedAtUtc,
     DateTimeOffset UpdatedAtUtc,
-    // Live claim, or all null when the item is unclaimed or its claim has expired.
-    [property: JsonPropertyName("claimant")] string? Claimant = null,
-    [property: JsonPropertyName("claimant_id")] Guid? ClaimantId = null,
-    [property: JsonPropertyName("claim_marker")] string? ClaimMarker = null,
-    [property: JsonPropertyName("claim_expires_at_utc")] DateTimeOffset? ClaimExpiresAtUtc = null)
+    // Live claim, or all null when the item is unclaimed or its claim has expired. Always written, also as null.
+    [property: JsonPropertyName("claimant"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? Claimant = null,
+    [property: JsonPropertyName("claimant_id"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] Guid? ClaimantId = null,
+    [property: JsonPropertyName("claim_marker"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? ClaimMarker = null,
+    [property: JsonPropertyName("claim_expires_at_utc"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] DateTimeOffset? ClaimExpiresAtUtc = null)
 {
     /// <summary>Work items this item is blocked by, each with its current status.</summary>
     [JsonPropertyName("blockers")]
