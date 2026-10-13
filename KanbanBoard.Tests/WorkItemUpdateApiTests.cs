@@ -292,6 +292,43 @@ public sealed class WorkItemUpdateApiTests
         Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
     }
 
+    // A save that fails for any other reason than a row that went is not run again: the move answers the error and
+    // leaves nothing behind.
+    [Fact]
+    public async Task A_move_whose_renumbering_of_the_siblings_fails_moves_nothing_and_records_nothing()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "SIB");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
+        var c = await CreateAsync(client, project, new { title = "C", type = "Task", status = "Ready", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
+
+        // The item is written by an UPDATE of its own; apart from the entry of the change feed, the only save of
+        // a move is the one of its siblings, in the same transaction.
+        api.FailNextSave = true;
+        using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Ready", order = 0, expectedVersion = 1 });
+        var failed = !api.FailNextSave;
+        var after = await ItemsAsync(client);
+        var entriesAfter = Entries(api).Count;
+        // Nothing of the failed move is left, so the same move, with the same version, goes through.
+        var next = await PostAsync<WorkItemDto>(client, $"/api/items/{b.Id}/move", new { status = "Ready", order = 0, expectedVersion = 1 });
+        var moved = await ItemsAsync(client);
+
+        // It failed once, and was not run again.
+        Assert.True(failed);
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        // The item kept its column, its place, its version and its stamp, the siblings theirs, and the change feed
+        // got no entry.
+        Assert.Equal(b, after[b.Id], Same);
+        Assert.Equal(a, after[a.Id], Same);
+        Assert.Equal(c, after[c.Id], Same);
+        Assert.Equal(entriesBefore, entriesAfter);
+        Assert.Equal((WorkItemStatus.Ready, 0, 2L, 1, 1L), (next.Status, moved[b.Id].Order, next.Version, moved[c.Id].Order, moved[c.Id].Version));
+        Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
+    }
+
     // The update of a status takes the same way out: its save finds a row gone, and it is run again.
     [Fact]
     public async Task An_update_of_the_status_whose_save_finds_a_row_deleted_is_run_again_and_recorded_once()
