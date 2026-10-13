@@ -416,6 +416,35 @@ public sealed class ProjectApiTests
         Assert.Equal("App", Assert.Single(await ProjectsAsync(fixture)).Name);
     }
 
+    // delete_project wins the race: the project is there when the update reads it and gone when it saves. The
+    // partial update (MCP update_project) and the full update of the web UI share the path.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Update_of_a_project_deleted_after_it_was_read_is_refused_not_found_like_an_unknown_one(bool fullUpdate)
+    {
+        using var api = new ProgramDependencyWiringTests.ApiApplication();
+        using var client = api.CreateClient();
+        var project = (await ProgramDependencyWiringTests.PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "App", key = "APP" })).Id;
+        var deleted = 0;
+        api.BeforeNextSave = () =>
+        {
+            using var dbContext = api.OpenDatabase();
+            deleted = dbContext.Projects.Where(candidate => candidate.Id == project).ExecuteDelete();
+        };
+
+        using var response = fullUpdate
+            ? await client.PutAsJsonAsync($"/api/projects/{project}", new { name = "Renamed", key = "APP", isArchived = false })
+            : await client.PatchAsJsonAsync($"/api/projects/{project}", new { name = "Renamed" });
+        using var unknown = await client.PatchAsJsonAsync($"/api/projects/{project}", new { name = "Renamed" });
+
+        Assert.Equal(1, deleted);
+        await AssertErrorAsync(response, HttpStatusCode.NotFound, KanbanErrorCodes.NotFound);
+        // The same body as for a project that is not there when it is read.
+        await AssertErrorAsync(unknown, HttpStatusCode.NotFound, KanbanErrorCodes.NotFound);
+        Assert.Equal(await unknown.Content.ReadAsStringAsync(), await response.Content.ReadAsStringAsync());
+    }
+
     [Fact]
     public async Task Update_to_the_key_of_another_project_is_refused_conflict_and_a_name_another_project_has_is_allowed()
     {

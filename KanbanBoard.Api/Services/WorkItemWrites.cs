@@ -157,7 +157,9 @@ public static class WorkItemWrites
     ///
     /// An update that names a status may put the item at the end of another column, so it starts by holding the
     /// project's row, like a create and a move (<see cref="HoldColumnsAsync"/>): it reads the end of that column
-    /// after every earlier writer of the project's columns has committed.
+    /// after every earlier writer of the project's columns has committed. So does an update that names an epic: its
+    /// save reads the epic's row (the foreign key) while it holds the item's row, and an archive or a delete of that
+    /// epic, which holds the project's row, then the epic's, then the items, would take the two in the other order.
     /// </summary>
     public static async Task<WorkItemWriteResult> UpdateAsync(
         KanbanDbContext dbContext,
@@ -186,7 +188,7 @@ public static class WorkItemWrites
         }
 
         // Read before the transaction starts: a read inside it would come before the statement that holds the row.
-        var projectId = patch.Status is null ? null : await ProjectOfAsync(dbContext, itemId, cancellationToken);
+        var projectId = patch.Status is null && !patch.HasEpicId ? null : await ProjectOfAsync(dbContext, itemId, cancellationToken);
 
         // The save below can rewrite the item's entries in the indexes on its column and its epic while this
         // transaction holds the item's row; a delete of the project or an archive of the epic takes the two in the
@@ -197,7 +199,7 @@ public static class WorkItemWrites
         {
             // The UPDATE holds the item's row until the transaction ends: the updates of one item run one at a time,
             // and each reads the item only after the one before it has committed. Only the project's row is held
-            // before it, and only by an update that names a status.
+            // before it, and only by an update that names a status or an epic.
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
             if (projectId is not null)
             {

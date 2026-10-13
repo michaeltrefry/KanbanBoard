@@ -292,6 +292,43 @@ public sealed class WorkItemUpdateApiTests
         Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
     }
 
+    // A save that fails for any other reason than a row that went is not run again: the move answers the error and
+    // leaves nothing behind.
+    [Fact]
+    public async Task A_move_whose_renumbering_of_the_siblings_fails_moves_nothing_and_records_nothing()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, _) = await CreateProjectAsync(client, "SIB");
+        var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
+        var c = await CreateAsync(client, project, new { title = "C", type = "Task", status = "Ready", priority = "Medium" });
+        var entriesBefore = Entries(api).Count;
+
+        // The item is written by an UPDATE of its own; apart from the entry of the change feed, the only save of
+        // a move is the one of its siblings, in the same transaction.
+        api.FailNextSave = true;
+        using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Ready", order = 0, expectedVersion = 1 });
+        var failed = !api.FailNextSave;
+        var after = await ItemsAsync(client);
+        var entriesAfter = Entries(api).Count;
+        // Nothing of the failed move is left, so the same move, with the same version, goes through.
+        var next = await PostAsync<WorkItemDto>(client, $"/api/items/{b.Id}/move", new { status = "Ready", order = 0, expectedVersion = 1 });
+        var moved = await ItemsAsync(client);
+
+        // It failed once, and was not run again.
+        Assert.True(failed);
+        Assert.Equal(HttpStatusCode.InternalServerError, response.StatusCode);
+        // The item kept its column, its place, its version and its stamp, the siblings theirs, and the change feed
+        // got no entry.
+        Assert.Equal(b, after[b.Id], Same);
+        Assert.Equal(a, after[a.Id], Same);
+        Assert.Equal(c, after[c.Id], Same);
+        Assert.Equal(entriesBefore, entriesAfter);
+        Assert.Equal((WorkItemStatus.Ready, 0, 2L, 1, 1L), (next.Status, moved[b.Id].Order, next.Version, moved[c.Id].Order, moved[c.Id].Version));
+        Assert.Equal([WorkItemChangeKinds.ItemMoved], Entries(api).Skip(entriesBefore));
+    }
+
     // The update of a status takes the same way out: its save finds a row gone, and it is run again.
     [Fact]
     public async Task An_update_of_the_status_whose_save_finds_a_row_deleted_is_run_again_and_recorded_once()
@@ -533,6 +570,60 @@ public sealed class WorkItemUpdateApiTests
         // So does deleting the epic.
         Assert.Equal((null, null, 4L), (afterDelete.EpicId, afterDelete.Epic, afterDelete.Version));
         Assert.True(afterDelete.UpdatedAtUtc > intoActive.UpdatedAtUtc);
+    }
+
+    // On MariaDB a write that puts an item into the epic reads the epic's row and then adds to the index on the epic;
+    // an archive or a delete that took the items first and the epic's row last deadlocked with it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Archiving_and_deleting_an_epic_hold_the_project_then_the_epic_before_they_take_its_items_out(bool delete)
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "LOCK");
+        var item = await CreateAsync(client, project, new { title = "Open", type = "Task", status = "Backlog", priority = "Medium", epicId = epic });
+        var entriesBefore = Entries(api).Count;
+        api.Commands.Clear();
+
+        using var response = delete
+            ? await client.DeleteAsync($"/api/epics/{epic}")
+            : await client.PutAsJsonAsync($"/api/epics/{epic}", new { name = "Epic", isArchived = true });
+        var writes = Writes(api);
+        var after = (await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{item.Id}", Json))!;
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"Epics\"", writes[1], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"WorkItems\"", writes[2], StringComparison.Ordinal);
+        // What the write does is as it was: the item is out of the epic, one version on, with one entry in the feed.
+        Assert.Equal((null, 2L), (after.EpicId, after.Version));
+        Assert.Equal([WorkItemChangeKinds.ItemUpdated], Entries(api).Skip(entriesBefore));
+    }
+
+    // The save of an update that names an epic reads the epic's row while it holds the item's; the archive of the
+    // epic holds the epic's row and then takes the items. Behind the project's row the two run one after the other.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task An_update_that_names_an_epic_holds_the_project_first_and_one_that_names_neither_epic_nor_status_does_not(bool set)
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "HOLD");
+        var item = await CreateAsync(client, project, new { title = "Item", type = "Task", status = "Backlog", priority = "Medium", epicId = set ? (Guid?)null : epic });
+        api.Commands.Clear();
+
+        var updated = await PatchAsync(client, item.Id, new { epicId = set ? (Guid?)epic : null });
+        var writes = Writes(api);
+        api.Commands.Clear();
+        await PatchAsync(client, item.Id, new { title = "Renamed" });
+
+        Assert.Equal((set ? epic : null, 2L), (updated.EpicId, updated.Version));
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"WorkItems\" AS \"w\"", writes[1], StringComparison.Ordinal);
+        Assert.Equal(4, writes.Count);
+        Assert.DoesNotContain(Writes(api), write => write.StartsWith("UPDATE \"Projects\"", StringComparison.Ordinal));
     }
 
     [Fact]
