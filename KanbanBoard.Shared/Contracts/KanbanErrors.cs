@@ -63,7 +63,21 @@ public static class WorkItemCommentLimits
 {
     /// <summary>As long as a claimant name: a token's comment carries the same name as its claims.</summary>
     public const int MaxAuthorLength = WorkItemClaimLimits.MaxClaimantNameLength;
-    public const int MaxIdempotencyKeyLength = 128;
+    public const int MaxIdempotencyKeyLength = IdempotencyKeyLimits.MaxLength;
+}
+
+/// <summary>The idempotency key of every create that takes one.</summary>
+public static class IdempotencyKeyLimits
+{
+    public const int MaxLength = 128;
+}
+
+public static class ProjectLimits
+{
+    public const int MaxNameLength = 160;
+    public const int MaxKeyLength = 24;
+    public const int MaxRepositoryUrlLength = WorkItemLinkLimits.MaxUrlLength;
+    public const int MaxDefaultBranchLength = 255;
 }
 
 public static class WorkItemClaimLimits

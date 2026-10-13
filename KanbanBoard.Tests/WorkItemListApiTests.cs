@@ -347,9 +347,11 @@ public sealed class WorkItemListApiTests
     {
         var cursor = new WorkItemCursor(Start.AddTicks(1234567), Guid.NewGuid());
 
-        var encoded = cursor.Encode();
+        var encoded = cursor.Encode(WorkItemCursor.WorkItems);
 
-        Assert.True(WorkItemCursor.TryDecode(encoded, out var decoded));
+        Assert.True(WorkItemCursor.TryDecode(encoded, WorkItemCursor.WorkItems, out var decoded));
+        // A cursor names its list: the comment list does not take it.
+        Assert.False(WorkItemCursor.TryDecode(encoded, WorkItemCursor.Comments, out _));
         Assert.Equal(cursor, decoded);
         Assert.Matches("^[A-Za-z0-9_-]+$", encoded);
         Assert.DoesNotContain(cursor.Id.ToString("N"), encoded, StringComparison.OrdinalIgnoreCase);

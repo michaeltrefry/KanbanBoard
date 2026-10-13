@@ -108,7 +108,7 @@ public sealed class WorkItemCommentMySqlTests
     {
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: false, latest: null, itemExists: true));
         using var host = await StartApiAsync(database);
-        var cursor = new WorkItemCursor(Now, CommentId).Encode();
+        var cursor = new WorkItemCursor(Now, CommentId).Encode(WorkItemCursor.Comments);
 
         var response = await host.GetTestClient().GetAsync($"/api/items/{ItemId}/comments?limit=2&cursor={cursor}");
 
@@ -190,7 +190,7 @@ public sealed class WorkItemCommentMySqlTests
             return keyUsed
                 ? Table(
                     ("Id", CommentId.ToString()), ("Author", "Factory"), ("AuthorUserId", UserId.ToString()), ("Body", "note"),
-                    ("CreatedAtUtc", Now.UtcDateTime), ("IdempotencyKeyHash", WorkItemComments.HashIdempotencyKey(UserId, "run-1")),
+                    ("CreatedAtUtc", Now.UtcDateTime), ("IdempotencyKeyHash", IdempotencyKeys.Hash(UserId, "run-1")),
                     ("WorkItemId", ItemId.ToString()))
                 : null;
         }

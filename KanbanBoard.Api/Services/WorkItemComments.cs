@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
@@ -25,22 +23,6 @@ public sealed record WorkItemCommentResult(WorkItemCommentOutcome Outcome, Guid?
 public static class WorkItemComments
 {
     /// <summary>
-    /// An idempotency key is 1 to <see cref="WorkItemCommentLimits.MaxIdempotencyKeyLength"/> printable ASCII
-    /// characters without a space. Keys are compared exactly.
-    /// </summary>
-    public static bool IsValidIdempotencyKey(string key) =>
-        key.Length is > 0 and <= WorkItemCommentLimits.MaxIdempotencyKeyLength &&
-        key.All(character => character is > ' ' and <= '~');
-
-    /// <summary>
-    /// SHA-256, in lowercase hex, of the key together with the identity that used it: a key belongs to one identity,
-    /// and every caller without a token identity shares one. The hash is what is stored and compared, so keys match
-    /// exactly where the database's default collation would ignore case.
-    /// </summary>
-    public static string HashIdempotencyKey(Guid? authorUserId, string key) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes($"{authorUserId:N}:{key}")));
-
-    /// <summary>
     /// Adds a comment to the item and stamps the item's UpdatedAtUtc with the comment's time. With an
     /// <paramref name="idempotencyKey"/> that <paramref name="authorUserId"/> already used on this item, nothing is
     /// written and the earlier comment is reported, whatever its body.
@@ -64,7 +46,7 @@ public static class WorkItemComments
             return new(WorkItemCommentOutcome.NotFound);
         }
 
-        var keyHash = idempotencyKey is null ? null : HashIdempotencyKey(authorUserId, idempotencyKey);
+        var keyHash = idempotencyKey is null ? null : IdempotencyKeys.Hash(authorUserId, idempotencyKey);
         if (keyHash is not null)
         {
             var earlier = await dbContext.WorkItemComments

@@ -72,7 +72,7 @@ The MCP service requires `Authorization: Bearer <personal-access-token>` on `/mc
 The MCP service exposes tools for:
 
 - Listing projects
-- Creating projects
+- Creating projects, and updating them (target repository, rename, archive)
 - Fetching a board
 - Listing, creating, updating, and retrieving epics
 - Deleting epics
@@ -89,7 +89,7 @@ The MCP service exposes tools for:
 
 `GetBoard` accepts an optional `status` filter so callers can request only a single column's items instead of the full board payload.
 `GetIssues` returns only issue-type work items and accepts optional `projectId` and `status` filters.
-`ListProjects` accepts an optional `includeArchived` flag so callers can include archived projects when needed.
+`ListProjects` accepts an optional `includeArchived` flag so callers can include archived projects when needed. Every project carries `repository_url` and `default_branch` (see [Projects](#projects)).
 `ListEpics` accepts an optional `includeArchived` flag so callers can include archived epics when needed.
 `GetBoard` accepts an optional `includeArchivedEpics` flag so callers can include items linked to archived epics.
 Epics can be managed through project-scoped list/create endpoints plus retrieve/update/delete endpoints for individual epics.
@@ -101,6 +101,26 @@ Work item reads also include `links`, the external links attached to the item (s
 `ListWorkItems`, `ListEpicWorkItems` and `GetIssues` accept an optional `unblocked_only` flag (default `false`); when `true` they return an item only when every one of its blockers is `Done` (items with no blockers included).
 `ListWorkItems` also accepts the polling arguments described under [Polling work items](#polling-work-items).
 `SearchWorkItems` matches every whitespace-separated word of `query` case-insensitively against titles and descriptions, accepts optional `projectId` and `limit` (default 25, max 100), includes closed items, and returns only ids, project ids, titles, types, and statuses. It is backed by `GET /api/items/search`.
+
+### Projects
+
+A project says where its work is done. `list_projects(includeArchived?)` returns every project with its target, `create_project(name, key, description?, repository_url?, default_branch?, idempotency_key?)` creates one, and `update_project(id, name?, key?, description?, repository_url?, default_branch?, is_archived?, clear?)` changes one. All three return this shape (`list_projects` an array of it):
+
+```json
+{ "id": "0d6c…", "name": "App", "key": "APP", "description": "…", "isArchived": false, "createdAtUtc": "2026-10-12T12:00:00+00:00", "totalItems": 12, "openItems": 5, "repository_url": "https://github.com/acme/app.git", "default_branch": "main" }
+```
+
+`repository_url` and `default_branch` are always present and are `null` when not set. `description` is left out when the project has none. The answer of `create_project` also carries `created`.
+
+- **`update_project` changes only what is passed.** An argument that is left out, or passed as `null`, keeps its value; a call with only `id` changes nothing and returns the project.
+- **Clearing a field: name it in `clear`.** `clear` is a list of the names of the optional fields to empty: `update_project(id, clear: ["repository_url", "default_branch"])`. For a project it may name `description`, `repository_url` and `default_branch`. An empty or whitespace-only string is never a way to clear: it is refused `invalid_argument`. So is a name in `clear` that is not one of these (names are matched exactly; a `null` entry is not one of them), and a field that is both passed with a value and named in `clear`. This is the convention for emptying an optional field over MCP.
+- **`repository_url`** is an `http` or `https` URL without user name or password (`https://github.com/acme/app.git`), or an SSH URL: `ssh://git@github.com/acme/app.git` or the short form `git@github.com:acme/app.git`. An SSH URL may carry a user name, which is not a secret, and never a password: a user name with a `%` in it is refused, because git decodes an `ssh://` URL before use and `%3A` would hide one. An SSH URL whose path starts with `-` (`git@host:-x`, `ssh://git@host/-x`) is refused as well, since git or ssh would read it as an option. Any other form (a local path, `file://`, `git://`), a URL with whitespace or a control character, one longer than 2048 characters, and an `http`/`https` URL that fails the rules of a [link](#links) URL are refused `invalid_argument`. Credentials are refused in every form because the URL is returned to every `read` token. Whitespace around the URL is dropped; it is otherwise stored and returned as given.
+- **`default_branch`** is a branch name of at most 255 characters that git accepts: no whitespace or control character, none of `~ ^ : ? * [ \`, no `..`, `@{` or `//`, not starting with `/` or `-`, not ending with `/` or `.`, no part between slashes starting with `.` or ending with `.lock` (`.hidden`, `a/.b`, `a.lock/b`, `main.lock`), and not `@` alone. Anything else is refused `invalid_argument`. Whether the branch exists in the repository is not checked.
+- **Rename and key.** `name` (at most 160 characters) renames; several projects may share a name. `key` (at most 24 characters, stored in upper case) is unique: a key another project has is refused `conflict`, by `create_project` as well, and nothing is changed.
+- **Archive.** `is_archived: true` archives a project and `is_archived: false` restores it, exactly as the checkbox in the web UI does. An archived project is left out of `list_projects` unless `includeArchived` is `true`; nothing else changes: `get_board` and the work item tools still answer for it, and its items, epics and target are kept.
+- **`idempotency_key` makes `create_project` safe to repeat.** It follows the rules of a [comment](#comments) key: 1 to 128 printable ASCII characters without spaces, compared exactly, anything else refused `invalid_argument`. A key belongs to the calling identity (a project has no parent, so nothing else scopes it; callers without a token share one identity). When that identity already used the key, nothing is created, no board-change event is sent, and the answer is the project the key created, as it is now, with `created: false`; the other arguments are not compared, so a repeat with another name or key still returns the first project. Two calls with one key at the same moment create one project and both report its id. A keyed create that waits 10 s for other keyed creates is refused `busy`, with nothing created, and can be retried. Deleting the project frees its key. Without a key every call creates a project (`created: true`).
+- An unknown `id` is refused `not_found` by `update_project`. An update that changes nothing sends no board-change event.
+- `create_project` and `update_project` are write tools: a `read` token is refused `scope_denied` before the API is called. `list_projects` is a read tool and answers a call with the arguments it always had.
 
 ### Polling work items
 
@@ -118,7 +138,7 @@ Work item reads also include `links`, the external links attached to the item (s
 - **Pages.** With `limit` or `cursor` the result is an object, `{"items": [...], "next_cursor": "..."}`, instead of an array. Pass `next_cursor` back unchanged as `cursor`, with the same filters, until a page comes without `next_cursor`. Pages are ordered oldest item first (creation time, then id), not in board order: that order never changes, so every matching item that exists for the whole walk is returned exactly once even when items are moved or edited during it. An item created during the walk, or one that stops or starts matching the filters during it, may or may not appear. The cursor is opaque; do not build or parse one.
 - **`updatedAtUtc` is the content timestamp.** It changes when the item's fields change (including a move to another column or position) when a comment is added to it, and when a link is added to or removed from it. It does not change when a sibling is moved or reordered around it, when it is claimed, renewed or released, when its claim expires, or when a dependency is added, removed or finished. The stamp is taken before the change commits, so a change can become visible slightly after another one that carries a later stamp: when following changes with `updated_since`, poll with a small overlap (for example a few seconds before the latest `updatedAtUtc` seen) and de-duplicate by id plus `updatedAtUtc`.
 - **Claim state is read from the clock on every call.** A claim that expires writes nothing, so `updated_since` cannot report it, and neither can it report an item that became unblocked. To find work that is ready to take, poll with `status`, `unblocked_only: true` and `claim_state: "unclaimed"` and no `updated_since`; use `updated_since` to follow content changes.
-- A malformed `label`, `updated_since`, `claim_state`, `limit` or `cursor` is refused `invalid_argument`.
+- A malformed `label`, `updated_since`, `claim_state` or `cursor`, and a `limit` outside 1 to 200, is refused `invalid_argument`. A `limit` that is not an integer (`"ten"`, `2.5`) never reaches the tool: the MCP server fails to bind the argument and answers with a plain MCP error without a code.
 
 ### Claims
 
@@ -169,7 +189,7 @@ Work item reads embed the same records in `comments`, oldest first. `id` is a GU
 - **The author is the token's identity.** A comment added with a personal access token carries that identity's name as `author` (the same name as `claimant`) and its id as `author_id`; the `author` argument is accepted and ignored, so no caller can write under another name. Match your own comments by `author_id`: `author` is the name at the time of writing. A comment written without a token (the web UI, or an MCP server that does not require tokens) keeps the `author` the writer gave, which is then required, and has no `author_id`; so does every comment older than this feature.
 - **`add_work_item_comment` returns the work item**, as before, with all its comments, plus `comment_id` (the id of the comment this call is about) and `comment_created`.
 - **`idempotency_key` makes the add safe to repeat.** It is 1 to 128 printable ASCII characters without spaces, compared exactly (`run-1` and `RUN-1` are two keys); anything else is refused `invalid_argument`. A key belongs to the calling identity and the work item: when that identity already used it on that item, nothing is added, `comment_id` is the earlier comment's id, `comment_created` is `false`, the item's `updatedAtUtc` does not move and no board-change event is sent. The body is not compared: a repeat with another body still returns the first comment unchanged. Two calls with one key at the same moment add one comment and both report its id. The same key used by another identity, or on another item, is another comment; callers without a token share one identity. Without a key every call adds a comment.
-- **`list_work_item_comments` returns one page**, `{"items": [...], "next_cursor": "..."}`, oldest comment first. `limit` is 1 to 200 (50 when left out). Pass `next_cursor` back unchanged as `cursor` until a page comes without one. Every comment is returned exactly once, also when comments are added during the walk: a comment's `createdAtUtc` is always later than that of every comment written to the item before it (when clocks disagree it is the latest one plus a microsecond), so a new comment lands after the cursor, never behind it. The cursor is opaque. A malformed `limit` or `cursor` is refused `invalid_argument`.
+- **`list_work_item_comments` returns one page**, `{"items": [...], "next_cursor": "..."}`, oldest comment first. `limit` is 1 to 200 (50 when left out). Pass `next_cursor` back unchanged as `cursor` until a page comes without one. Every comment is returned exactly once, also when comments are added during the walk: a comment's `createdAtUtc` is always later than that of every comment written to the item before it (when clocks disagree it is the latest one plus a microsecond), so a new comment lands after the cursor, never behind it. The cursor is opaque, and it belongs to this tool: a `next_cursor` of `list_work_items` is refused here, and the other way round. A malformed `cursor`, and a `limit` outside 1 to 200, is refused `invalid_argument`. A `limit` that is not an integer never reaches the tool: the MCP server fails to bind the argument and answers with a plain MCP error without a code.
 - An unknown work item is refused `not_found` by both tools.
 - A comment that is added stamps the item's `updatedAtUtc` with the comment's `createdAtUtc`, so `updated_since` reports it.
 - `add_work_item_comment` is a write tool: a `read` token is refused `scope_denied` before the API is called. `list_work_item_comments` is a read tool. `add_issue_comment(itemId, author, body)` is the older form of the add, without a key; it stamps the author the same way.
@@ -186,9 +206,9 @@ A refused tool call returns a tool result with `isError: true`. Its `structuredC
 | `conflict` | The entity is no longer in the state the call depends on; nothing was changed. |
 | `invalid_argument` | An argument is missing or out of range. |
 | `cycle` | The dependency would make a work item block itself, directly or through other items; nothing was changed. |
-| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes); nothing was changed and the call can be retried. |
+| `busy` | The server could not take the call in time because of other callers (today: `add_work_item_dependency` waited 10 s for other dependency changes, or `create_project` with an `idempotency_key` waited 10 s for other keyed creates); nothing was changed and the call can be retried. |
 
-Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from the claim, dependency, link and comment tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
+Scope refusals from every write tool, unknown ids from `GetWorkItem`, malformed arguments of `ListWorkItems`, and every refusal from `create_project`, `update_project` and the claim, dependency, link and comment tools use this envelope. Other failures (for example an unreachable API) are reported as a plain MCP error without a code.
 
 ### Service identities
 
@@ -206,6 +226,7 @@ The names below are the C# method names; on the wire each tool is its snake_case
 
 - `ListProjects`
 - `CreateProject`
+- `UpdateProject`
 - `GetBoard`
 - `ListEpics`
 - `GetEpic`

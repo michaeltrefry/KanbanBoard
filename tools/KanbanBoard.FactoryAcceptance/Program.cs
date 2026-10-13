@@ -5,7 +5,11 @@
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
 //   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the claim, dependency, link and comment write tools refuse it with scope_denied
+//                                  that the claim, dependency, link, comment and project write tools refuse it with
+//                                  scope_denied
+//
+// The project checks create one scratch project of their own per run (key ACC plus 20 random hex characters) and leave it archived,
+// which keeps it out of list_projects; the script can be run again against the same database.
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
@@ -593,6 +597,117 @@ finally
     }
 }
 
+// Project target and update_project: a scratch project with a repository URL, created under an idempotency key.
+string? scratchProjectId = null;
+try
+{
+    const string repositoryUrl = "https://github.com/acme/factory-acceptance.git";
+    // 80 random bits: a project key is unique on the board and at most 24 characters.
+    var projectRun = Guid.NewGuid().ToString("N")[..20];
+    var projectKey = $"ACC{projectRun}".ToUpperInvariant();
+    var projectIdempotencyKey = $"acceptance-{projectRun}:project";
+
+    // 28. Create with a repository URL and an idempotency key; a repeat returns the same project.
+    var createdProject = await CallAsync("create_project", new()
+    {
+        ["name"] = $"Factory acceptance scratch project {run}", ["key"] = projectKey, ["repository_url"] = repositoryUrl, ["idempotency_key"] = projectIdempotencyKey
+    });
+    scratchProjectId = createdProject.Code is null ? StringField(createdProject.Body, "id") : null;
+    Check("create_project with a repository URL and an idempotency key returns the project with that URL, no default branch and created true",
+        scratchProjectId is not null &&
+        StringField(createdProject.Body, "repository_url") == repositoryUrl &&
+        HasNullField(createdProject.Body, "default_branch") &&
+        IsFlag(createdProject.Body, "created", true),
+        createdProject);
+    var repeatedProject = await CallAsync("create_project", new()
+    {
+        ["name"] = "Another name", ["key"] = projectKey, ["repository_url"] = "https://github.com/acme/other.git", ["idempotency_key"] = projectIdempotencyKey
+    });
+    Check("a repeated idempotency key returns the same project id with created false and the first call's name and URL",
+        repeatedProject.Code is null &&
+        StringField(repeatedProject.Body, "id") == scratchProjectId &&
+        IsFlag(repeatedProject.Body, "created", false) &&
+        StringField(repeatedProject.Body, "name") == $"Factory acceptance scratch project {run}" &&
+        StringField(repeatedProject.Body, "repository_url") == repositoryUrl,
+        repeatedProject);
+    var takenKey = await CallAsync("create_project", new() { ["name"] = "Another project", ["key"] = projectKey });
+    Check("create_project with the key of another project is refused conflict", takenKey.Code == "conflict", takenKey);
+    var badRepository = await CallAsync("create_project", new()
+    {
+        ["name"] = "Bad", ["key"] = $"BAD{run}".ToUpperInvariant(), ["repository_url"] = "https://user:secret@github.com/acme/app.git"
+    });
+    Check("create_project with credentials in the repository URL is refused invalid_argument", badRepository.Code == "invalid_argument", badRepository);
+
+    // 29. list_projects, called as before the epic, shows the target of every project.
+    var listedProjects = await CallAsync("list_projects", new());
+    var listedScratch = ProjectIn(listedProjects, scratchProjectId);
+    Check("list_projects without arguments returns the scratch project with its repository_url and a null default_branch",
+        listedScratch is { } listed && StringField(listed, "repository_url") == repositoryUrl && HasNullField(listed, "default_branch"),
+        listedProjects);
+    Check("every listed project carries repository_url and default_branch",
+        listedProjects.Code is null && listedProjects.Body.EnumerateArray().All(project =>
+            project.TryGetProperty("repository_url", out _) && project.TryGetProperty("default_branch", out _)),
+        listedProjects);
+
+    // 30. update_project sets default_branch, clears it, and renames; each call changes only what it names.
+    var branched = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["default_branch"] = "main" });
+    Check("update_project sets default_branch and leaves the repository URL, name and key alone",
+        branched.Code is null &&
+        StringField(branched.Body, "default_branch") == "main" &&
+        StringField(branched.Body, "repository_url") == repositoryUrl &&
+        StringField(branched.Body, "name") == $"Factory acceptance scratch project {run}" &&
+        StringField(branched.Body, "key") == projectKey,
+        branched);
+    var clearedBranch = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["clear"] = new[] { "default_branch" } });
+    Check("update_project with clear [default_branch] returns a null default_branch and the same repository URL",
+        clearedBranch.Code is null && HasNullField(clearedBranch.Body, "default_branch") && StringField(clearedBranch.Body, "repository_url") == repositoryUrl,
+        clearedBranch);
+    var emptyBranch = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["default_branch"] = "" });
+    Check("update_project with an empty default_branch is refused invalid_argument", emptyBranch.Code == "invalid_argument", emptyBranch);
+    var renamedProject = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["name"] = $"Renamed scratch project {run}" });
+    Check("update_project renames the project and leaves the repository URL alone",
+        renamedProject.Code is null &&
+        StringField(renamedProject.Body, "name") == $"Renamed scratch project {run}" &&
+        StringField(renamedProject.Body, "repository_url") == repositoryUrl &&
+        HasNullField(renamedProject.Body, "default_branch"),
+        renamedProject);
+    var unknownProject = await CallAsync("update_project", new() { ["id"] = Guid.NewGuid().ToString(), ["name"] = "x" });
+    Check("update_project for an unknown project is refused not_found", unknownProject.Code == "not_found", unknownProject);
+
+    // 31. A read-scope token can list the project and is refused by update_project.
+    if (string.IsNullOrWhiteSpace(readToken))
+    {
+        Console.WriteLine("SKIP  read-scope use of update_project (KANBAN_FACTORY_READ_TOKEN is not set)");
+    }
+    else
+    {
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        var refusedUpdate = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["name"] = "refused" }, readClient);
+        Check("update_project with the read-scope token is refused scope_denied", refusedUpdate.Code == "scope_denied", refusedUpdate);
+        var readProjects = await CallAsync("list_projects", new(), readClient);
+        Check("the read-scope token can list the project, and its name is unchanged",
+            ProjectIn(readProjects, scratchProjectId) is { } read && StringField(read, "name") == $"Renamed scratch project {run}",
+            readProjects);
+    }
+}
+finally
+{
+    // 32. Archive the scratch project: it leaves list_projects, and the script can run again on this database.
+    if (scratchProjectId is not null)
+    {
+        var archivedProject = await CallAsync("update_project", new() { ["id"] = scratchProjectId, ["is_archived"] = true });
+        Check("update_project archives the scratch project", archivedProject.Code is null && IsFlag(archivedProject.Body, "isArchived", true), archivedProject);
+        var activeProjects = await CallAsync("list_projects", new());
+        var allProjects = await CallAsync("list_projects", new() { ["includeArchived"] = true });
+        Check("the archived project is left out of list_projects and returned with includeArchived",
+            activeProjects.Code is null && ProjectIn(activeProjects, scratchProjectId) is null && ProjectIn(allProjects, scratchProjectId) is not null,
+            allProjects);
+        var archivedBoard = await CallAsync("get_board", new() { ["projectId"] = scratchProjectId });
+        Check("get_board still answers for the archived project", archivedBoard.Code is null && IsFlag(archivedBoard.Body, "isArchived", true), archivedBoard);
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
@@ -714,6 +829,17 @@ static JsonElement[] CommentsOf(JsonElement container, string name = "comments")
 static bool IsFlag(JsonElement item, string name, bool expected) =>
     item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) &&
     value.ValueKind == (expected ? JsonValueKind.True : JsonValueKind.False);
+
+// The field is there and it is null: a project always carries its repository_url and default_branch.
+static bool HasNullField(JsonElement item, string name) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Null;
+
+// The project with this id in a list_projects result, or null when it is not listed or the call was refused.
+static JsonElement? ProjectIn(ToolOutcome projects, string? id) =>
+    projects.Code is null && projects.Body.ValueKind == JsonValueKind.Array &&
+    projects.Body.EnumerateArray().Where(project => StringField(project, "id") == id).Select(project => (JsonElement?)project).FirstOrDefault() is { } found
+        ? found
+        : null;
 
 static bool IsNullField(JsonElement item, string name) =>
     item.ValueKind == JsonValueKind.Object && (!item.TryGetProperty(name, out var value) || value.ValueKind == JsonValueKind.Null);

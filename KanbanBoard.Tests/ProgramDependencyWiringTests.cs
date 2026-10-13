@@ -137,6 +137,34 @@ public sealed class ProgramDependencyWiringTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Project_routes_are_mapped_a_repeated_key_returns_the_same_project_and_an_update_changes_only_what_it_names()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        const string repository = "git@github.com:acme/app.git";
+
+        var created = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "TGT", repositoryUrl = repository, idempotencyKey = "plan-1" });
+        var repeat = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "TGT", repositoryUrl = repository, idempotencyKey = "plan-1" });
+        var branched = await SendAsync<ProjectSummaryDto>(client, HttpMethod.Patch, $"/api/projects/{created.Id}", new { defaultBranch = "main" });
+        var put = await SendAsync<ProjectSummaryDto>(client, HttpMethod.Put, $"/api/projects/{created.Id}", new { name = "Renamed", key = "TGT", description = (string?)null, isArchived = false });
+        var cleared = await SendAsync<ProjectSummaryDto>(client, HttpMethod.Patch, $"/api/projects/{created.Id}", new { defaultBranch = (string?)null, isArchived = true });
+        var listed = await client.GetFromJsonAsync<List<ProjectSummaryDto>>("/api/projects?includeArchived=true", Json);
+        var board = await client.GetFromJsonAsync<ProjectBoardDto>($"/api/projects/{created.Id}", Json);
+        using var unknown = await client.PatchAsJsonAsync($"/api/projects/{Guid.NewGuid()}", new { name = "x" });
+
+        Assert.Equal((true, repository, null), (created.Created, created.RepositoryUrl, created.DefaultBranch));
+        Assert.Equal((created.Id, false), (repeat.Id, repeat.Created));
+        Assert.Equal((repository, "main"), (branched.RepositoryUrl, branched.DefaultBranch));
+        Assert.Equal(("Renamed", repository, "main"), (put.Name, put.RepositoryUrl, put.DefaultBranch));
+        Assert.Equal(("Renamed", repository, null, true), (cleared.Name, cleared.RepositoryUrl, cleared.DefaultBranch, cleared.IsArchived));
+        Assert.Equal(cleared, Assert.Single(listed!));
+        // An archived project still has a board, as when it is archived from the web UI.
+        Assert.True(board!.IsArchived);
+        Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
+        Assert.Equal(KanbanErrorCodes.NotFound, (await unknown.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code);
+    }
+
     internal static Task<T> PostAsync<T>(HttpClient client, string path, object body) => SendAsync<T>(client, HttpMethod.Post, path, body);
 
     internal static async Task<T> SendAsync<T>(HttpClient client, HttpMethod method, string path, object body)

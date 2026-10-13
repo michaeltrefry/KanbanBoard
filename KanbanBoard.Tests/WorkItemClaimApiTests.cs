@@ -442,6 +442,7 @@ public sealed class WorkItemClaimApiTests
                         app.UseRouting();
                         app.UseEndpoints(endpoints =>
                         {
+                            endpoints.MapKanbanProjectEndpoints();
                             endpoints.MapKanbanClaimEndpoints();
                             endpoints.MapKanbanDependencyEndpoints();
                             endpoints.MapKanbanLinkEndpoints();

@@ -36,7 +36,7 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
             }
 
             WorkItemCursor after = default;
-            if (cursor is not null && !WorkItemCursor.TryDecode(cursor, out after))
+            if (cursor is not null && !WorkItemCursor.TryDecode(cursor, WorkItemCursor.WorkItems, out after))
             {
                 return InvalidArgument("Argument 'cursor' is not a cursor returned by this tool. Pass next_cursor from the previous page unchanged.");
             }
@@ -125,7 +125,7 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
 
                 return Results.Ok(new WorkItemPageDto(
                     page.Select(item => WorkItemDtoMapper.ToDto(item, now, pageDependencies, pageLinks)).ToList(),
-                    rows.Count > pageSize ? WorkItemCursor.After(page[^1]).Encode() : null));
+                    rows.Count > pageSize ? WorkItemCursor.After(page[^1]).Encode(WorkItemCursor.WorkItems) : null));
             }
 
             var items = await WithIncludes(query)

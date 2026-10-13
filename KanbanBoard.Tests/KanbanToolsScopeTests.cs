@@ -21,6 +21,7 @@ public sealed class KanbanToolsScopeTests
     private static readonly string[] WriteTools =
     [
         nameof(KanbanTools.CreateProject),
+        nameof(KanbanTools.UpdateProject),
         nameof(KanbanTools.DeleteProject),
         nameof(KanbanTools.CreateEpic),
         nameof(KanbanTools.UpdateEpic),
