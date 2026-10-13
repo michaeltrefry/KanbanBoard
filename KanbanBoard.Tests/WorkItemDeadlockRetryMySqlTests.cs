@@ -358,7 +358,7 @@ public sealed class WorkItemDeadlockRetryMySqlTests
     }
 
     // Program.cs as it is, with every connection, command and transaction answered by FakeDatabase.
-    private sealed class FakeBackedApplication(FakeDatabase database) : WebApplicationFactory<KanbanDbContext>
+    internal sealed class FakeBackedApplication(FakeDatabase database) : WebApplicationFactory<KanbanDbContext>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {

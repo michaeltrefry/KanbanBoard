@@ -2,6 +2,7 @@ using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using MySql.Data.MySqlClient;
 
 namespace KanbanBoard.Api.Services;
 
@@ -15,6 +16,12 @@ public static class Epics
     // The unique indexes on the idempotency keys, as the server names them in error 1062.
     public const string IdempotencyIndexName = "IX_Epics_ProjectId_IdempotencyKeyHash";
     public const string DocumentIdempotencyIndexName = "IX_EpicDocuments_EpicId_IdempotencyKeyHash";
+
+    // ER_NO_REFERENCED_ROW_2, and the foreign keys to the parent of an epic and of a document as the server names
+    // them in that error.
+    private const int NoReferencedRowError = 1452;
+    private const string ProjectForeignKeyName = "FK_Epics_Projects_ProjectId";
+    private const string DocumentEpicForeignKeyName = "FK_EpicDocuments_Epics_EpicId";
 
     /// <summary>A new epic with its fields as they are stored, or why they are refused.</summary>
     public static bool TryNew(Guid projectId, string? name, string? description, bool isArchived, out Epic epic, out string error)
@@ -78,7 +85,17 @@ public static class Epics
             }
 
             dbContext.Epics.Add(epic);
-            await dbContext.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException exception) when (IsMissingParent(exception, ProjectForeignKeyName))
+            {
+                // The project was deleted between the check and the save. The server says so, and nothing was written.
+                dbContext.ChangeTracker.Clear();
+                return new(KeyedCreateOutcome.NotFound);
+            }
+
             return new(KeyedCreateOutcome.Created, epic.Id);
         }
 
@@ -116,7 +133,17 @@ public static class Epics
             }
 
             dbContext.EpicDocuments.Add(document);
-            await dbContext.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateException exception) when (IsMissingParent(exception, DocumentEpicForeignKeyName))
+            {
+                // The epic was deleted between the check and the save. The server says so, and nothing was written.
+                dbContext.ChangeTracker.Clear();
+                return new(KeyedCreateOutcome.NotFound);
+            }
+
             return new(KeyedCreateOutcome.Created, document.Id);
         }
 
@@ -142,4 +169,8 @@ public static class Epics
             DocumentIdempotencyIndexName,
             cancellationToken);
     }
+
+    private static bool IsMissingParent(DbUpdateException exception, string foreignKeyName) =>
+        exception.InnerException is MySqlException { Number: NoReferencedRowError } missing &&
+        missing.Message.Contains(foreignKeyName, StringComparison.Ordinal);
 }

@@ -373,6 +373,59 @@ public sealed class CreateIdempotencyApiTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
+    // Found on MariaDB with two delete_epic calls for one epic: the one that lost answered 500.
+    [Fact]
+    public async Task A_delete_of_an_epic_that_is_deleted_while_the_delete_runs_is_not_found_like_an_unknown_one()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var scenario = await StartAsync(api, client, "item");
+        var deleted = 0;
+        // The other delete lands after this one has read the epic, just before it opens its transaction.
+        api.BeforeNextTransaction = () =>
+        {
+            using var dbContext = api.OpenDatabase();
+            deleted = dbContext.Epics.Where(epic => epic.Id == scenario.Epic).ExecuteDelete();
+        };
+
+        using var response = await client.DeleteAsync($"/api/epics/{scenario.Epic}");
+        using var unknown = await client.DeleteAsync($"/api/epics/{scenario.Epic}");
+
+        Assert.Equal(1, deleted);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(
+            new KanbanErrorDto(KanbanErrorCodes.NotFound, $"Epic {scenario.Epic} was not found."),
+            await response.Content.ReadFromJsonAsync<KanbanErrorDto>(Json));
+        // The same body as for an epic that is not there when it is read.
+        Assert.Equal(await unknown.Content.ReadAsStringAsync(), await response.Content.ReadAsStringAsync());
+    }
+
+    // delete_epic wins the race: the document is there when the update reads it and gone when it saves.
+    [Fact]
+    public async Task An_update_of_an_epic_document_that_is_deleted_with_its_epic_before_the_save_is_not_found_like_an_unknown_one()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var scenario = await StartAsync(api, client, "document");
+        var document = (await scenario.CreateAsync(client, null)).Id;
+        var deleted = 0;
+        api.BeforeNextSave = () =>
+        {
+            using var dbContext = api.OpenDatabase();
+            deleted = dbContext.EpicDocuments.Where(candidate => candidate.Id == document).ExecuteDelete();
+        };
+
+        using var response = await client.PutAsJsonAsync($"/api/epic-documents/{document}", new { title = "Renamed", body = "b" });
+        using var unknown = await client.PutAsJsonAsync($"/api/epic-documents/{document}", new { title = "Renamed", body = "b" });
+
+        Assert.Equal(1, deleted);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal(
+            new KanbanErrorDto(KanbanErrorCodes.NotFound, $"Epic document {document} was not found."),
+            await response.Content.ReadFromJsonAsync<KanbanErrorDto>(Json));
+        Assert.Equal(await unknown.Content.ReadAsStringAsync(), await response.Content.ReadAsStringAsync());
+    }
+
     private static async Task<T> PostAsync<T>(HttpClient client, string path, object body, HttpStatusCode expected)
     {
         using var response = await client.PostAsJsonAsync(path, body);
