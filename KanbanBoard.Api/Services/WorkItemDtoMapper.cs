@@ -40,6 +40,8 @@ public static class WorkItemDtoMapper
             claimed ? item.ClaimMarker : null,
             claimed ? item.ClaimExpiresAtUtc : null)
         {
+            Version = item.Version,
+            LabelList = WorkItemWrites.SplitLabels(item.Labels),
             Blockers = dependencies?.Blockers[item.Id].ToList() ?? [],
             Dependents = dependencies?.Dependents[item.Id].ToList() ?? [],
             Links = links?[item.Id].ToList() ?? []

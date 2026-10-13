@@ -26,7 +26,7 @@ public static class WorkItemListing
 
     /// <summary>
     /// Keeps items that carry <paramref name="label"/> as a whole label, ignoring case. Labels are stored as one
-    /// comma-separated string without spaces around the commas (see NormalizeLabels in Program.cs).
+    /// comma-separated string without spaces around the commas (see WorkItemWrites.TryNormalizeLabels).
     /// </summary>
     public static IQueryable<WorkItem> WhereHasLabel(this IQueryable<WorkItem> items, string label)
     {

@@ -36,6 +36,13 @@ public sealed class KanbanTools(
     private const string UnblockedOnlyDescription =
         "When true, return only items that are not waiting on a blocker: every item they are blocked by is Done (items with no blockers included)";
 
+    private const string LabelListDescription =
+        "Labels as a list, in place of labels (passing both is refused with code invalid_argument). Each label is a non-empty string without a comma; " +
+        "all labels together, joined with commas, are at most 4000 characters. Duplicates, ignoring case, are dropped.";
+
+    private const string ExpectedVersionDescription =
+        "The version field of the item as it was last read. When passed, the call is refused with code conflict, changing nothing, unless the item still has that version.";
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -233,7 +240,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, status, label, claim state and time of last change. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status, and its external links. Without limit and cursor the result is an array of every matching item, in board order. With limit or cursor it is one page, oldest item first: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. A malformed argument is refused with code invalid_argument.")]
+    [McpServerTool, Description("List work items, optionally filtered by project, epic, type, status, label, claim state and time of last change. Closed items stay persisted but are hidden unless status=Closed is requested. Each item lists its blockers and dependents with their current status, and its external links, and carries estimate (null when not set), label_list (its labels as a list) and version (see update_work_item). Without limit and cursor the result is an array of every matching item, in board order. With limit or cursor it is one page, oldest item first: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. A malformed argument is refused with code invalid_argument.")]
     public async Task<object> ListWorkItems(
         [Description("Optional project id")] Guid? projectId = null,
         [Description("Optional epic id")] Guid? epicId = null,
@@ -327,7 +334,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<TResult>(JsonOptions);
     }
 
-    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links.")]
+    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version.")]
     public async Task<WorkItemDto> GetWorkItem(
         [Description("Work item id")] Guid itemId)
     {
@@ -430,7 +437,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<IReadOnlyList<WorkItemDto>>(JsonOptions) ?? [];
     }
 
-    [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, titles, types, and statuses only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
+    [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, project ids, titles, types, statuses, estimates (null when not set) and versions only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
     public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(
         [Description("Words to match in work item titles and descriptions")] string query,
         [Description("Optional project id to limit the search to")] Guid? projectId = null,
@@ -531,11 +538,12 @@ public sealed class KanbanTools(
         [Description("Optional epic id")] Guid? epicId = null,
         [Description("Optional description")] string? description = null,
         [Description("Optional estimate")] int? estimate = null,
-        [Description("Optional comma-separated labels")] string? labels = null)
+        [Description("Optional comma-separated labels")] string? labels = null,
+        [Description(LabelListDescription)] string[]? label_list = null)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
+        using var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             projectId,
             epicId,
             title,
@@ -544,9 +552,10 @@ public sealed class KanbanTools(
             status,
             priority,
             estimate,
-            labels));
+            labels,
+            label_list));
 
-        response.EnsureSuccessStatusCode();
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
@@ -559,13 +568,14 @@ public sealed class KanbanTools(
         [Description("Priority")] WorkItemPriority priority = WorkItemPriority.Medium,
         [Description("Optional description")] string? description = null,
         [Description("Optional estimate")] int? estimate = null,
-        [Description("Optional comma-separated labels")] string? labels = null)
+        [Description("Optional comma-separated labels")] string? labels = null,
+        [Description(LabelListDescription)] string[]? label_list = null)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
         var epic = await GetRequiredEpicAsync(client, epicId);
 
-        var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
+        using var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             epic.ProjectId,
             epicId,
             title,
@@ -574,60 +584,83 @@ public sealed class KanbanTools(
             status,
             priority,
             estimate,
-            labels));
+            labels,
+            label_list));
 
-        response.EnsureSuccessStatusCode();
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Move a work item to a new column and order.")]
+    [McpServerTool, Description("Move a work item to a column and a position in it; the items it displaces are renumbered and are otherwise unchanged. Pass expected_version to refuse the move with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version. An unknown itemId is refused with code not_found.")]
     public async Task<WorkItemDto?> MoveWorkItem(
         [Description("Work item id")] Guid itemId,
         [Description("Target status")] WorkItemStatus status,
-        [Description("Zero-based order in the target column")] int order = 0)
+        [Description("Zero-based order in the target column")] int order = 0,
+        [Description(ExpectedVersionDescription)] long? expected_version = null)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var response = await client.PostAsJsonAsync($"/api/items/{itemId}/move", new MoveWorkItemRequest(status, order));
-        response.EnsureSuccessStatusCode();
+        using var response = await client.PostAsJsonAsync($"/api/items/{itemId}/move", new MoveWorkItemRequest(status, order, expected_version));
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Update a work item.")]
+    [McpServerTool, Description("Change a work item. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value, so update_work_item(itemId, status) changes the status and nothing else. To empty an optional field, name it in clear (description, estimate, labels, epicId); an empty string or an empty label_list is refused with code invalid_argument, as is a field that is both passed and named in clear. A new status puts the item at the end of that column. Pass expected_version to refuse the update with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version: version goes up by one with every update and every move of the item, and not when it is claimed, commented on, linked, given a dependency, or when another item is reordered around it. An unknown itemId is refused with code not_found.")]
     public async Task<WorkItemDto?> UpdateWorkItem(
         [Description("Work item id")] Guid itemId,
-        [Description("Title")] string title,
-        [Description("Type")] WorkItemType type,
-        [Description("Status")] WorkItemStatus status,
-        [Description("Priority")] WorkItemPriority priority,
-        [Description("Optional epic id")] Guid? epicId = null,
-        [Description("Optional description")] string? description = null,
-        [Description("Optional estimate")] int? estimate = null,
-        [Description("Optional comma-separated labels")] string? labels = null)
+        [Description("New title, at most 240 characters")] string? title = null,
+        [Description("New type: Story, Issue, or Task")] WorkItemType? type = null,
+        [Description("New status")] WorkItemStatus? status = null,
+        [Description("New priority")] WorkItemPriority? priority = null,
+        [Description("Id of the epic to put the item in: an active epic of the item's project")] Guid? epicId = null,
+        [Description("New description")] string? description = null,
+        [Description("New estimate")] int? estimate = null,
+        [Description("New labels as one comma-separated string. They replace the labels the item has.")] string? labels = null,
+        [Description("New " + LabelListDescription + " They replace the labels the item has.")] string[]? label_list = null,
+        [Description(ExpectedVersionDescription)] long? expected_version = null,
+        [Description("Names of the optional fields to empty: any of description, estimate, labels, epicId")] string[]? clear = null)
     {
         EnsureWriteScope();
-        var client = httpClientFactory.CreateClient("kanban-api");
-        var board = await FindBoardForItemAsync(client, itemId);
-        var item = board?.Items.FirstOrDefault(candidate => candidate.Id == itemId);
-
-        if (item is null)
+        JsonNode? newLabels = labels;
+        if (label_list is not null)
         {
-            throw new InvalidOperationException($"Work item {itemId} was not found.");
+            if (labels is not null)
+            {
+                throw KanbanToolErrors.InvalidArgument("Arguments 'labels' and 'label_list' are both passed. Do one of the two.");
+            }
+
+            if (label_list.Length == 0)
+            {
+                throw KanbanToolErrors.InvalidArgument("Argument 'label_list' must not be empty. To empty the field, name labels in 'clear'.");
+            }
+
+            if (label_list.Any(label => string.IsNullOrWhiteSpace(label) || label.Contains(',')))
+            {
+                throw KanbanToolErrors.InvalidArgument("Every label of 'label_list' must be a non-empty string without a comma.");
+            }
+
+            newLabels = new JsonArray(label_list.Select(label => (JsonNode?)label).ToArray());
         }
 
-        // MCP optional parameters collapse "omitted" and "null" into the same value,
-        // so we preserve the current optional fields unless the caller provided a value.
-        var response = await client.PutAsJsonAsync($"/api/items/{itemId}", new UpdateWorkItemRequest(
-            epicId ?? item.EpicId,
-            title,
-            description ?? item.Description,
-            type,
-            status,
-            priority,
-            estimate ?? item.Estimate,
-            labels ?? item.Labels));
+        var body = PatchBody(
+            clear,
+            ("title", "title", title, false),
+            ("type", "type", type?.ToString(), false),
+            ("status", "status", status?.ToString(), false),
+            ("priority", "priority", priority?.ToString(), false),
+            ("epicId", "epicId", epicId?.ToString(), true),
+            ("description", "description", description, true),
+            ("estimate", "estimate", estimate, true),
+            ("labels", "labels", newLabels, true));
+        if (expected_version is not null)
+        {
+            body["expectedVersion"] = expected_version.Value;
+        }
 
-        response.EnsureSuccessStatusCode();
+        // The item is addressed by its id: no board is read to find it.
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.PatchAsync($"/api/items/{itemId}", JsonContent.Create(body));
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
@@ -644,9 +677,9 @@ public sealed class KanbanTools(
 
     // The body of a partial update, and the one convention for emptying an optional field over MCP: an argument
     // that is left out (or null: MCP cannot tell the two apart) is not sent and keeps its value, an argument with a
-    // value is sent, and a field named in clear is sent as null. Each field is (argument name, API name, value,
-    // whether clear may name it).
-    private static JsonObject PatchBody(string[]? clear, params (string Argument, string ApiName, string? Value, bool Clearable)[] fields)
+    // value is sent, and a field named in clear is sent as null. Each field is (argument name, API name, value as
+    // JSON, whether clear may name it).
+    private static JsonObject PatchBody(string[]? clear, params (string Argument, string ApiName, JsonNode? Value, bool Clearable)[] fields)
     {
         var cleared = clear ?? [];
         var clearable = fields.Where(field => field.Clearable).Select(field => field.Argument).ToArray();
@@ -666,7 +699,7 @@ public sealed class KanbanTools(
                 throw KanbanToolErrors.InvalidArgument($"Argument '{argument}' is both passed and named in 'clear'. Do one of the two.");
             }
 
-            if (value is not null && string.IsNullOrWhiteSpace(value))
+            if (value is JsonValue text && text.TryGetValue<string>(out var characters) && string.IsNullOrWhiteSpace(characters))
             {
                 throw KanbanToolErrors.InvalidArgument(clearable.Contains(argument)
                     ? $"Argument '{argument}' must not be empty. To empty the field, name it in 'clear'."
@@ -719,21 +752,5 @@ public sealed class KanbanTools(
     {
         var epic = await client.GetFromJsonAsync<EpicDto>($"/api/epics/{epicId}", JsonOptions);
         return epic ?? throw new InvalidOperationException($"Epic {epicId} was not found.");
-    }
-
-    private async Task<ProjectBoardDto?> FindBoardForItemAsync(HttpClient client, Guid itemId)
-    {
-        var projects = await client.GetFromJsonAsync<IReadOnlyList<ProjectSummaryDto>>("/api/projects", JsonOptions) ?? [];
-
-        foreach (var project in projects)
-        {
-            var board = await client.GetFromJsonAsync<ProjectBoardDto>($"/api/projects/{project.Id}", JsonOptions);
-            if (board?.Items.Any(item => item.Id == itemId) == true)
-            {
-                return board;
-            }
-        }
-
-        return null;
     }
 }

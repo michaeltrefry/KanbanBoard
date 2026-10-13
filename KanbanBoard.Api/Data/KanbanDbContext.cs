@@ -72,8 +72,10 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(item => item.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
             entity.Property(item => item.ProjectId).HasConversion(GuidToStringConverter).HasMaxLength(36);
             entity.Property(item => item.EpicId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
-            entity.Property(item => item.Title).HasMaxLength(240).IsRequired();
-            entity.Property(item => item.Labels).HasMaxLength(240);
+            entity.Property(item => item.Title).HasMaxLength(WorkItemLimits.MaxTitleLength).IsRequired();
+            entity.Property(item => item.Labels).HasMaxLength(WorkItemLimits.MaxLabelsLength);
+            // Items that are older than the column start at 1, like a new item.
+            entity.Property(item => item.Version).HasDefaultValue(1L);
             entity.Property(item => item.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(item => item.UpdatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(item => item.ClaimantUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);

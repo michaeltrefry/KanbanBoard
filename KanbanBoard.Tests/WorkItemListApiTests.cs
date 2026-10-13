@@ -269,7 +269,7 @@ public sealed class WorkItemListApiTests
             [
                 "id", "projectId", "epicId", "epic", "title", "description", "type", "status", "priority", "order", "estimate",
                 "labels", "comments", "createdAtUtc", "updatedAtUtc", "claimant", "claimant_id", "claim_marker",
-                "claim_expires_at_utc", "blockers", "dependents", "links"
+                "claim_expires_at_utc", "blockers", "dependents", "links", "version", "label_list"
             ],
             json.RootElement[0].EnumerateObject().Select(property => property.Name));
         Assert.Equal("body", json.RootElement[0].GetProperty("comments")[0].GetProperty("body").GetString());

@@ -280,8 +280,8 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasColumnType("int");
 
                     b.Property<string>("Labels")
-                        .HasMaxLength(240)
-                        .HasColumnType("varchar(240)");
+                        .HasMaxLength(4000)
+                        .HasColumnType("varchar(4000)");
 
                     b.Property<int>("Order")
                         .HasColumnType("int");
@@ -307,6 +307,11 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("datetime(6)");
+
+                    b.Property<long>("Version")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
 
                     b.HasKey("Id");
 

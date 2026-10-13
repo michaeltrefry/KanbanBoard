@@ -56,7 +56,7 @@ public static class WorkItemSearch
             .OrderBy(item => item.Title)
             .ThenBy(item => item.Id)
             .Take(pageSize)
-            .Select(item => new WorkItemSearchResultDto(item.Id, item.ProjectId, item.Title, item.Type, item.Status))
+            .Select(item => new WorkItemSearchResultDto(item.Id, item.ProjectId, item.Title, item.Type, item.Status, item.Estimate, item.Version))
             .ToListAsync(cancellationToken);
     }
 }

@@ -59,6 +59,14 @@ public static class WorkItemLinkLimits
         url.Length <= MaxEscapedUrlLength && Uri.EscapeDataString(url).Length <= MaxEscapedUrlLength;
 }
 
+public static class WorkItemLimits
+{
+    public const int MaxTitleLength = 240;
+
+    /// <summary>The longest a work item's labels may be together, joined with commas.</summary>
+    public const int MaxLabelsLength = 4000;
+}
+
 public static class WorkItemCommentLimits
 {
     /// <summary>As long as a claimant name: a token's comment carries the same name as its claims.</summary>

@@ -123,7 +123,8 @@ public sealed class WorkItemListMySqlTests
             ["`w`.`Priority`"] = 1,
             ["`w`.`Order`"] = 0,
             ["`w`.`CreatedAtUtc`"] = Created,
-            ["`w`.`UpdatedAtUtc`"] = Created
+            ["`w`.`UpdatedAtUtc`"] = Created,
+            ["`w`.`Version`"] = 1L
         };
         var table = new DataTable();
         var columns = text["SELECT ".Length..text.IndexOf('\n', StringComparison.Ordinal)].Split(", ");

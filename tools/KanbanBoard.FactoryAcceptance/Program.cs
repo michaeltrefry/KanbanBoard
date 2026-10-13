@@ -5,8 +5,8 @@
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
 //   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the claim, dependency, link, comment and project write tools refuse it with
-//                                  scope_denied
+//                                  that the claim, dependency, link, comment, project and work item write tools
+//                                  refuse it with scope_denied
 //
 // The project checks create one scratch project of their own per run (key ACC plus 20 random hex characters) and leave it archived,
 // which keeps it out of list_projects; the script can be run again against the same database.
@@ -708,6 +708,221 @@ finally
     }
 }
 
+// Partial update, expected version, labels as a list and estimate on every read.
+string? patchItemId = null;
+string? patchSiblingId = null;
+try
+{
+    // 33. A new item has a version, an estimate (null here) and its labels both ways.
+    var patchItem = await CallAsync("create_work_item", new()
+    {
+        ["projectId"] = projectId,
+        ["title"] = $"Factory acceptance update item {run}",
+        ["type"] = "Task",
+        ["description"] = "to be cleared",
+        ["estimate"] = 3,
+        ["label_list"] = new[] { "acceptance", $"run-{run}" }
+    });
+    var patchSibling = await CallAsync("create_work_item", new()
+    {
+        ["projectId"] = projectId,
+        ["title"] = $"Factory acceptance update sibling {run}",
+        ["type"] = "Task"
+    });
+    if (patchItem.Code is not null || patchSibling.Code is not null)
+    {
+        var failed = patchItem.Code is not null ? patchItem : patchSibling;
+        Console.Error.WriteLine($"Could not create the update scratch items: {failed.Code}: {failed.Message}");
+        return 1;
+    }
+
+    patchItemId = StringField(patchItem.Body, "id")!;
+    patchSiblingId = StringField(patchSibling.Body, "id")!;
+    Console.WriteLine($"Update scratch items {patchItemId}, {patchSiblingId}");
+    Check("create_work_item with label_list returns the labels as a list and as the comma-separated string, estimate and version 1",
+        LabelsOf(patchItem.Body).SequenceEqual(["acceptance", $"run-{run}"]) &&
+        StringField(patchItem.Body, "labels") == $"acceptance,run-{run}" &&
+        IntField(patchItem.Body, "estimate") == 3 &&
+        IntField(patchItem.Body, "version") == 1,
+        patchItem);
+    Check("an item created without an estimate carries estimate as null, and an empty label_list",
+        HasNullField(patchSibling.Body, "estimate") && LabelsOf(patchSibling.Body).Length == 0 && IntField(patchSibling.Body, "version") == 1,
+        patchSibling);
+    var readVersion = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    Check("get_work_item returns the item's version", IntField(readVersion.Body, "version") == 1, readVersion);
+
+    // 34. update_work_item with one argument changes that field and leaves the others; the version advances.
+    var statusOnly = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Ready" });
+    Check("update_work_item with only status changes the status and leaves title, description, estimate, labels, type and priority",
+        statusOnly.Code is null &&
+        StringField(statusOnly.Body, "status") == "Ready" &&
+        StringField(statusOnly.Body, "title") == $"Factory acceptance update item {run}" &&
+        StringField(statusOnly.Body, "description") == "to be cleared" &&
+        IntField(statusOnly.Body, "estimate") == 3 &&
+        LabelsOf(statusOnly.Body).SequenceEqual(["acceptance", $"run-{run}"]) &&
+        StringField(statusOnly.Body, "type") == "Task" &&
+        StringField(statusOnly.Body, "priority") == "Medium",
+        statusOnly);
+    Check("the update advanced the version by one", IntField(statusOnly.Body, "version") == 2, statusOnly);
+    var titleOnly = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["title"] = $"Renamed update item {run}" });
+    Check("update_work_item with only title renames and leaves the status",
+        titleOnly.Code is null && StringField(titleOnly.Body, "title") == $"Renamed update item {run}" && StringField(titleOnly.Body, "status") == "Ready" && IntField(titleOnly.Body, "version") == 3,
+        titleOnly);
+
+    // 35. The call as it was made before this feature, with all four formerly required arguments, still works.
+    var legacy = await CallAsync("update_work_item", new()
+    {
+        ["itemId"] = patchItemId, ["title"] = $"Renamed update item {run}", ["type"] = "Task", ["status"] = "Ready", ["priority"] = "High"
+    });
+    Check("update_work_item with title, type, status and priority still works and keeps the optional fields",
+        legacy.Code is null && StringField(legacy.Body, "priority") == "High" && StringField(legacy.Body, "description") == "to be cleared" && IntField(legacy.Body, "estimate") == 3,
+        legacy);
+
+    // 36. clear empties an optional field; an empty string is not a way to clear.
+    var cleared = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["clear"] = new[] { "description", "estimate" } });
+    Check("update_work_item with clear [description, estimate] empties both and leaves the labels",
+        cleared.Code is null && IsNullField(cleared.Body, "description") && HasNullField(cleared.Body, "estimate") && LabelsOf(cleared.Body).Length == 2,
+        cleared);
+    var emptyDescription = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["description"] = "" });
+    Check("update_work_item with an empty description is refused invalid_argument", emptyDescription.Code == "invalid_argument", emptyDescription);
+    var clearTitle = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["clear"] = new[] { "title" } });
+    Check("update_work_item with clear [title] is refused invalid_argument", clearTitle.Code == "invalid_argument", clearTitle);
+
+    // 37. More than 240 characters of labels round-trip, and the label filter still finds the item by one of them.
+    var manyLabels = Enumerable.Range(0, 60).Select(index => $"acc-{run}-{index:D3}").ToArray();
+    var relabelled = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["label_list"] = manyLabels });
+    Check($"update_work_item stores {string.Join(',', manyLabels).Length} characters of labels",
+        relabelled.Code is null && LabelsOf(relabelled.Body).SequenceEqual(manyLabels) && StringField(relabelled.Body, "labels") == string.Join(',', manyLabels),
+        relabelled);
+    var rereadLabels = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    Check("get_work_item returns the same labels", LabelsOf(rereadLabels.Body).SequenceEqual(manyLabels), rereadLabels);
+    var byLabel = await IdsAsync(new() { ["projectId"] = projectId, ["label"] = manyLabels[^1].ToUpperInvariant() });
+    Check("list_work_items with label finds the item by the last of its labels", byLabel.SequenceEqual([patchItemId]), relabelled);
+    var commaLabel = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["label_list"] = new[] { "a,b" } });
+    Check("a label with a comma in label_list is refused invalid_argument", commaLabel.Code == "invalid_argument", commaLabel);
+    var clearedLabels = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["clear"] = new[] { "labels" } });
+    Check("update_work_item with clear [labels] leaves the item without labels",
+        clearedLabels.Code is null && LabelsOf(clearedLabels.Body).Length == 0 && IsNullField(clearedLabels.Body, "labels"),
+        clearedLabels);
+    var commaSeparated = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["labels"] = $"acceptance, run-{run}" });
+    Check("update_work_item still takes comma-separated labels, which read back as the same labels",
+        commaSeparated.Code is null && LabelsOf(commaSeparated.Body).SequenceEqual(["acceptance", $"run-{run}"]),
+        commaSeparated);
+
+    // 38. A stale expected_version is refused and changes nothing; the current one succeeds.
+    var beforeStale = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    var currentVersion = IntField(beforeStale.Body, "version") ?? -1;
+    var staleUpdate = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Done", ["title"] = "stale", ["expected_version"] = currentVersion - 1 });
+    Check("update_work_item with a stale expected_version is refused conflict", staleUpdate.Code == "conflict", staleUpdate);
+    var afterStale = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    Check("the refused update changed nothing: same version, status, title and updatedAtUtc",
+        afterStale.Code is null &&
+        IntField(afterStale.Body, "version") == currentVersion &&
+        StringField(afterStale.Body, "status") == "Ready" &&
+        StringField(afterStale.Body, "title") == $"Renamed update item {run}" &&
+        StringField(afterStale.Body, "updatedAtUtc") == StringField(beforeStale.Body, "updatedAtUtc"),
+        afterStale);
+    var freshUpdate = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["estimate"] = 5, ["expected_version"] = currentVersion });
+    Check("update_work_item with the current expected_version succeeds and advances it",
+        freshUpdate.Code is null && IntField(freshUpdate.Body, "estimate") == 5 && IntField(freshUpdate.Body, "version") == currentVersion + 1,
+        freshUpdate);
+
+    // 39. A claim, a renewal, a comment and a link do not advance the version: the holder's update still succeeds.
+    var patchMarker = $"acceptance-{run}-update";
+    var held = await CallAsync("claim_work_item", new() { ["id"] = patchItemId, ["marker"] = patchMarker, ["ttl_seconds"] = 60 });
+    var heldAgain = await CallAsync("renew_work_item_claim", new() { ["id"] = patchItemId, ["marker"] = patchMarker, ["ttl_seconds"] = 120 });
+    var noted = await CallAsync("add_work_item_comment", new() { ["itemId"] = patchItemId, ["body"] = "acceptance note" });
+    var prLinked = await CallAsync("add_work_item_link", new() { ["id"] = patchItemId, ["kind"] = "pr", ["url"] = $"https://example.test/acceptance/{run}/pull/7" });
+    Check("claim, renew, comment and link leave the version where it was",
+        new[] { held, heldAgain, noted, prLinked }.All(outcome => outcome.Code is null && IntField(outcome.Body, "version") == currentVersion + 1),
+        prLinked);
+    var whileHeld = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["status"] = "InProgress", ["expected_version"] = currentVersion + 1 });
+    Check("the claim holder's update with the version it read before renewing succeeds, and keeps the claim, comment and link",
+        whileHeld.Code is null &&
+        StringField(whileHeld.Body, "status") == "InProgress" &&
+        StringField(whileHeld.Body, "claim_marker") == patchMarker &&
+        CommentsOf(whileHeld.Body).Length == 1 &&
+        LinksOf(whileHeld.Body).Length == 1,
+        whileHeld);
+
+    // 40. move_work_item: the current version succeeds, a stale one is refused, and the sibling's version stays.
+    var movedCurrent = await CallAsync("move_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Backlog", ["order"] = 0, ["expected_version"] = currentVersion + 2 });
+    Check("move_work_item with the current expected_version succeeds and advances it",
+        movedCurrent.Code is null && StringField(movedCurrent.Body, "status") == "Backlog" && IntField(movedCurrent.Body, "version") == currentVersion + 3,
+        movedCurrent);
+    var movedStale = await CallAsync("move_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Done", ["order"] = 0, ["expected_version"] = currentVersion + 2 });
+    Check("move_work_item with a stale expected_version is refused conflict", movedStale.Code == "conflict", movedStale);
+    var afterStaleMove = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId });
+    Check("the refused move left the item in its column at the same version",
+        afterStaleMove.Code is null && StringField(afterStaleMove.Body, "status") == "Backlog" && IntField(afterStaleMove.Body, "version") == currentVersion + 3,
+        afterStaleMove);
+    var siblingAfterMoves = await CallAsync("get_work_item", new() { ["itemId"] = patchSiblingId });
+    Check("the sibling the move displaced kept its version and updatedAtUtc",
+        siblingAfterMoves.Code is null &&
+        IntField(siblingAfterMoves.Body, "version") == 1 &&
+        StringField(siblingAfterMoves.Body, "updatedAtUtc") == StringField(patchSibling.Body, "updatedAtUtc"),
+        siblingAfterMoves);
+    var plainMove = await CallAsync("move_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Ready" });
+    Check("move_work_item without expected_version moves unconditionally, as before", plainMove.Code is null && StringField(plainMove.Body, "status") == "Ready", plainMove);
+
+    // 41. estimate and version are on the item from every read: one with an estimate, one without.
+    var listedItems = await CallAsync("list_work_items", new() { ["projectId"] = projectId });
+    var pagedItems = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["limit"] = 200, ["include_comments"] = false });
+    var boardItems = await CallAsync("get_board", new() { ["projectId"] = projectId });
+    var foundItems = await CallAsync("search_work_items", new() { ["query"] = $"update {run}", ["projectId"] = projectId });
+    var readItems = new (string Name, JsonElement[] Items)[]
+    {
+        ("list_work_items", listedItems.Code is null ? listedItems.Body.EnumerateArray().ToArray() : []),
+        ("list_work_items with limit", CommentsOf(pagedItems.Body, "items")),
+        ("get_board", CommentsOf(boardItems.Body, "items")),
+        ("search_work_items", foundItems.Code is null ? foundItems.Body.EnumerateArray().ToArray() : [])
+    };
+    foreach (var (name, items) in readItems)
+    {
+        var withEstimate = items.FirstOrDefault(item => StringField(item, "id") == patchItemId);
+        var withoutEstimate = items.FirstOrDefault(item => StringField(item, "id") == patchSiblingId);
+        Check($"{name} returns estimate 5 and the version for the item, and a null estimate for its sibling",
+            IntField(withEstimate, "estimate") == 5 && IntField(withEstimate, "version") == currentVersion + 4 &&
+            HasNullField(withoutEstimate, "estimate") && IntField(withoutEstimate, "version") == 1,
+            listedItems);
+    }
+
+    // 42. An unknown item is refused not_found; a read-scope token is refused by both tools.
+    var unknownUpdate = await CallAsync("update_work_item", new() { ["itemId"] = Guid.NewGuid().ToString(), ["status"] = "Done" });
+    Check("update_work_item for an unknown item is refused not_found", unknownUpdate.Code == "not_found", unknownUpdate);
+    var unknownMove = await CallAsync("move_work_item", new() { ["itemId"] = Guid.NewGuid().ToString(), ["status"] = "Done", ["expected_version"] = 1 });
+    Check("move_work_item for an unknown item is refused not_found", unknownMove.Code == "not_found", unknownMove);
+    if (string.IsNullOrWhiteSpace(readToken))
+    {
+        Console.WriteLine("SKIP  read-scope refusal of update_work_item and move_work_item (KANBAN_FACTORY_READ_TOKEN is not set)");
+    }
+    else
+    {
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        var refusedUpdate = await CallAsync("update_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Done" }, readClient);
+        Check("update_work_item with the read-scope token is refused scope_denied", refusedUpdate.Code == "scope_denied", refusedUpdate);
+        var refusedMove = await CallAsync("move_work_item", new() { ["itemId"] = patchItemId, ["status"] = "Done" }, readClient);
+        Check("move_work_item with the read-scope token is refused scope_denied", refusedMove.Code == "scope_denied", refusedMove);
+        var readByReader = await CallAsync("get_work_item", new() { ["itemId"] = patchItemId }, readClient);
+        Check("the read-scope token reads the item, unchanged, with its version",
+            readByReader.Code is null && StringField(readByReader.Body, "status") == "Ready" && IntField(readByReader.Body, "version") == currentVersion + 4,
+            readByReader);
+    }
+}
+finally
+{
+    foreach (var id in new[] { patchItemId, patchSiblingId }.OfType<string>())
+    {
+        var deleted = await CallAsync("delete_work_item", new() { ["itemId"] = id });
+        if (deleted.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not delete update scratch item {id}: {deleted.Code}: {deleted.Message}");
+            failures++;
+        }
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
@@ -825,6 +1040,17 @@ static JsonElement[] CommentsOf(JsonElement container, string name = "comments")
     container.ValueKind == JsonValueKind.Object && container.TryGetProperty(name, out var comments) && comments.ValueKind == JsonValueKind.Array
         ? comments.EnumerateArray().ToArray()
         : [];
+
+// The entries of an item's "label_list"; a marker when the field is missing, which no check accepts as labels.
+static string[] LabelsOf(JsonElement item) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty("label_list", out var labels) && labels.ValueKind == JsonValueKind.Array
+        ? labels.EnumerateArray().Select(label => label.GetString()!).ToArray()
+        : ["<missing>"];
+
+static long? IntField(JsonElement item, string name) =>
+    item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number
+        ? value.GetInt64()
+        : null;
 
 static bool IsFlag(JsonElement item, string name, bool expected) =>
     item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) &&
