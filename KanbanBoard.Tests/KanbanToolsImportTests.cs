@@ -175,7 +175,7 @@ public sealed class KanbanToolsImportTests
 
         var result = await server.CallAsync("create_epic_work_item", call);
 
-        AssertError(result, KanbanErrorCodes.NotFound);
+        Assert.Equal($"Epic {EpicId} was not found.", AssertError(result, KanbanErrorCodes.NotFound));
         var request = Assert.Single(server.Api.Requests);
         Assert.Equal((HttpMethod.Get, $"/api/epics/{EpicId}"), (request.Method, request.Path));
     }

@@ -637,7 +637,7 @@ public sealed class KanbanTools(
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var epic = await GetRequiredEpicAsync(client, epicId);
+        var epic = await GetRequiredEpicAsync(epicId);
 
         using var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             epic.ProjectId,
@@ -864,11 +864,7 @@ public sealed class KanbanTools(
         }
     }
 
-    private async Task<EpicDto> GetRequiredEpicAsync(HttpClient client, Guid epicId)
-    {
-        using var response = await client.GetAsync($"/api/epics/{epicId}");
-        await KanbanToolErrors.EnsureSuccessAsync(response);
-        return await response.Content.ReadFromJsonAsync<EpicDto>(JsonOptions)
+    private async Task<EpicDto> GetRequiredEpicAsync(Guid epicId) =>
+        await GetAsync<EpicDto>($"/api/epics/{epicId}", $"Epic {epicId} was not found.")
             ?? throw KanbanToolErrors.NotFound($"Epic {epicId} was not found.");
-    }
 }
