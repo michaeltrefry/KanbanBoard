@@ -116,6 +116,7 @@ else
 app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
+app.MapKanbanProjectEndpoints();
 app.MapKanbanClaimEndpoints();
 app.MapKanbanDependencyEndpoints();
 app.MapKanbanLinkEndpoints();
@@ -163,39 +164,6 @@ app.MapGet("/api/changes", async (HttpContext httpContext, BoardChangeNotifier c
         await httpContext.Response.Body.FlushAsync(cancellationToken);
     }
 });
-
-app.MapGet("/api/projects", async (bool? includeArchived, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
-{
-    var includeArchivedProjects = includeArchived ?? false;
-    var projects = await dbContext.Projects
-        .AsNoTracking()
-        .Where(project => includeArchivedProjects || !project.IsArchived)
-        .Select(project => new
-        {
-            project.Id,
-            project.Name,
-            project.Key,
-            project.Description,
-            project.IsArchived,
-            project.CreatedAtUtc,
-            TotalItems = project.Items.Count,
-            OpenItems = project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed)
-        })
-        .OrderBy(project => project.Name)
-        .Select(project => new ProjectSummaryDto(
-            project.Id,
-            project.Name,
-            project.Key,
-            project.Description,
-            project.IsArchived,
-            project.CreatedAtUtc,
-            project.TotalItems,
-            project.OpenItems))
-        .ToListAsync(cancellationToken);
-
-    return Results.Ok(projects);
-})
-.WithName("ListProjects");
 
 app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
 {
@@ -300,82 +268,6 @@ app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limi
     return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
 })
 .WithName("SearchWorkItems");
-
-app.MapPost("/api/projects", async (CreateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
-{
-    var normalizedName = request.Name.Trim();
-    var normalizedKey = request.Key.Trim().ToUpperInvariant();
-    var validationError = ValidateRequiredText(("name", normalizedName), ("key", normalizedKey));
-    if (validationError is not null)
-    {
-        return Results.BadRequest(new { message = validationError });
-    }
-
-    var keyExists = await dbContext.Projects.AnyAsync(project => project.Key == normalizedKey, cancellationToken);
-    if (keyExists)
-    {
-        return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
-    }
-
-    var project = new Project
-    {
-        Name = normalizedName,
-        Key = normalizedKey,
-        Description = request.Description?.Trim(),
-        IsArchived = request.IsArchived
-    };
-
-    dbContext.Projects.Add(project);
-    var saved = await TrySaveProjectAsync(dbContext, normalizedKey, cancellationToken);
-    if (!saved)
-    {
-        return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
-    }
-
-    changeNotifier.Publish();
-    return Results.Created($"/api/projects/{project.Id}", ToSummaryDto(project));
-})
-.WithName("CreateProject");
-
-app.MapPut("/api/projects/{projectId:guid}", async (Guid projectId, UpdateProjectRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
-{
-    var project = await dbContext.Projects.FirstOrDefaultAsync(project => project.Id == projectId, cancellationToken);
-    if (project is null)
-    {
-        return Results.NotFound();
-    }
-
-    var normalizedName = request.Name.Trim();
-    var normalizedKey = request.Key.Trim().ToUpperInvariant();
-    var validationError = ValidateRequiredText(("name", normalizedName), ("key", normalizedKey));
-    if (validationError is not null)
-    {
-        return Results.BadRequest(new { message = validationError });
-    }
-
-    var keyExists = await dbContext.Projects.AnyAsync(
-        candidate => candidate.Id != projectId && candidate.Key == normalizedKey,
-        cancellationToken);
-    if (keyExists)
-    {
-        return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
-    }
-
-    project.Name = normalizedName;
-    project.Key = normalizedKey;
-    project.Description = request.Description?.Trim();
-    project.IsArchived = request.IsArchived;
-
-    var saved = await TrySaveProjectAsync(dbContext, normalizedKey, cancellationToken);
-    if (!saved)
-    {
-        return Results.Conflict(new { message = $"Project key '{normalizedKey}' already exists." });
-    }
-
-    changeNotifier.Publish();
-    return Results.Ok(ToSummaryDto(project));
-})
-.WithName("UpdateProject");
 
 app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
@@ -727,17 +619,6 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext db
 
 app.Run();
 
-static ProjectSummaryDto ToSummaryDto(Project project) =>
-    new(
-        project.Id,
-        project.Name,
-        project.Key,
-        project.Description,
-        project.IsArchived,
-        project.CreatedAtUtc,
-        project.Items.Count,
-        project.Items.Count(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed));
-
 static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup dependencies, ILookup<Guid, WorkItemLinkDto> links, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
     new(
         project.Id,
@@ -834,31 +715,6 @@ static async Task NormalizeColumnOrderingAsync(
 
         // Order only: a sibling that merely shifts has not changed, so its UpdatedAtUtc stays.
         item.Order = index++;
-    }
-}
-
-static async Task<bool> TrySaveProjectAsync(
-    KanbanDbContext dbContext,
-    string normalizedKey,
-    CancellationToken cancellationToken)
-{
-    try
-    {
-        await dbContext.SaveChangesAsync(cancellationToken);
-        return true;
-    }
-    catch (DbUpdateException)
-    {
-        var keyExists = await dbContext.Projects
-            .AsNoTracking()
-            .AnyAsync(project => project.Key == normalizedKey, cancellationToken);
-
-        if (keyExists)
-        {
-            return false;
-        }
-
-        throw;
     }
 }
 

@@ -37,54 +37,17 @@ public static class WorkItemDependencies
     {
         // Two adds can each pass the cycle check and together close a loop, even when they share no item, so the
         // check and the insert run one caller at a time. Do not replace this with a plain read followed by a write.
-        // SQLite: the transaction is BEGIN IMMEDIATE, which admits one writer. MariaDB: a named lock, taken before
-        // the transaction starts so its reads see every edge committed by earlier holders.
-        // The connection is opened here so that it stays the same one from GET_LOCK to RELEASE_LOCK: left to
-        // itself EF returns it to the pool at commit, and the lock would stay with the pooled connection.
-        var useNamedLock = dbContext.Database.ProviderName == "MySql.EntityFrameworkCore";
-        await dbContext.Database.OpenConnectionAsync(cancellationToken);
-        try
+        return await MariaDbNamedLock.RunAsync(dbContext, LockName, LockTimeoutSeconds, WorkItemDependencyOutcome.Busy, async () =>
         {
-            try
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            var outcome = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
+            if (outcome == WorkItemDependencyOutcome.Succeeded)
             {
-                // Inside the try so that RELEASE_LOCK always follows: a request aborted after the server granted
-                // the lock but before the result was read must not return the pooled connection still holding it.
-                if (useNamedLock)
-                {
-                    var acquired = await dbContext.Database
-                        .SqlQuery<long?>($"SELECT CAST(GET_LOCK({LockName}, {LockTimeoutSeconds}) AS SIGNED) AS `Value`")
-                        .ToListAsync(cancellationToken);
-                    if (acquired.Single() != 1)
-                    {
-                        return WorkItemDependencyOutcome.Busy;
-                    }
-                }
-
-                await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-                var outcome = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
-                if (outcome == WorkItemDependencyOutcome.Succeeded)
-                {
-                    await transaction.CommitAsync(cancellationToken);
-                }
-
-                return outcome;
+                await transaction.CommitAsync(cancellationToken);
             }
-            finally
-            {
-                if (useNamedLock)
-                {
-                    // Not cancellable: the lock must go even when the request was aborted. Releasing a lock
-                    // this connection does not hold returns 0 or NULL and changes nothing.
-                    await dbContext.Database
-                        .SqlQuery<long?>($"SELECT CAST(RELEASE_LOCK({LockName}) AS SIGNED) AS `Value`")
-                        .ToListAsync(CancellationToken.None);
-                }
-            }
-        }
-        finally
-        {
-            await dbContext.Database.CloseConnectionAsync();
-        }
+
+            return outcome;
+        }, cancellationToken);
     }
 
     private static async Task<WorkItemDependencyOutcome> AddLockedAsync(

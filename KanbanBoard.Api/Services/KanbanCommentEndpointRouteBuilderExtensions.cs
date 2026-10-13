@@ -48,10 +48,9 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
                 return InvalidArgument("Argument 'body' is required.");
             }
 
-            if (request.IdempotencyKey is not null && !WorkItemComments.IsValidIdempotencyKey(request.IdempotencyKey))
+            if (request.IdempotencyKey is not null && !IdempotencyKeys.IsValid(request.IdempotencyKey))
             {
-                return InvalidArgument(
-                    $"Argument 'idempotency_key' must be 1 to {WorkItemCommentLimits.MaxIdempotencyKeyLength} printable ASCII characters without spaces.");
+                return InvalidArgument(IdempotencyKeys.InvalidMessage);
             }
 
             var result = await WorkItemComments.AddAsync(
@@ -103,7 +102,7 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
             }
 
             WorkItemCursor after = default;
-            if (cursor is not null && !WorkItemCursor.TryDecode(cursor, out after))
+            if (cursor is not null && !WorkItemCursor.TryDecode(cursor, WorkItemCursor.Comments, out after))
             {
                 return InvalidArgument("Argument 'cursor' is not a cursor returned by this tool. Pass next_cursor from the previous page unchanged.");
             }
@@ -126,7 +125,7 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
 
             return Results.Ok(new WorkItemCommentPageDto(
                 page.Select(WorkItemDtoMapper.ToCommentDto).ToList(),
-                rows.Count > pageSize ? new WorkItemCursor(page[^1].CreatedAtUtc, page[^1].Id).Encode() : null));
+                rows.Count > pageSize ? new WorkItemCursor(page[^1].CreatedAtUtc, page[^1].Id).Encode(WorkItemCursor.Comments) : null));
         })
         .WithName("ListWorkItemComments");
 

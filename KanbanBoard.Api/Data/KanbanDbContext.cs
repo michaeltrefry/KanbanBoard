@@ -23,10 +23,16 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
         {
             entity.HasKey(project => project.Id);
             entity.Property(project => project.Id).HasConversion(GuidToStringConverter).HasMaxLength(36);
-            entity.Property(project => project.Name).HasMaxLength(160).IsRequired();
-            entity.Property(project => project.Key).HasMaxLength(24).IsRequired();
+            entity.Property(project => project.Name).HasMaxLength(ProjectLimits.MaxNameLength).IsRequired();
+            entity.Property(project => project.Key).HasMaxLength(ProjectLimits.MaxKeyLength).IsRequired();
+            entity.Property(project => project.RepositoryUrl).HasMaxLength(ProjectLimits.MaxRepositoryUrlLength);
+            entity.Property(project => project.DefaultBranch).HasMaxLength(ProjectLimits.MaxDefaultBranchLength);
+            entity.Property(project => project.IdempotencyKeyHash).HasMaxLength(64);
             entity.Property(project => project.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.HasIndex(project => project.Key).IsUnique();
+            // One project per idempotency key (the hash covers the caller's identity). Projects created without a
+            // key hold null here, and a unique index admits any number of nulls.
+            entity.HasIndex(project => project.IdempotencyKeyHash).IsUnique();
         });
 
         modelBuilder.Entity<Epic>(entity =>

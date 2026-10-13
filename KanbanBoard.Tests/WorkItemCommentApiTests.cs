@@ -298,6 +298,10 @@ public sealed class WorkItemCommentApiTests
         Assert.Equal(
             ["author", "author_id", "body", "createdAtUtc", "id", "workItemId"],
             json.RootElement.GetProperty("items")[0].EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
+        // A comment written without a token has no author_id at all, rather than a null one.
+        Assert.Equal(
+            ["author", "body", "createdAtUtc", "id", "workItemId"],
+            json.RootElement.GetProperty("items")[1].EnumerateObject().Select(property => property.Name).Order(StringComparer.Ordinal).ToArray());
         var page = JsonSerializer.Deserialize<WorkItemCommentPageDto>(raw, JsonSerializerOptions.Web)!;
         Assert.Equal(
             [
@@ -386,6 +390,30 @@ public sealed class WorkItemCommentApiTests
     }
 
     [Fact]
+    public async Task A_cursor_of_the_work_item_list_is_refused_by_the_comment_list_and_the_other_way_round()
+    {
+        using var fixture = await ApiFixture.CreateAsync();
+        var item = await fixture.AddItemAsync("A");
+        await fixture.AddItemAsync("B");
+        await SeedAsync(fixture, item, [fixture.Clock.Now, fixture.Clock.Now.AddSeconds(1)]);
+        var itemCursor = (await fixture.Client.GetFromJsonAsync<WorkItemPageDto>("/api/items?limit=1"))!.NextCursor;
+        var commentCursor = (await GetPageAsync(fixture, $"/api/items/{item}/comments?limit=1")).NextCursor;
+        Assert.NotNull(itemCursor);
+        Assert.NotNull(commentCursor);
+
+        using var commentsWithItemCursor = await fixture.Client.GetAsync($"/api/items/{item}/comments?cursor={itemCursor}");
+        using var itemsWithCommentCursor = await fixture.Client.GetAsync($"/api/items?cursor={commentCursor}");
+        using var commentsWithOwnCursor = await fixture.Client.GetAsync($"/api/items/{item}/comments?cursor={commentCursor}");
+        using var itemsWithOwnCursor = await fixture.Client.GetAsync($"/api/items?cursor={itemCursor}");
+
+        // Both cursors hold a time and an id; without its kind each would be read as a position in the other list.
+        await AssertErrorAsync(commentsWithItemCursor, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        await AssertErrorAsync(itemsWithCommentCursor, HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument);
+        Assert.Equal(HttpStatusCode.OK, commentsWithOwnCursor.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, itemsWithOwnCursor.StatusCode);
+    }
+
+    [Fact]
     public async Task A_read_scope_token_can_list_comments_and_cannot_add_one()
     {
         using var fixture = await ApiFixture.CreateAsync();
@@ -429,19 +457,19 @@ public sealed class WorkItemCommentApiTests
     [InlineData("a b", false)]
     [InlineData("a\u007f", false)]
     public void Idempotency_keys_are_printable_ascii_without_spaces(string key, bool valid) =>
-        Assert.Equal(valid, WorkItemComments.IsValidIdempotencyKey(key));
+        Assert.Equal(valid, IdempotencyKeys.IsValid(key));
 
     [Fact]
     public void The_idempotency_key_hash_covers_the_identity_and_the_exact_key()
     {
         var user = Guid.NewGuid();
-        var hash = WorkItemComments.HashIdempotencyKey(user, "key");
+        var hash = IdempotencyKeys.Hash(user, "key");
 
         Assert.Matches("^[0-9a-f]{64}$", hash);
-        Assert.Equal(hash, WorkItemComments.HashIdempotencyKey(user, "key"));
-        Assert.NotEqual(hash, WorkItemComments.HashIdempotencyKey(user, "KEY"));
-        Assert.NotEqual(hash, WorkItemComments.HashIdempotencyKey(Guid.NewGuid(), "key"));
-        Assert.NotEqual(hash, WorkItemComments.HashIdempotencyKey(null, "key"));
+        Assert.Equal(hash, IdempotencyKeys.Hash(user, "key"));
+        Assert.NotEqual(hash, IdempotencyKeys.Hash(user, "KEY"));
+        Assert.NotEqual(hash, IdempotencyKeys.Hash(Guid.NewGuid(), "key"));
+        Assert.NotEqual(hash, IdempotencyKeys.Hash(null, "key"));
     }
 
     private static Task<HttpResponseMessage> AddAsync(ApiFixture fixture, Guid item, PersonalAccessTokenValidationResult caller, object body) =>
@@ -477,7 +505,7 @@ public sealed class WorkItemCommentApiTests
         });
 
     private static string LastCursor(WorkItemCommentPageDto page) =>
-        new WorkItemCursor(page.Items[^1].CreatedAtUtc, page.Items[^1].Id).Encode();
+        new WorkItemCursor(page.Items[^1].CreatedAtUtc, page.Items[^1].Id).Encode(WorkItemCursor.Comments);
 
     private static async Task<WorkItemCommentPageDto> GetPageAsync(ApiFixture fixture, string path)
     {

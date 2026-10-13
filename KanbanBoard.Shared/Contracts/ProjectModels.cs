@@ -27,6 +27,8 @@ public enum WorkItemPriority
     Critical
 }
 
+/// <param name="RepositoryUrl">The repository the project's work is done in, or null when none is set.</param>
+/// <param name="DefaultBranch">The branch of that repository work starts from, or null when none is set.</param>
 public sealed record ProjectSummaryDto(
     Guid Id,
     string Name,
@@ -35,7 +37,15 @@ public sealed record ProjectSummaryDto(
     bool IsArchived,
     DateTimeOffset CreatedAtUtc,
     int TotalItems,
-    int OpenItems);
+    int OpenItems,
+    // Always written, also as null: the MCP server leaves null fields out unless told otherwise.
+    [property: JsonPropertyName("repository_url"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? RepositoryUrl = null,
+    [property: JsonPropertyName("default_branch"), JsonIgnore(Condition = JsonIgnoreCondition.Never)] string? DefaultBranch = null)
+{
+    /// <summary>Only on the answer to creating a project: false when the idempotency key was a repeat and nothing was created.</summary>
+    [JsonPropertyName("created"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Created { get; init; }
+}
 
 public sealed record ProjectBoardDto(
     Guid Id,
@@ -69,7 +79,7 @@ public sealed record EpicReferenceDto(
 
 /// <param name="AuthorId">
 /// Id of the identity whose token wrote the comment; <paramref name="Author"/> is then that identity's name at the
-/// time. Null when the comment was written without a token, where the author is the name the writer typed.
+/// time. Left out when the comment was written without a token, where the author is the name the writer typed.
 /// </param>
 public sealed record WorkItemCommentDto(
     Guid Id,
@@ -77,7 +87,7 @@ public sealed record WorkItemCommentDto(
     string Author,
     string Body,
     DateTimeOffset CreatedAtUtc,
-    [property: JsonPropertyName("author_id")] Guid? AuthorId = null);
+    [property: JsonPropertyName("author_id"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? AuthorId = null);
 
 /// <summary>
 /// One page of a work item's comments, oldest first. <see cref="NextCursor"/> is null on the last page; otherwise
@@ -183,11 +193,15 @@ public sealed record CreatedPersonalAccessTokenDto(
     PersonalAccessTokenMetadataDto Token,
     string PlaintextToken);
 
+/// <param name="IdempotencyKey">Makes the create safe to repeat: a key the caller already used returns that project.</param>
 public sealed record CreateProjectRequest(
     string Name,
     string Key,
     string? Description,
-    bool IsArchived = false);
+    bool IsArchived = false,
+    string? RepositoryUrl = null,
+    string? DefaultBranch = null,
+    string? IdempotencyKey = null);
 
 public sealed record UpdateProjectRequest(
     string Name,

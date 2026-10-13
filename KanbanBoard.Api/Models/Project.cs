@@ -9,6 +9,11 @@ public sealed class Project
     public string Key { get; set; } = string.Empty;
     public string? Description { get; set; }
     public bool IsArchived { get; set; }
+    // Where the project's work is done: an http, https or ssh repository URL and a branch of it. Both optional.
+    public string? RepositoryUrl { get; set; }
+    public string? DefaultBranch { get; set; }
+    // IdempotencyKeys.Hash of the idempotency key the project was created with, or null when none was passed.
+    public string? IdempotencyKeyHash { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<Epic> Epics { get; set; } = [];
     public List<WorkItem> Items { get; set; } = [];
@@ -98,7 +103,7 @@ public sealed class WorkItemComment
     // and for every comment older than this column.
     public Guid? AuthorUserId { get; set; }
     public string Body { get; set; } = string.Empty;
-    // WorkItemComments.HashIdempotencyKey of the caller's idempotency key, or null when none was passed.
+    // IdempotencyKeys.Hash of the caller's idempotency key, or null when none was passed.
     public string? IdempotencyKeyHash { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }

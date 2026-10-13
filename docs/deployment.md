@@ -148,6 +148,8 @@ For the work item link change (sc-25862) the API creates the `WorkItemLinks` tab
 
 For the comment record change (sc-25863) the API alters `WorkItemComments` on its first start (`20261012233418_AddWorkItemCommentAuthorAndIdempotencyKey`): `Author` widens to 320 characters, and the nullable `AuthorUserId` and `IdempotencyKeyHash` columns and a unique index on (`WorkItemId`, `IdempotencyKeyHash`) are added. Existing comments keep their ids, authors and timestamps and get `NULL` in both new columns. `deploy/sql/006_work_item_comment_author_and_idempotency_key.sql` is the manual equivalent.
 
+For the project target change (sc-25864) the API alters `Projects` on its first start (`20261013000421_AddProjectRepositoryAndIdempotencyKey`): the nullable `RepositoryUrl`, `DefaultBranch` and `IdempotencyKeyHash` columns and a unique index on `IdempotencyKeyHash` are added. Existing projects keep their rows and get `NULL` in all three; set a project's repository afterwards with the MCP tool `update_project`. `deploy/sql/007_project_repository_and_idempotency_key.sql` is the manual equivalent.
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:

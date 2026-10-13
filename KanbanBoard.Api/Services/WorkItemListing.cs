@@ -95,25 +95,33 @@ public static class WorkItemListing
 
 /// <summary>
 /// The position of the last item of a page. On the wire it is an opaque string: callers pass back what they were
-/// given and never build or read one.
+/// given and never build or read one. The string names the list it belongs to, so a cursor of one list is refused
+/// by another instead of being read as a position in it.
 /// </summary>
 public readonly record struct WorkItemCursor(DateTimeOffset CreatedAtUtc, Guid Id)
 {
+    /// <summary>The kind of a cursor of <c>GET /api/items</c>.</summary>
+    public const string WorkItems = "i";
+
+    /// <summary>The kind of a cursor of <c>GET /api/items/{id}/comments</c>.</summary>
+    public const string Comments = "c";
+
     public static WorkItemCursor After(WorkItem item) => new(item.CreatedAtUtc, item.Id);
 
-    public string Encode() =>
-        Base64Url.EncodeToString(Encoding.UTF8.GetBytes($"{CreatedAtUtc.UtcTicks}.{Id:N}"));
+    public string Encode(string kind) =>
+        Base64Url.EncodeToString(Encoding.UTF8.GetBytes($"{kind}.{CreatedAtUtc.UtcTicks}.{Id:N}"));
 
-    public static bool TryDecode(string value, out WorkItemCursor cursor)
+    public static bool TryDecode(string value, string kind, out WorkItemCursor cursor)
     {
         cursor = default;
         try
         {
             var parts = Encoding.UTF8.GetString(Base64Url.DecodeFromChars(value.Trim())).Split('.');
-            if (parts.Length != 2 ||
-                !long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) ||
+            if (parts.Length != 3 ||
+                parts[0] != kind ||
+                !long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) ||
                 ticks > DateTimeOffset.MaxValue.UtcTicks ||
-                !Guid.TryParseExact(parts[1], "N", out var id))
+                !Guid.TryParseExact(parts[2], "N", out var id))
             {
                 return false;
             }

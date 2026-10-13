@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using KanbanBoard.Mcp.Configuration;
 using KanbanBoard.Mcp.Services;
@@ -25,6 +26,13 @@ public sealed class KanbanTools(
 
     public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
 
+    private const string RepositoryUrlDescription =
+        "Repository the project's work is done in: an http or https URL without user name or password (https://github.com/owner/repo.git), " +
+        "or an SSH URL without password (ssh://git@github.com/owner/repo.git or git@github.com:owner/repo.git). At most 2048 characters, stored as given.";
+
+    private const string DefaultBranchDescription =
+        "Branch of the repository that work starts from, such as main: a branch name git accepts, at most 255 characters";
+
     private const string UnblockedOnlyDescription =
         "When true, return only items that are not waiting on a blocker: every item they are blocked by is Done (items with no blockers included)";
 
@@ -33,7 +41,7 @@ public sealed class KanbanTools(
         Converters = { new JsonStringEnumConverter() }
     };
 
-    [McpServerTool, Description("List all projects in the kanban board.")]
+    [McpServerTool, Description("List all projects in the kanban board. Each project carries repository_url and default_branch, the repository and branch its work is done in; both are null when not set.")]
     public async Task<IReadOnlyList<ProjectSummaryDto>> ListProjects(
         [Description("Whether to include archived projects")] bool includeArchived = false)
     {
@@ -42,17 +50,51 @@ public sealed class KanbanTools(
             ?? [];
     }
 
-    [McpServerTool, Description("Create a new project.")]
+    [McpServerTool, Description("Create a new project, optionally with the repository and branch its work is done in. Pass idempotency_key to make the call safe to repeat: when the same identity already used the key, nothing is created and the project it created is returned as it is now, whatever the other arguments. Returns the project with created (false for a repeat). A key another project has is refused with code conflict, a malformed argument with invalid_argument, and a keyed create that waited 10 seconds for other keyed creates with busy; retry.")]
     public async Task<ProjectSummaryDto?> CreateProject(
-        [Description("Project name")] string name,
-        [Description("Short uppercase key")] string key,
-        [Description("Optional description")] string? description = null)
+        [Description("Project name, at most 160 characters")] string name,
+        [Description("Short key, at most 24 characters, stored in upper case. No two projects share a key.")] string key,
+        [Description("Optional description")] string? description = null,
+        [Description(RepositoryUrlDescription)] string? repository_url = null,
+        [Description(DefaultBranchDescription)] string? default_branch = null,
+        [Description("Caller-chosen key for this project, such as a plan id: 1 to 128 printable ASCII characters without spaces, compared exactly. It belongs to the calling identity.")] string? idempotency_key = null)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var response = await client.PostAsJsonAsync("/api/projects", new CreateProjectRequest(name, key, description, false));
-        response.EnsureSuccessStatusCode();
+        using var response = await client.PostAsJsonAsync("/api/projects", new CreateProjectRequest(name, key, description, false, repository_url, default_branch, idempotency_key));
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<ProjectSummaryDto>(JsonOptions);
+    }
+
+    [McpServerTool, Description("Change a project. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value. To empty an optional field, name it in clear (description, repository_url, default_branch); an empty string is refused with code invalid_argument, as is a field that is both passed and named in clear. Renames with name, archives with is_archived true and restores with is_archived false; an archived project is left out of list_projects unless includeArchived is true. Returns the project. An unknown id is refused with code not_found, a key another project has with conflict.")]
+    public async Task<ProjectSummaryDto> UpdateProject(
+        [Description("Project id")] Guid id,
+        [Description("New name, at most 160 characters. Several projects may share a name.")] string? name = null,
+        [Description("New key, at most 24 characters, stored in upper case. No two projects share a key.")] string? key = null,
+        [Description("New description")] string? description = null,
+        [Description(RepositoryUrlDescription)] string? repository_url = null,
+        [Description(DefaultBranchDescription)] string? default_branch = null,
+        [Description("true archives the project, false restores it")] bool? is_archived = null,
+        [Description("Names of the optional fields to empty: any of description, repository_url, default_branch")] string[]? clear = null)
+    {
+        EnsureWriteScope();
+        var body = PatchBody(
+            clear,
+            ("name", "name", name, false),
+            ("key", "key", key, false),
+            ("description", "description", description, true),
+            ("repository_url", "repositoryUrl", repository_url, true),
+            ("default_branch", "defaultBranch", default_branch, true));
+        if (is_archived is not null)
+        {
+            body["isArchived"] = is_archived.Value;
+        }
+
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.PatchAsync($"/api/projects/{id}", JsonContent.Create(body));
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<ProjectSummaryDto>(JsonOptions)
+            ?? throw new InvalidOperationException($"The Kanban API returned no project for {id}.");
     }
 
     [McpServerTool, Description("Fetch a project board, optionally filtered to a single status. Closed items stay persisted but are hidden unless status=Closed is requested.")]
@@ -455,7 +497,7 @@ public sealed class KanbanTools(
         [Description("Comment text")] string body) =>
         AddWorkItemComment(itemId, body, author);
 
-    [McpServerTool, Description("List the comments of work item id, oldest first, one page at a time: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. Each comment is {id, workItemId, author, author_id, body, createdAtUtc}: author_id is the id of the identity whose token wrote the comment and is left out for a comment written without a token; author is that identity's name when the comment was written, or the name the writer gave. An unknown id is refused with code not_found, a malformed limit or cursor with invalid_argument.")]
+    [McpServerTool, Description("List the comments of work item id, oldest first, one page at a time: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. Each comment is {id, workItemId, author, author_id, body, createdAtUtc}: author_id is the id of the identity whose token wrote the comment and is left out for a comment written without a token; author is that identity's name when the comment was written, or the name the writer gave. An unknown id is refused with code not_found, a limit outside 1 to 200 or a malformed cursor with invalid_argument.")]
     public async Task<WorkItemCommentPageDto> ListWorkItemComments(
         [Description("Work item id")] Guid id,
         [Description("Page size, 1 to 200. 50 when not passed.")] int? limit = null,
@@ -598,6 +640,45 @@ public sealed class KanbanTools(
         var response = await client.DeleteAsync($"/api/items/{itemId}");
         response.EnsureSuccessStatusCode();
         return new DeleteResultDto(itemId, "work_item", true);
+    }
+
+    // The body of a partial update, and the one convention for emptying an optional field over MCP: an argument
+    // that is left out (or null: MCP cannot tell the two apart) is not sent and keeps its value, an argument with a
+    // value is sent, and a field named in clear is sent as null. Each field is (argument name, API name, value,
+    // whether clear may name it).
+    private static JsonObject PatchBody(string[]? clear, params (string Argument, string ApiName, string? Value, bool Clearable)[] fields)
+    {
+        var cleared = clear ?? [];
+        var clearable = fields.Where(field => field.Clearable).Select(field => field.Argument).ToArray();
+        if (cleared.FirstOrDefault(name => !clearable.Contains(name)) is { } unknown)
+        {
+            throw KanbanToolErrors.InvalidArgument(
+                $"Argument 'clear' names '{unknown}', which cannot be emptied. It may name: {string.Join(", ", clearable)}.");
+        }
+
+        var body = new JsonObject();
+        foreach (var (argument, apiName, value, _) in fields)
+        {
+            var isCleared = cleared.Contains(argument);
+            if (value is not null && isCleared)
+            {
+                throw KanbanToolErrors.InvalidArgument($"Argument '{argument}' is both passed and named in 'clear'. Do one of the two.");
+            }
+
+            if (value is not null && string.IsNullOrWhiteSpace(value))
+            {
+                throw KanbanToolErrors.InvalidArgument(clearable.Contains(argument)
+                    ? $"Argument '{argument}' must not be empty. To empty the field, name it in 'clear'."
+                    : $"Argument '{argument}' must not be empty.");
+            }
+
+            if (value is not null || isCleared)
+            {
+                body[apiName] = value;
+            }
+        }
+
+        return body;
     }
 
     // A write that returns the work item, with API refusals turned into the typed error envelope.

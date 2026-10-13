@@ -204,8 +204,16 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("DefaultBranch")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
                     b.Property<string>("Description")
                         .HasColumnType("longtext");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.Property<bool>("IsArchived")
                         .HasColumnType("tinyint(1)");
@@ -220,7 +228,14 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasMaxLength(160)
                         .HasColumnType("varchar(160)");
 
+                    b.Property<string>("RepositoryUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("Key")
                         .IsUnique();

@@ -59,7 +59,7 @@ public sealed class WorkItemListMySqlTests
     {
         var database = new FakeDatabase(lockResult: 1, OneItem);
         using var host = await StartApiAsync(database);
-        var cursor = new WorkItemCursor(new DateTimeOffset(Created).AddMinutes(-1), Guid.Empty).Encode();
+        var cursor = new WorkItemCursor(new DateTimeOffset(Created).AddMinutes(-1), Guid.Empty).Encode(WorkItemCursor.WorkItems);
 
         var response = await host.GetTestClient().GetAsync($"/api/items?limit=1&includeComments=false&cursor={cursor}");
 
