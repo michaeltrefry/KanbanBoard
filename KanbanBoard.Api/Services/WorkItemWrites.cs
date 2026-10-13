@@ -41,6 +41,7 @@ public static class WorkItemWrites
         KanbanDbContext dbContext,
         Guid itemId,
         UpdateWorkItemPatch patch,
+        ChangeActor? actor,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -76,6 +77,10 @@ public static class WorkItemWrites
             .Include(workItem => workItem.Epic)
             .Include(workItem => workItem.Comments)
             .FirstAsync(workItem => workItem.Id == itemId, cancellationToken);
+
+        // The row is held, so these are the values this update replaces. The version was advanced just above.
+        var before = WorkItemChangeLog.Snapshot(item);
+        before["version"] = item.Version - 1;
 
         // An epic is checked when the update names one: an update that leaves the epic alone is not refused
         // because that epic has been archived since.
@@ -121,7 +126,11 @@ public static class WorkItemWrites
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemUpdated, actor, now, before, WorkItemChangeLog.Snapshot(item)),
+            cancellationToken);
 
         if (item.EpicId is null)
         {
@@ -151,6 +160,7 @@ public static class WorkItemWrites
         WorkItemStatus status,
         int order,
         long? expectedVersion,
+        ChangeActor? actor,
         DateTimeOffset now,
         ILogger logger,
         CancellationToken cancellationToken)
@@ -158,6 +168,15 @@ public static class WorkItemWrites
         WorkItem? moved;
         await using (var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken))
         {
+            // The UPDATE below overwrites the column and the position, so the item is held and read first: the
+            // entry of the change feed reports the values this move replaces.
+            await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
+            var before = await dbContext.WorkItems.AsNoTracking().FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
+            if (before is null)
+            {
+                return new(WorkItemWriteOutcome.NotFound);
+            }
+
             var refusal = await AdvanceAsync(
                 dbContext,
                 itemId,
@@ -183,7 +202,11 @@ public static class WorkItemWrites
                 return new(WorkItemWriteOutcome.NotFound);
             }
 
-            await transaction.CommitAsync(cancellationToken);
+            await WorkItemChangeLog.CommitAsync(
+                dbContext,
+                transaction,
+                WorkItemChangeLog.Entry(itemId, moved.ProjectId, WorkItemChangeKinds.ItemMoved, actor, now, WorkItemChangeLog.Snapshot(before), WorkItemChangeLog.Snapshot(moved)),
+                cancellationToken);
         }
 
         // The siblings are written after that transaction, without holding the moved item's row. Each save writes
@@ -204,13 +227,16 @@ public static class WorkItemWrites
     }
 
     /// <summary>
-    /// Takes every unfinished item out of the epic, as one UPDATE that also advances their versions. Returns the
-    /// number of items it took out.
+    /// Takes every item out of the epic (or every unfinished one), as one UPDATE that also advances their versions.
+    /// Returns one entry of the change feed for each item it took out, for the caller to pass to
+    /// <see cref="WorkItemChangeLog.CommitAsync"/>. Call it first in the caller's transaction: it starts by holding
+    /// the rows, so that the versions it reports are the ones it replaces.
     /// </summary>
-    public static Task<int> DetachFromEpicAsync(
+    public static async Task<List<WorkItemChange>> DetachFromEpicAsync(
         KanbanDbContext dbContext,
         Guid epicId,
         bool unfinishedOnly,
+        ChangeActor? actor,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -220,12 +246,29 @@ public static class WorkItemWrites
             items = items.Where(item => item.Status != WorkItemStatus.Done && item.Status != WorkItemStatus.Closed);
         }
 
-        return items.ExecuteUpdateAsync(
+        await items.ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
+        var held = await items
+            .AsNoTracking()
+            .Select(item => new { item.Id, item.ProjectId, item.Version })
+            .ToListAsync(cancellationToken);
+
+        await items.ExecuteUpdateAsync(
             setters => setters
                 .SetProperty(item => item.EpicId, (Guid?)null)
                 .SetProperty(item => item.UpdatedAtUtc, now)
                 .SetProperty(item => item.Version, item => item.Version + 1),
             cancellationToken);
+
+        return held
+            .Select(item => WorkItemChangeLog.Entry(
+                item.Id,
+                item.ProjectId,
+                WorkItemChangeKinds.ItemUpdated,
+                actor,
+                now,
+                new Dictionary<string, object?> { ["epic_id"] = epicId, ["version"] = item.Version },
+                new Dictionary<string, object?> { ["epic_id"] = null, ["version"] = item.Version + 1 }))
+            .ToList();
     }
 
     /// <summary>The order that puts an item at the end of a column.</summary>

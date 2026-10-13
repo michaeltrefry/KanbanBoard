@@ -33,6 +33,8 @@ public static class WorkItemDependencies
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         // Two adds can each pass the cycle check and together close a loop, even when they share no item, so the
@@ -40,31 +42,40 @@ public static class WorkItemDependencies
         return await MariaDbNamedLock.RunAsync(dbContext, LockName, LockTimeoutSeconds, WorkItemDependencyOutcome.Busy, async () =>
         {
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-            var outcome = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
-            if (outcome == WorkItemDependencyOutcome.Succeeded)
+            var (outcome, added) = await AddLockedAsync(dbContext, blockedItemId, blockerItemId, cancellationToken);
+            if (added)
             {
-                await transaction.CommitAsync(cancellationToken);
+                await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyAdded, blockedItemId, blockerItemId, actor, now, cancellationToken);
             }
 
             return outcome;
         }, cancellationToken);
     }
 
-    private static async Task<WorkItemDependencyOutcome> AddLockedAsync(
+    // Whether the edge was inserted: an edge that was already there succeeds without a write.
+    private static async Task<(WorkItemDependencyOutcome Outcome, bool Added)> AddLockedAsync(
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
         CancellationToken cancellationToken)
     {
+        // Must be the first statement of the transaction. It changes nothing and holds the rows of both items, in
+        // the order of their keys. Without it the INSERT below takes a shared lock on each of the two rows for its
+        // foreign keys, one after the other, and deadlocks on MariaDB (error 1213) with a move that is renumbering
+        // the same two items in the other order.
+        await dbContext.WorkItems
+            .Where(item => item.Id == blockedItemId || item.Id == blockerItemId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(item => item.Version, item => item.Version), cancellationToken);
+
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
-            return WorkItemDependencyOutcome.NotFound;
+            return (WorkItemDependencyOutcome.NotFound, false);
         }
 
         if (blockedItemId == blockerItemId ||
             await IsBlockedByAsync(dbContext, blockerItemId, blockedItemId, cancellationToken))
         {
-            return WorkItemDependencyOutcome.Cycle;
+            return (WorkItemDependencyOutcome.Cycle, false);
         }
 
         var exists = await dbContext.WorkItemDependencies.AnyAsync(
@@ -72,7 +83,7 @@ public static class WorkItemDependencies
             cancellationToken);
         if (exists)
         {
-            return WorkItemDependencyOutcome.Succeeded;
+            return (WorkItemDependencyOutcome.Succeeded, false);
         }
 
         dbContext.WorkItemDependencies.Add(new WorkItemDependency
@@ -90,13 +101,13 @@ public static class WorkItemDependencies
             dbContext.ChangeTracker.Clear();
             if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
             {
-                return WorkItemDependencyOutcome.NotFound;
+                return (WorkItemDependencyOutcome.NotFound, false);
             }
 
             throw;
         }
 
-        return WorkItemDependencyOutcome.Succeeded;
+        return (WorkItemDependencyOutcome.Succeeded, true);
     }
 
     /// <summary>Deletes the edge. Removing an edge that does not exist succeeds and changes nothing.</summary>
@@ -104,8 +115,14 @@ public static class WorkItemDependencies
         KanbanDbContext dbContext,
         Guid blockedItemId,
         Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
+        // The blocked item's row is held first, like every write that records an entry for an item: the removes of
+        // one edge then run one at a time, and the second one reads the edge only after the first has committed.
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemChangeLog.LockItemAsync(dbContext, blockedItemId, cancellationToken);
         if (!await BothExistAsync(dbContext, blockedItemId, blockerItemId, cancellationToken))
         {
             return WorkItemDependencyOutcome.NotFound;
@@ -123,12 +140,96 @@ public static class WorkItemDependencies
             }
             catch (DbUpdateConcurrencyException)
             {
-                // Another caller removed the edge first.
+                // Another caller removed the edge first: this call changed nothing and records nothing.
                 dbContext.ChangeTracker.Clear();
+                return WorkItemDependencyOutcome.Succeeded;
             }
+
+            await CommitAsync(dbContext, transaction, WorkItemChangeKinds.DependencyRemoved, blockedItemId, blockerItemId, actor, now, cancellationToken);
         }
 
         return WorkItemDependencyOutcome.Succeeded;
+    }
+
+    // One edge is one entry of the change feed, on the blocked item: the edge is that item's "blocked by".
+    private static async Task CommitAsync(
+        KanbanDbContext dbContext,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction,
+        string changeKind,
+        Guid blockedItemId,
+        Guid blockerItemId,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var edge = new Dictionary<string, object?> { ["blocked_by"] = blockerItemId };
+        var added = changeKind == WorkItemChangeKinds.DependencyAdded;
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(
+                blockedItemId,
+                await WorkItemChangeLog.ProjectIdAsync(dbContext, blockedItemId, cancellationToken),
+                changeKind,
+                actor,
+                now,
+                added ? null : edge,
+                added ? edge : null),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Holds the edges whose blocking item a delete is about to remove, until the transaction ends, and changes
+    /// nothing. The database removes those edges with the item (ON DELETE CASCADE) without a word; the delete records
+    /// them (see <see cref="RemovedWithBlockersAsync"/>). Call it before the first read of the transaction: a remove
+    /// of one of these edges that commits later than that read would otherwise be recorded twice.
+    /// </summary>
+    public static Task HoldAsync(IQueryable<WorkItemDependency> edges, CancellationToken cancellationToken) =>
+        edges.ExecuteUpdateAsync(setters => setters.SetProperty(edge => edge.BlockerItemId, edge => edge.BlockerItemId), cancellationToken);
+
+    /// <summary>
+    /// <see cref="HoldAsync"/> for the edges whose blocking item belongs to the project, for a delete of the project.
+    /// On MariaDB the statement is written here: MySql.EntityFrameworkCore writes the UPDATE of a join as
+    /// <c>UPDATE ... SET ... FROM</c>, which MariaDB rejects. STRAIGHT_JOIN makes it start from the project's items,
+    /// whose rows the delete already holds, and reach the edges through the index on their blocker: no other edge
+    /// and no item of another project is read, so none is locked.
+    /// </summary>
+    public static Task HoldBlockedByProjectAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
+        dbContext.Database.ProviderName == "MySql.EntityFrameworkCore"
+            ? dbContext.Database.ExecuteSqlAsync(
+                $"UPDATE `WorkItems` AS `i` STRAIGHT_JOIN `WorkItemDependencies` AS `d` ON `d`.`BlockerItemId` = `i`.`Id` SET `d`.`BlockerItemId` = `d`.`BlockerItemId` WHERE `i`.`ProjectId` = {projectId.ToString()}",
+                cancellationToken)
+            : HoldAsync(dbContext.WorkItemDependencies.Where(edge => edge.BlockerItem!.ProjectId == projectId), cancellationToken);
+
+    /// <summary>
+    /// One <c>dependency_removed</c> entry for each of <paramref name="edges"/> (held by <see cref="HoldAsync"/>)
+    /// whose blocked item is not deleted with its blocker: on that blocked item, in its own project.
+    /// </summary>
+    /// <param name="deletedProjectId">The project that is being deleted, whose items need no entry of this kind.</param>
+    public static async Task<List<WorkItemChange>> RemovedWithBlockersAsync(
+        IQueryable<WorkItemDependency> edges,
+        Guid? deletedProjectId,
+        ChangeActor? actor,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var removed = await edges
+            .AsNoTracking()
+            .Select(edge => new { edge.BlockedItemId, edge.BlockerItemId, edge.BlockedItem!.ProjectId })
+            .ToListAsync(cancellationToken);
+        return removed
+            .Where(edge => edge.ProjectId != deletedProjectId)
+            .OrderBy(edge => edge.BlockedItemId)
+            .ThenBy(edge => edge.BlockerItemId)
+            .Select(edge => WorkItemChangeLog.Entry(
+                edge.BlockedItemId,
+                edge.ProjectId,
+                WorkItemChangeKinds.DependencyRemoved,
+                actor,
+                now,
+                new Dictionary<string, object?> { ["blocked_by"] = edge.BlockerItemId },
+                null))
+            .ToList();
     }
 
     /// <summary>Keeps only items whose blockers are all Done (items without blockers included).</summary>

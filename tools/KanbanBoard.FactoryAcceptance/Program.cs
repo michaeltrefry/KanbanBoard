@@ -6,7 +6,7 @@
 //   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
 //                                  that the claim, dependency, link, comment, project and work item write tools
-//                                  refuse it with scope_denied
+//                                  refuse it with scope_denied, and that it can read the change feed
 //
 // The project checks create one scratch project of their own per run (key ACC plus 20 random hex characters) and leave it archived,
 // which keeps it out of list_projects; the script can be run again against the same database.
@@ -953,8 +953,182 @@ finally
     }
 }
 
+// Change feed: the cursor is taken first, then an item is claimed, moved, commented on, linked and given a
+// dependency, and the feed read from that cursor holds those changes in order, with their content.
+// Other callers may write at the same time, so only the entries of this run's own two items are looked at.
+string? feedItemId = null;
+string? feedBlockerId = null;
+try
+{
+    // 44. Without a cursor list_changes returns no entry and the place to start following from.
+    var feedHead = await CallAsync("list_changes", new());
+    var headCursor = feedHead.Code is null ? StringField(feedHead.Body, "next_cursor") : null;
+    Check("list_changes without a cursor returns no entries and a cursor",
+        headCursor is not null && feedHead.Body.TryGetProperty("items", out var headItems) && headItems.GetArrayLength() == 0,
+        feedHead);
+
+    var feedItem = await CallAsync("create_work_item", new() { ["projectId"] = projectId, ["title"] = $"Factory acceptance feed item {run}", ["type"] = "Task" });
+    var feedBlocker = await CallAsync("create_work_item", new() { ["projectId"] = projectId, ["title"] = $"Factory acceptance feed blocker {run}", ["type"] = "Task" });
+    if (headCursor is null || feedItem.Code is not null || feedBlocker.Code is not null)
+    {
+        var failed = feedItem.Code is not null ? feedItem : feedBlocker.Code is not null ? feedBlocker : feedHead;
+        Console.Error.WriteLine($"Could not prepare the change feed checks: {failed.Code}: {failed.Message}");
+        failures++;
+    }
+    else
+    {
+        feedItemId = StringField(feedItem.Body, "id");
+        feedBlockerId = StringField(feedBlocker.Body, "id");
+        var feedMarker = $"acceptance-{run}-feed";
+        var feedUrl = $"https://example.invalid/acceptance/{run}/pull/1";
+
+        // 45. The writes of the epic's first acceptance tests, in a known order.
+        var feedClaim = await CallAsync("claim_work_item", new() { ["id"] = feedItemId, ["marker"] = feedMarker, ["ttl_seconds"] = 60 });
+        var feedMove = await CallAsync("move_work_item", new() { ["itemId"] = feedItemId, ["status"] = "InProgress", ["expected_version"] = 1 });
+        var feedComment = await CallAsync("add_work_item_comment", new() { ["itemId"] = feedItemId, ["body"] = $"feed comment {run}" });
+        var feedLink = await CallAsync("add_work_item_link", new() { ["id"] = feedItemId, ["kind"] = "pr", ["url"] = feedUrl });
+        var feedDependency = await CallAsync("add_work_item_dependency", new() { ["id"] = feedItemId, ["blocked_by_id"] = feedBlockerId });
+        var feedWrites = new[] { feedClaim, feedMove, feedComment, feedLink, feedDependency };
+        Check("the claim, the move, the comment, the link and the dependency all succeed",
+            feedWrites.All(write => write.Code is null), feedWrites.FirstOrDefault(write => write.Code is not null) ?? feedClaim);
+        var factoryName = feedClaim.Code is null ? StringField(feedClaim.Body, "claimant") : null;
+        var factoryId = feedClaim.Code is null ? StringField(feedClaim.Body, "claimant_id") : null;
+
+        // 46. The feed from the cursor taken before them holds them, in order, with their content.
+        var (feed, feedEnd, feedFailure) = await ReadFeedAsync(headCursor, feedItemId!, feedBlockerId!);
+        Check("list_changes from the saved cursor reads to the end of the feed", feedFailure is null, feedFailure ?? feedHead);
+        Check("the feed holds the two creates, the claim, the move, the comment, the link and the dependency, in that order",
+            feed.Select(entry => $"{StringField(entry, "kind")}:{StringField(entry, "item_id")}").SequenceEqual(
+            [
+                $"item_created:{feedItemId}", $"item_created:{feedBlockerId}", $"claimed:{feedItemId}", $"item_moved:{feedItemId}",
+                $"comment_added:{feedItemId}", $"link_added:{feedItemId}", $"dependency_added:{feedItemId}"
+            ]),
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed)));
+        if (feed.Count == 7)
+        {
+            Check("every entry carries the acceptance project, a later sequence than the one before, a time, and the factory identity as actor",
+                feed.All(entry => StringField(entry, "project_id") == projectId && StringField(entry, "created_at_utc") is not null) &&
+                feed.Zip(feed.Skip(1)).All(pair => IntField(pair.First, "sequence") < IntField(pair.Second, "sequence")) &&
+                factoryId is not null &&
+                feed.All(entry => entry.TryGetProperty("actor", out var actor) && StringField(actor, "id") == factoryId && StringField(actor, "name") == factoryName),
+                new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed)));
+            Check("the claim entry has the marker, the claimant and the expiry as new values, with null as old",
+                ChangeOf(feed[2], "claim_marker") is { } markerChange && IsNullField(markerChange, "old") && StringField(markerChange, "new") == feedMarker &&
+                ChangeOf(feed[2], "claimant_id") is { } claimantChange && StringField(claimantChange, "new") == factoryId &&
+                ChangeOf(feed[2], "claim_expires_at_utc") is { } expiryChange && StringField(expiryChange, "new") is not null,
+                new ToolOutcome(null, null, feed[2]));
+            Check("the move entry has the old and the new status and version",
+                ChangeOf(feed[3], "status") is { } statusChange && StringField(statusChange, "old") == "Backlog" && StringField(statusChange, "new") == "InProgress" &&
+                ChangeOf(feed[3], "version") is { } versionChange && IntField(versionChange, "old") == 1 && IntField(versionChange, "new") == 2,
+                new ToolOutcome(null, null, feed[3]));
+            Check("the comment entry has the comment's id, author and body",
+                ChangeOf(feed[4], "comment") is { } commentChange && IsNullField(commentChange, "old") &&
+                commentChange.GetProperty("new") is var comment &&
+                StringField(comment, "id") == StringField(feedComment.Body, "comment_id") &&
+                StringField(comment, "author") == factoryName &&
+                StringField(comment, "body") == $"feed comment {run}",
+                new ToolOutcome(null, null, feed[4]));
+            Check("the link entry has the link's id, kind and url, and the dependency entry the blocking item",
+                ChangeOf(feed[5], "link") is { } linkChange &&
+                StringField(linkChange.GetProperty("new"), "id") == StringField(LinksOf(feedLink.Body).FirstOrDefault(), "id") &&
+                StringField(linkChange.GetProperty("new"), "kind") == "pr" &&
+                StringField(linkChange.GetProperty("new"), "url") == feedUrl &&
+                ChangeOf(feed[6], "blocked_by") is { } edgeChange && IsNullField(edgeChange, "old") && StringField(edgeChange, "new") == feedBlockerId,
+                new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Skip(5))));
+        }
+
+        // 47. Reading again from the same cursor returns the same entries.
+        var (again, _, againFailure) = await ReadFeedAsync(headCursor, feedItemId!, feedBlockerId!);
+        Check("reading the feed again from the same cursor returns the same entries",
+            againFailure is null && again.Select(entry => entry.GetRawText()).SequenceEqual(feed.Select(entry => entry.GetRawText())),
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(again)));
+
+        // 48. A refused write adds no entry.
+        var refusedClaim = await CallAsync("claim_work_item", new() { ["id"] = feedItemId, ["marker"] = $"{feedMarker}-other", ["ttl_seconds"] = 60 });
+        Check("a second claim with another marker is refused already_claimed", refusedClaim.Code == "already_claimed", refusedClaim);
+        var refusedUpdate = await CallAsync("update_work_item", new() { ["itemId"] = feedItemId, ["title"] = "never written", ["expected_version"] = 1 });
+        Check("an update with a stale expected_version is refused conflict", refusedUpdate.Code == "conflict", refusedUpdate);
+        var (afterRefusals, afterRefusalsEnd, afterRefusalsFailure) = await ReadFeedAsync(feedEnd!, feedItemId!, feedBlockerId!);
+        Check("the refused claim and the refused update added no entry",
+            afterRefusalsFailure is null && afterRefusals.Count == 0,
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(afterRefusals)));
+
+        // 49. A poller that found nothing can go on from the cursor it got back.
+        var released = await CallAsync("release_work_item_claim", new() { ["id"] = feedItemId, ["marker"] = feedMarker });
+        var (afterRelease, _, afterReleaseFailure) = await ReadFeedAsync(afterRefusalsEnd!, feedItemId!, feedBlockerId!);
+        Check("the cursor of an empty read finds the next change: the release, with the marker as old value",
+            released.Code is null && afterReleaseFailure is null && afterRelease.Count == 1 &&
+            StringField(afterRelease[0], "kind") == "claim_released" &&
+            ChangeOf(afterRelease[0], "claim_marker") is { } releasedMarker && StringField(releasedMarker, "old") == feedMarker && IsNullField(releasedMarker, "new"),
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(afterRelease)));
+
+        // 50. A malformed cursor, and the cursor of another list, are refused.
+        var badCursor = await CallAsync("list_changes", new() { ["cursor"] = "not-a-cursor" });
+        Check("list_changes with a malformed cursor is refused invalid_argument", badCursor.Code == "invalid_argument", badCursor);
+        var itemPage = await CallAsync("list_work_items", new() { ["projectId"] = projectId, ["limit"] = 1 });
+        if (itemPage.Code is null && StringField(itemPage.Body, "next_cursor") is { } itemCursor)
+        {
+            var foreignCursor = await CallAsync("list_changes", new() { ["cursor"] = itemCursor });
+            Check("list_changes with a cursor of list_work_items is refused invalid_argument", foreignCursor.Code == "invalid_argument", foreignCursor);
+        }
+
+        // 51. The feed is a read tool.
+        if (string.IsNullOrWhiteSpace(readToken))
+        {
+            Console.WriteLine("SKIP  list_changes with the read-scope token (KANBAN_FACTORY_READ_TOKEN is not set)");
+        }
+        else
+        {
+            using var readHttpClient = new HttpClient();
+            await using var readClient = await ConnectAsync(readHttpClient, readToken);
+            var readByReader = await CallAsync("list_changes", new() { ["cursor"] = headCursor, ["project_id"] = projectId, ["limit"] = 200 }, readClient);
+            Check("the read-scope token reads the feed",
+                readByReader.Code is null && readByReader.Body.TryGetProperty("items", out var readerItems) &&
+                readerItems.EnumerateArray().Any(entry => StringField(entry, "item_id") == feedItemId),
+                readByReader);
+        }
+    }
+}
+finally
+{
+    foreach (var id in new[] { feedItemId, feedBlockerId }.OfType<string>())
+    {
+        var deleted = await CallAsync("delete_work_item", new() { ["itemId"] = id });
+        if (deleted.Code is not null)
+        {
+            Console.Error.WriteLine($"Could not delete feed scratch item {id}: {deleted.Code}: {deleted.Message}");
+            failures++;
+        }
+    }
+}
+
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
+
+// Reads the feed of the acceptance project from a cursor to its end and keeps the entries of the given items.
+// Returns them with the cursor to go on from.
+async Task<(List<JsonElement> Entries, string? Cursor, ToolOutcome? Failure)> ReadFeedAsync(string cursor, params string[] itemIds)
+{
+    var entries = new List<JsonElement>();
+    for (var pages = 1; pages <= 1000; pages++)
+    {
+        var page = await CallAsync("list_changes", new() { ["cursor"] = cursor, ["project_id"] = projectId, ["limit"] = 200 });
+        if (page.Code is not null || page.Body.ValueKind != JsonValueKind.Object || !page.Body.TryGetProperty("items", out var items) ||
+            StringField(page.Body, "next_cursor") is not { } next)
+        {
+            return (entries, null, page.Code is null ? new ToolOutcome("error", $"not a page of the feed: {page.Body.GetRawText()}", default) : page);
+        }
+
+        entries.AddRange(items.EnumerateArray().Where(entry => itemIds.Contains(StringField(entry, "item_id"))));
+        cursor = next;
+        if (items.GetArrayLength() < 200)
+        {
+            return (entries, cursor, null);
+        }
+    }
+
+    return (entries, null, new ToolOutcome("error", "the feed did not end within 1000 pages", default));
+}
 
 // Follows next_cursor from the first page to the last; the last page is the one without a next_cursor.
 async Task<(List<string> Ids, int Pages, ToolOutcome? Failure)> WalkAsync(Dictionary<string, object?> arguments)
@@ -1095,6 +1269,12 @@ static JsonElement? ProjectIn(ToolOutcome projects, string? id) =>
     projects.Code is null && projects.Body.ValueKind == JsonValueKind.Array &&
     projects.Body.EnumerateArray().Where(project => StringField(project, "id") == id).Select(project => (JsonElement?)project).FirstOrDefault() is { } found
         ? found
+        : null;
+
+// The {field, old, new} of an entry of the change feed for one field, or null when the entry does not list it.
+static JsonElement? ChangeOf(JsonElement entry, string field) =>
+    entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("changes", out var changes) && changes.ValueKind == JsonValueKind.Array
+        ? changes.EnumerateArray().Where(change => StringField(change, "field") == field).Select(change => (JsonElement?)change).FirstOrDefault()
         : null;
 
 static bool IsNullField(JsonElement item, string name) =>

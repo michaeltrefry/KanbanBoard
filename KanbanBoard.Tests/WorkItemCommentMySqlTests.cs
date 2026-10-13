@@ -32,11 +32,11 @@ public sealed class WorkItemCommentMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: false, latest: null)) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", "run-1", Now, CancellationToken.None);
+        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", "run-1", null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemCommentOutcome.Succeeded, result.Outcome);
         Assert.NotNull(result.CommentId);
-        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var texts = WithoutChangeLogEntry(database.Commands.Select(command => Normalize(command.Text)).ToList());
         Assert.True(texts.Count == 4, string.Join("\n---\n", texts));
         // The UPDATE comes first: it is what makes two adds with one key run one after the other, and what keeps
         // two writers of one item from deadlocking on the shared lock the INSERT takes for its foreign key.
@@ -54,10 +54,10 @@ public sealed class WorkItemCommentMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: true, latest: null)) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var result = await WorkItemComments.AddAsync(dbContext, ItemId, null, "tester", "note", null, Now, CancellationToken.None);
+        var result = await WorkItemComments.AddAsync(dbContext, ItemId, null, "tester", "note", null, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemCommentOutcome.Succeeded, result.Outcome);
-        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var texts = WithoutChangeLogEntry(database.Commands.Select(command => Normalize(command.Text)).ToList());
         Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
         Assert.All(texts.Take(2), text => Assert.DoesNotContain("IdempotencyKeyHash", text, StringComparison.Ordinal));
     }
@@ -68,7 +68,7 @@ public sealed class WorkItemCommentMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: true, latest: null)) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "another body", "run-1", Now, CancellationToken.None);
+        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "another body", "run-1", null, Now, CancellationToken.None);
 
         Assert.Equal(new WorkItemCommentResult(WorkItemCommentOutcome.Unchanged, CommentId), result);
         Assert.Equal(2, database.Commands.Count);
@@ -81,10 +81,10 @@ public sealed class WorkItemCommentMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: false, latest: Now.UtcDateTime.AddSeconds(5))) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", null, Now, CancellationToken.None);
+        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", null, null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemCommentOutcome.Succeeded, result.Outcome);
-        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var texts = WithoutChangeLogEntry(database.Commands.Select(command => Normalize(command.Text)).ToList());
         Assert.True(texts.Count == 4, string.Join("\n---\n", texts));
         Assert.StartsWith(StampItem, texts[0], StringComparison.Ordinal);
         Assert.StartsWith(StampItem, texts[2], StringComparison.Ordinal);
@@ -97,7 +97,7 @@ public sealed class WorkItemCommentMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(keyUsed: false, latest: null));
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", "run-1", Now, CancellationToken.None);
+        var result = await WorkItemComments.AddAsync(dbContext, ItemId, UserId, "Factory", "note", "run-1", null, Now, CancellationToken.None);
 
         Assert.Equal(WorkItemCommentOutcome.NotFound, result.Outcome);
         Assert.StartsWith("UPDATE `WorkItems`", Assert.Single(database.Commands).Text, StringComparison.Ordinal);

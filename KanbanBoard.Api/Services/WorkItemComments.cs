@@ -34,6 +34,7 @@ public static class WorkItemComments
         string author,
         string body,
         string? idempotencyKey,
+        ChangeActor? actor,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -84,7 +85,18 @@ public static class WorkItemComments
         };
         dbContext.WorkItemComments.Add(added);
         await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(
+            dbContext,
+            transaction,
+            WorkItemChangeLog.Entry(
+                itemId,
+                await WorkItemChangeLog.ProjectIdAsync(dbContext, itemId, cancellationToken),
+                WorkItemChangeKinds.CommentAdded,
+                actor,
+                createdAtUtc,
+                null,
+                new Dictionary<string, object?> { ["comment"] = new { added.Id, added.Author, added.Body } }),
+            cancellationToken);
         return new(WorkItemCommentOutcome.Succeeded, added.Id);
     }
 

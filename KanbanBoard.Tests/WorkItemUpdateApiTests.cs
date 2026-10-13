@@ -108,7 +108,10 @@ public sealed class WorkItemUpdateApiTests
 
         // On MariaDB the UPDATE holds the item's row: the updates of one item then run one at a time.
         Assert.StartsWith("UPDATE \"WorkItems\"", api.Commands[0], StringComparison.Ordinal);
-        Assert.Equal(2, Writes(api).Count);
+        // The conditional UPDATE, the changed columns, and the entry of the change feed.
+        var writes = Writes(api);
+        Assert.Equal(3, writes.Count);
+        Assert.StartsWith("INSERT INTO \"WorkItemChanges\"", writes[2], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -135,7 +138,9 @@ public sealed class WorkItemUpdateApiTests
         // The siblings were renumbered, which is not a change of theirs: version and updatedAtUtc stay.
         Assert.Equal((1L, a.UpdatedAtUtc, 1L, b.UpdatedAtUtc), (afterMove[a.Id].Version, afterMove[a.Id].UpdatedAtUtc, afterMove[b.Id].Version, afterMove[b.Id].UpdatedAtUtc));
         await AssertErrorAsync(stale, HttpStatusCode.Conflict, KanbanErrorCodes.Conflict);
-        Assert.StartsWith("UPDATE \"WorkItems\"", Assert.Single(writes), StringComparison.Ordinal);
+        // The statement that holds the item, then the conditional UPDATE that matches nothing.
+        Assert.Equal(2, writes.Count);
+        Assert.All(writes, write => Assert.StartsWith("UPDATE \"WorkItems\"", write, StringComparison.Ordinal));
         Assert.Equal(afterMove.Values.OrderBy(item => item.Id), afterStale.Values.OrderBy(item => item.Id), Same);
         Assert.Equal((WorkItemStatus.Ready, 3L), (unconditional.Status, unconditional.Version));
     }
@@ -232,7 +237,8 @@ public sealed class WorkItemUpdateApiTests
         var a = await CreateAsync(client, project, new { title = "A", type = "Task", status = "Backlog", priority = "Medium" });
         var b = await CreateAsync(client, project, new { title = "B", type = "Task", status = "Backlog", priority = "Medium" });
 
-        // The item is written by an UPDATE of its own; the only save of a move is the one of its siblings.
+        // The item is written by an UPDATE of its own; apart from the entry of the change feed, the only save of
+        // a move is the one of its siblings.
         api.FailNextSave = true;
         using var response = await client.PostAsJsonAsync($"/api/items/{b.Id}/move", new { status = "Backlog", order = 0, expectedVersion = 1 });
         var failed = !api.FailNextSave;

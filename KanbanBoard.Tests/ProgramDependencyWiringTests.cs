@@ -93,9 +93,11 @@ public sealed class ProgramDependencyWiringTests
         // On MariaDB the other order deadlocks two writers of one item: each INSERT holds a shared lock on the
         // item's row (its foreign key) while the UPDATE of the other waits for it.
         var writes = api.Commands.Where(text => text.StartsWith("UPDATE", StringComparison.Ordinal) || text.StartsWith("INSERT", StringComparison.Ordinal)).ToList();
-        Assert.Equal(2, writes.Count);
+        Assert.Equal(3, writes.Count);
         Assert.StartsWith("UPDATE \"WorkItems\"", writes[0], StringComparison.Ordinal);
         Assert.StartsWith("INSERT INTO \"WorkItemComments\"", writes[1], StringComparison.Ordinal);
+        // The entry of the change feed comes last, in the same transaction.
+        Assert.StartsWith("INSERT INTO \"WorkItemChanges\"", writes[2], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -176,9 +178,13 @@ public sealed class ProgramDependencyWiringTests
     }
 
     // Any type of the API assembly names it; the test project also references the MCP server, which has its own Program.
-    internal sealed class ApiApplication : WebApplicationFactory<KanbanDbContext>
+    /// <param name="restartOf">An application that was disposed with <see cref="KeepDatabase"/>: this one starts on its database.</param>
+    internal sealed class ApiApplication(ApiApplication? restartOf = null) : WebApplicationFactory<KanbanDbContext>
     {
-        private readonly string databasePath = Path.Combine(Path.GetTempPath(), $"kanban-program-{Guid.NewGuid():N}.db");
+        private readonly string databasePath = restartOf?.databasePath ?? Path.Combine(Path.GetTempPath(), $"kanban-program-{Guid.NewGuid():N}.db");
+
+        /// <summary>Leaves the database in place when the application is disposed, for another to start on it.</summary>
+        public bool KeepDatabase { get; set; }
         private readonly CommandRecorder recorder = new();
         private readonly TransactionHook transactionHook = new();
         private readonly SaveFailure saveFailure = new();
@@ -192,20 +198,36 @@ public sealed class ProgramDependencyWiringTests
             set => transactionHook.BeforeNext = value;
         }
 
-        /// <summary>Makes the application's next SaveChanges throw, once. False again once it has thrown.</summary>
+        /// <summary>
+        /// Makes the application's next SaveChanges throw, once. False again once it has thrown. A save that only
+        /// records entries of the change feed is let through.
+        /// </summary>
         public bool FailNextSave
         {
             get => saveFailure.Armed;
             set => saveFailure.Armed = value;
         }
 
+        /// <summary>Makes the application's next save of an entry of the change feed throw, once.</summary>
+        public bool FailNextChangeLogSave
+        {
+            get => saveFailure.ChangeLogArmed;
+            set => saveFailure.ChangeLogArmed = value;
+        }
+
+        /// <summary>A context on the application's database, for a test to look at what is stored.</summary>
+        public KanbanDbContext OpenDatabase() =>
+            new(new DbContextOptionsBuilder<KanbanDbContext>().UseSqlite($"Data Source={databasePath};Pooling=False").Options);
+
         /// <summary>The secret that makes a request one of the MCP server's.</summary>
         public static string InternalSecret { get; } = new('s', 32);
 
         /// <summary>Stores a user with a full-scope token and returns a client that calls as the MCP server does for that token.</summary>
-        public HttpClient CreateCallerClient()
+        public HttpClient CreateCallerClient(string name = "Caller")
         {
-            var user = new AppUser { Issuer = "issuer", Subject = "caller", DisplayName = "Caller" };
+            // The application creates the database when it starts.
+            _ = Server;
+            var user = new AppUser { Issuer = "issuer", Subject = name.ToLowerInvariant(), DisplayName = name };
             var token = new PersonalAccessToken { AppUserId = user.Id, Name = "token", TokenPrefix = "kbp", TokenHash = Guid.NewGuid().ToString("N"), EncryptedSecret = "unused" };
             using (var dbContext = new KanbanDbContext(new DbContextOptionsBuilder<KanbanDbContext>().UseSqlite($"Data Source={databasePath};Pooling=False").Options))
             {
@@ -257,7 +279,10 @@ public sealed class ProgramDependencyWiringTests
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
-            File.Delete(databasePath);
+            if (!KeepDatabase)
+            {
+                File.Delete(databasePath);
+            }
         }
     }
 
@@ -265,15 +290,21 @@ public sealed class ProgramDependencyWiringTests
     {
         public bool Armed { get; set; }
 
+        public bool ChangeLogArmed { get; set; }
+
         public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
-            if (!Armed)
+            var changeLogOnly = eventData.Context!.ChangeTracker.Entries()
+                .Where(entry => entry.State != EntityState.Unchanged)
+                .All(entry => entry.Entity is WorkItemChange);
+            if (changeLogOnly ? !ChangeLogArmed : !Armed)
             {
                 return ValueTask.FromResult(result);
             }
 
-            Armed = false;
+            Armed = Armed && changeLogOnly;
+            ChangeLogArmed = ChangeLogArmed && !changeLogOnly;
             throw new DbUpdateException("The save was made to fail by the test.");
         }
     }

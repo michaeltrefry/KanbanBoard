@@ -62,6 +62,7 @@ public sealed class KanbanToolsScopeTests
         Assert.Contains(nameof(KanbanTools.GetEpic), readTools);
         Assert.Contains(nameof(KanbanTools.GetWorkItem), readTools);
         Assert.Contains(nameof(KanbanTools.SearchWorkItems), readTools);
+        Assert.Contains(nameof(KanbanTools.ListChanges), readTools);
     }
 
     [Theory]
@@ -231,7 +232,8 @@ public sealed class KanbanToolsScopeTests
     }
 
     // Answers every call with a JSON null body, which the tools treat as "nothing found",
-    // except a single work item GET, which gets an empty object because GetWorkItem treats null as an error.
+    // except a single work item GET, which gets an empty object because GetWorkItem treats null as an error,
+    // and the change feed, for the same reason.
     private sealed class FakeApi : HttpMessageHandler
     {
         public List<HttpRequestMessage> Requests { get; } = [];
@@ -242,6 +244,7 @@ public sealed class KanbanToolsScopeTests
             var path = request.RequestUri!.AbsolutePath;
             var body = request.Method != HttpMethod.Get ? "null"
                 : path == "/api/projects" ? "[]"
+                : path == "/api/items/changes" ? """{"items":[],"next_cursor":"aC4w"}"""
                 : path.StartsWith("/api/items/", StringComparison.Ordinal) && Guid.TryParse(path["/api/items/".Length..], out _) ? "{}"
                 : "null";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

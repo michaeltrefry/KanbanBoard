@@ -152,6 +152,8 @@ For the project target change (sc-25864) the API alters `Projects` on its first 
 
 For the work item update change (sc-25865) the API alters `WorkItems` on its first start (`20261013004410_AddWorkItemVersionAndLongerLabels`): `Labels` widens from 240 to 4000 characters and `Version` (`bigint NOT NULL DEFAULT 1`) is added. Existing items keep their labels and get version 1. `deploy/sql/008_work_item_version_and_longer_labels.sql` is the manual equivalent.
 
+For the change feed (sc-25866) the API creates the `WorkItemChanges` table on its first start (`20261013013744_AddWorkItemChanges`). Existing data is not touched and gets no rows: the feed holds the writes made from then on, and it is never pruned. `deploy/sql/009_work_item_changes.sql` is the manual equivalent. From this release every write to a work item also takes the MariaDB named lock `kanban_work_item_changes` for the moment it records its entry (see [mariadb-schema.md](mariadb-schema.md)).
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:
@@ -178,7 +180,7 @@ Store both now. They are not shown again.
 Give the orchestrator the full-scope token (and the read-scope token where it only reads) as `Authorization: Bearer <token>` on `https://kanban-mcp.trefry.net/mcp`. Items it claims show `factory` as `claimant`. The command exits without serving HTTP; the output of an `exec` is not written to the container log.
 
 - Running it again with the same name (case-insensitive) adds a new token pair to the same identity and leaves the old tokens valid.
-- Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so a revoked token can still be accepted for that long.
+- Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so the MCP server can still accept a revoked token for that long; the API does not: it looks the forwarded token up on every call and refuses a revoked or expired one `scope_denied`, read or write.
 - `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
 
 Open inbound ports:

@@ -27,13 +27,18 @@ public sealed class WorkItemDependencyMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(lockResult: 1));
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemDependencies.RemoveAsync(dbContext, Blocked, Blocker, CancellationToken.None);
+        var outcome = await WorkItemDependencies.RemoveAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.Equal(WorkItemDependencyOutcome.Succeeded, outcome);
         var delete = Assert.Single(database.Commands, command => command.Text.Contains("DELETE", StringComparison.Ordinal)).Text;
         // MariaDB has no DELETE FROM `t` AS `alias`, which is what ExecuteDelete produces.
         Assert.DoesNotContain("DELETE FROM `WorkItemDependencies` AS", delete, StringComparison.Ordinal);
         Assert.StartsWith("DELETE FROM `WorkItemDependencies`\nWHERE `BlockedItemId` = @", delete.ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        // The blocked item's row is held before anything is read, so two removes of one edge run one after the other.
+        Assert.Equal(
+            "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId",
+            database.Commands[0].Text.ReplaceLineEndings("\n").TrimEnd());
+        WithoutChangeLogEntry(database.Commands.Select(command => command.Text).ToList());
     }
 
     [Fact]
@@ -43,7 +48,7 @@ public sealed class WorkItemDependencyMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(lockResult: 1, rowsAffected: 0));
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemDependencies.RemoveAsync(dbContext, Blocked, Blocker, CancellationToken.None);
+        var outcome = await WorkItemDependencies.RemoveAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.Equal(WorkItemDependencyOutcome.Succeeded, outcome);
         Assert.Contains(database.Commands, command => command.Text.Contains("DELETE FROM `WorkItemDependencies`", StringComparison.Ordinal));
@@ -56,16 +61,28 @@ public sealed class WorkItemDependencyMySqlTests
         var database = new FakeDatabase(lockResult: 1, Answer(lockResult: 1));
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var outcome = await WorkItemDependencies.AddAsync(dbContext, Blocked, Blocker, CancellationToken.None);
+        var outcome = await WorkItemDependencies.AddAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.Equal(WorkItemDependencyOutcome.Succeeded, outcome);
-        var texts = database.Commands.Select(command => command.Text).ToList();
+        var all = database.Commands.Select(command => command.Text).ToList();
+        // The entry of the change feed is recorded inside the dependency lock, under the lock of its own.
+        var texts = WithoutChangeLogEntry(all.SkipLast(1).ToList());
         var getLock = Assert.Single(Indexes(texts, "GET_LOCK("));
         var insert = Assert.Single(Indexes(texts, "INSERT INTO `WorkItemDependencies`"));
-        var releaseLock = Assert.Single(Indexes(texts, "RELEASE_LOCK("));
         Assert.Equal(0, getLock);
-        Assert.True(getLock < insert && insert < releaseLock, string.Join("\n---\n", texts));
-        Assert.Equal(texts.Count - 1, releaseLock);
+        Assert.True(getLock < insert, string.Join("\n---\n", all));
+        // Both items are held, in one statement, before anything is read and before the INSERT locks them for its
+        // foreign keys: a move renumbering the two items at the same time then waits instead of deadlocking.
+        Assert.Equal(
+            "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE (`w`.`Id` = @blockedItemId) OR (`w`.`Id` = @blockerItemId)",
+            texts[1].ReplaceLineEndings("\n").TrimEnd());
+        Assert.Equal(
+            [
+                $"GET {WorkItemDependencies.LockName}", $"GET {WorkItemChangeLog.LockName}",
+                $"RELEASE {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemDependencies.LockName}"
+            ],
+            LocksAroundTheCommit(database));
+        Assert.Contains("RELEASE_LOCK(", all[^1], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -98,7 +115,7 @@ public sealed class WorkItemDependencyMySqlTests
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            WorkItemDependencies.AddAsync(dbContext, Blocked, Blocker, CancellationToken.None));
+            WorkItemDependencies.AddAsync(dbContext, Blocked, Blocker, null, DateTimeOffset.UtcNow, CancellationToken.None));
 
         Assert.Contains("RELEASE_LOCK(", database.Commands[^1].Text, StringComparison.Ordinal);
     }
@@ -125,7 +142,7 @@ public sealed class WorkItemDependencyMySqlTests
             return Table(("c", 2));
         }
 
-        if (text.Contains("ROW_COUNT()", StringComparison.Ordinal))
+        if (text.Contains("ROW_COUNT()", StringComparison.Ordinal) && !text.Contains("`WorkItemChanges`", StringComparison.Ordinal))
         {
             return Table(("ROW_COUNT()", rowsAffected));
         }
@@ -167,6 +184,7 @@ public sealed class WorkItemDependencyMySqlTests
                 {
                     services.AddRouting();
                     services.AddScoped(_ => CreatePipelineContext(new DatabaseOptions(), database));
+                    services.AddSingleton(TimeProvider.System);
                     services.AddSingleton<BoardChangeNotifier>();
                 });
                 webBuilder.Configure(app =>

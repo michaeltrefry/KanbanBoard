@@ -20,10 +20,12 @@ namespace KanbanBoard.Tests;
 // never see. The provider runs for real; FakeDatabase records each command and answers it.
 public sealed class WorkItemUpdateMySqlTests
 {
-    private static readonly Guid ItemId = Guid.Parse("11111111-1111-1111-1111-111111111111");
+    internal static readonly Guid ItemId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid EpicId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+    private static readonly Guid ProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
     // The version is only ever written by the database, as the stored value plus one.
     private const string Advance = @"^UPDATE `WorkItems` AS `w`\nSET `Version` = `w`\.`Version` \+ 1,\n    ";
+    private const string HoldItem = "UPDATE `WorkItems` AS `w`\nSET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId";
     private static readonly DateTime Created = new(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc);
 
     [Fact]
@@ -44,6 +46,10 @@ public sealed class WorkItemUpdateMySqlTests
         // Only the columns the update changed are written, and the version is not among them.
         Assert.Matches(@"^UPDATE `WorkItems` SET `Labels` = @\w+, `Title` = @\w+\nWHERE `Id` = @\w+;", texts[2]);
         Assert.DoesNotContain(texts.Skip(1), text => text.StartsWith("UPDATE", StringComparison.Ordinal) && text.Contains("`Version`", StringComparison.Ordinal));
+        // The entry of the change feed is the last thing the transaction writes. The item was read with its
+        // project, so the project is not read again.
+        var entry = texts.FindIndex(text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.Equal(3, WithoutChangeLogEntry(texts.Take(entry + 2).ToList(), readsProject: false).Count);
     }
 
     [Fact]
@@ -80,13 +86,18 @@ public sealed class WorkItemUpdateMySqlTests
         }
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
-        Assert.True(texts.Count == 4, string.Join("\n---\n", texts));
-        Assert.All(new[] { texts[1], texts[3] }, text => Assert.Equal("SELECT `w`.`Version`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", text));
-        Assert.All(new[] { texts[0], texts[2] }, text => Assert.EndsWith("WHERE (`w`.`Id` = @itemId) AND (`w`.`Version` = @expected)", text, StringComparison.Ordinal));
+        Assert.True(texts.Count == 6, string.Join("\n---\n", texts));
+        // The move first holds the item and reads it (see the next test); neither changes anything.
+        Assert.Equal(HoldItem, texts[2]);
+        Assert.StartsWith("SELECT ", texts[3], StringComparison.Ordinal);
+        Assert.All(new[] { texts[1], texts[5] }, text => Assert.Equal("SELECT `w`.`Version`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", text));
+        Assert.All(new[] { texts[0], texts[4] }, text => Assert.EndsWith("WHERE (`w`.`Id` = @itemId) AND (`w`.`Version` = @expected)", text, StringComparison.Ordinal));
+        // A refused write records nothing.
+        Assert.DoesNotContain(texts, text => text.Contains("WorkItemChanges", StringComparison.Ordinal) || text.Contains("GET_LOCK(", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task A_move_writes_the_item_in_one_conditional_update_and_never_writes_a_siblings_version_or_stamp()
+    public async Task A_move_holds_the_item_reads_it_writes_it_in_one_conditional_update_and_never_writes_a_siblings_version_or_stamp()
     {
         var database = new FakeDatabase(lockResult: 1, Answer) { NonQueryResult = 1 };
         using var host = await StartApiAsync(database);
@@ -95,26 +106,47 @@ public sealed class WorkItemUpdateMySqlTests
 
         Assert.True(response.StatusCode == HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        // The conditional UPDATE overwrites the column and the position, so the item is held and read before it:
+        // the entry of the change feed then reports the values the move replaced.
+        Assert.Equal(HoldItem, texts[0]);
+        Assert.StartsWith("SELECT ", texts[1], StringComparison.Ordinal);
         Assert.Matches(
             Advance + @"`Status` = @\w+,\n    `Order` = @\w+,\n    `UpdatedAtUtc` = @\w+\nWHERE \(`w`\.`Id` = @itemId\) AND \(`w`\.`Version` = @expected\)$",
-            texts[0]);
+            texts[2]);
+        // The entry is recorded in the move's transaction, before the siblings are touched.
+        var entry = texts.FindIndex(text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.Equal(4, WithoutChangeLogEntry(texts.Take(entry + 2).ToList(), readsProject: false).Count);
         // The sibling the fake answers with is renumbered: its order, and nothing else of it.
-        var siblings = texts.Skip(1).Where(text => text.StartsWith("UPDATE", StringComparison.Ordinal)).ToList();
+        var siblings = texts.Skip(entry + 2).Where(text => text.StartsWith("UPDATE", StringComparison.Ordinal)).ToList();
+        Assert.DoesNotContain(texts.Skip(entry + 2), text => text.Contains("WorkItemChanges", StringComparison.Ordinal));
         Assert.Matches(@"^UPDATE `WorkItems` SET `Order` = @\w+\nWHERE `Id` = @\w+;", Assert.Single(siblings));
     }
 
     [Fact]
-    public async Task Taking_items_out_of_an_epic_is_one_update_that_advances_their_versions()
+    public async Task Taking_items_out_of_an_epic_holds_them_reads_their_versions_and_then_advances_them_in_one_update()
     {
-        var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 2 };
+        var held = new DataTable();
+        held.Columns.Add("Id", typeof(string));
+        held.Columns.Add("ProjectId", typeof(string));
+        held.Columns.Add("Version", typeof(long));
+        held.Rows.Add(ItemId.ToString(), ProjectId.ToString(), 4L);
+        var database = new FakeDatabase(lockResult: 1, command => command.CommandText.StartsWith("SELECT", StringComparison.Ordinal) ? held : null) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, EpicId, unfinishedOnly: true, DateTimeOffset.UtcNow, CancellationToken.None);
+        var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, EpicId, unfinishedOnly: true, null, DateTimeOffset.UtcNow, CancellationToken.None);
 
-        Assert.Equal(2, detached);
+        var entry = Assert.Single(detached);
+        Assert.Equal((ItemId, ProjectId, WorkItemChangeKinds.ItemUpdated), (entry.WorkItemId, entry.ProjectId, entry.Kind));
+        Assert.Equal($$"""[{"field":"epic_id","old":"{{EpicId}}","new":null},{"field":"version","old":4,"new":5}]""", entry.Changes);
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
+        const string where = @"WHERE \(`w`\.`EpicId` = @epicId\) AND `w`\.`Status` NOT IN \(4, 5\)$";
+        // The statement that holds the rows comes first: the versions read next are then the ones the update replaces.
+        Assert.Matches(@"^UPDATE `WorkItems` AS `w`\nSET `Version` = `w`\.`Version`\n" + where, texts[0]);
+        Assert.Matches(@"^SELECT `w`\.`Id`, `w`\.`ProjectId`, `w`\.`Version`\nFROM `WorkItems` AS `w`\n" + where, texts[1]);
         Assert.Matches(
-            @"^UPDATE `WorkItems` AS `w`\nSET `EpicId` = NULL,\n    `UpdatedAtUtc` = @\w+,\n    `Version` = `w`\.`Version` \+ 1\nWHERE \(`w`\.`EpicId` = @epicId\) AND `w`\.`Status` NOT IN \(4, 5\)$",
-            Normalize(Assert.Single(database.Commands).Text));
+            @"^UPDATE `WorkItems` AS `w`\nSET `EpicId` = NULL,\n    `UpdatedAtUtc` = @\w+,\n    `Version` = `w`\.`Version` \+ 1\n" + where,
+            texts[2]);
     }
 
     [Fact]
@@ -152,7 +184,7 @@ public sealed class WorkItemUpdateMySqlTests
     private static string Normalize(string sql) => sql.ReplaceLineEndings("\n").TrimEnd();
 
     // The item at version 7 in Backlog without an epic, and one sibling in every column; nothing else has rows.
-    private static DataTable? Answer(DbCommand command)
+    internal static DataTable? Answer(DbCommand command)
     {
         var text = Normalize(command.CommandText);
         if (text.Contains("ROW_COUNT()", StringComparison.Ordinal))

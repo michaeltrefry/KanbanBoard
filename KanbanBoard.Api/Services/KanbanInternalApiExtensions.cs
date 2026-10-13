@@ -37,10 +37,11 @@ public static class KanbanInternalApiExtensions
 
                 context.User = new ClaimsPrincipal(new ClaimsIdentity(claims, KanbanInternalAuth.AuthenticationType));
 
-                if (IsWriteMethod(context.Request.Method) &&
-                    context.Request.Headers.ContainsKey(KanbanInternalAuth.PersonalAccessTokenIdHeaderName))
+                if (context.Request.Headers.ContainsKey(KanbanInternalAuth.PersonalAccessTokenIdHeaderName))
                 {
-                    // A forwarded PAT id must resolve to a stored token; an unknown or malformed id fails closed.
+                    // A forwarded PAT id must resolve to a stored token that is neither revoked nor expired; an
+                    // unknown or malformed id fails closed. The MCP server validated the token up to its cache
+                    // window ago, so this is where a token that was revoked since stops reading and writing.
                     var scope = Guid.TryParse(tokenId, out var personalAccessTokenId)
                         ? await context.RequestServices.GetRequiredService<IPersonalAccessTokenService>()
                             .GetScopeAsync(personalAccessTokenId, context.RequestAborted)
@@ -52,7 +53,7 @@ public static class KanbanInternalApiExtensions
                         return;
                     }
 
-                    if (!PersonalAccessTokenScopes.AllowsWrites(scope))
+                    if (IsWriteMethod(context.Request.Method) && !PersonalAccessTokenScopes.AllowsWrites(scope))
                     {
                         context.Response.StatusCode = StatusCodes.Status403Forbidden;
                         await context.Response.WriteAsJsonAsync(new KanbanErrorDto(KanbanErrorCodes.ScopeDenied, ReadOnlyScopeMessage));
@@ -109,7 +110,7 @@ public static class KanbanInternalApiExtensions
     }
 
     public const string UnknownTokenMessage =
-        "The forwarded personal access token does not exist and cannot be used to change data.";
+        "The forwarded personal access token does not exist, was revoked or has expired, and cannot be used.";
 
     public const string ReadOnlyScopeMessage =
         "This personal access token has the 'read' scope and cannot create, update, or delete data.";

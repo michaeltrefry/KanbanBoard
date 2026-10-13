@@ -27,7 +27,7 @@ public interface IPersonalAccessTokenService
         Guid tokenId,
         CancellationToken cancellationToken);
 
-    /// <summary>Returns the stored scope of a token, or null when no such token exists.</summary>
+    /// <summary>Returns the stored scope of a token, or null when no such token exists or it is revoked or expired.</summary>
     Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken);
 
     /// <summary>Throws <see cref="InvalidOperationException"/> when personal access tokens are disabled.</summary>
@@ -156,11 +156,15 @@ public sealed class PersonalAccessTokenService(
 
     public async Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken)
     {
-        return await dbContext.PersonalAccessTokens
+        // The caller validated the token up to its cache window ago; it may have been revoked or have expired since.
+        var token = await dbContext.PersonalAccessTokens
             .AsNoTracking()
             .Where(candidate => candidate.Id == tokenId)
-            .Select(candidate => candidate.Scope)
+            .Select(candidate => new { candidate.Scope, candidate.RevokedAtUtc, candidate.ExpiresAtUtc })
             .FirstOrDefaultAsync(cancellationToken);
+        return token is null || token.RevokedAtUtc is not null || token.ExpiresAtUtc <= DateTimeOffset.UtcNow
+            ? null
+            : token.Scope;
     }
 
     public void EnsureEnabled()

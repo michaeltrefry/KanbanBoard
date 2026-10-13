@@ -111,6 +111,25 @@ public sealed class WorkItemComment
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
 
+// One change to a work item, appended in the transaction of the write it describes. Written only by
+// WorkItemChangeLog and never updated or deleted: it has no foreign key, so it outlives its item and its project.
+public sealed class WorkItemChange
+{
+    // The position in the feed. The database assigns it while the writer holds the change log lock, so the entries
+    // are committed in the order of their sequences (WorkItemChangeLog.CommitAsync).
+    public long Sequence { get; set; }
+    public Guid WorkItemId { get; set; }
+    public Guid ProjectId { get; set; }
+    // One of WorkItemChangeKinds.
+    public string Kind { get; set; } = string.Empty;
+    // Who made the change: the user behind the token or the browser session. Both null when the request had neither.
+    public Guid? ActorUserId { get; set; }
+    public string? ActorName { get; set; }
+    // A JSON array of {"field", "old", "new"}.
+    public string Changes { get; set; } = "[]";
+    public DateTimeOffset CreatedAtUtc { get; set; }
+}
+
 public sealed class AppUser
 {
     public Guid Id { get; set; } = Guid.NewGuid();

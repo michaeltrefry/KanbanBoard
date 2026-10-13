@@ -30,6 +30,30 @@ public static class KanbanErrorCodes
 
 public sealed record KanbanErrorDto(string Code, string Message);
 
+/// <summary>The kinds of entry in the change feed. Kinds are a contract: add new ones, never rename.</summary>
+public static class WorkItemChangeKinds
+{
+    public const string ItemCreated = "item_created";
+    /// <summary>A field update, and an item taken out of its epic because the epic was archived or deleted.</summary>
+    public const string ItemUpdated = "item_updated";
+    public const string ItemMoved = "item_moved";
+    public const string ItemDeleted = "item_deleted";
+    public const string Claimed = "claimed";
+    public const string ClaimRenewed = "claim_renewed";
+    public const string ClaimReleased = "claim_released";
+    public const string CommentAdded = "comment_added";
+    public const string LinkAdded = "link_added";
+    public const string LinkRemoved = "link_removed";
+    public const string DependencyAdded = "dependency_added";
+    public const string DependencyRemoved = "dependency_removed";
+
+    public static readonly IReadOnlyList<string> All =
+    [
+        ItemCreated, ItemUpdated, ItemMoved, ItemDeleted, Claimed, ClaimRenewed, ClaimReleased,
+        CommentAdded, LinkAdded, LinkRemoved, DependencyAdded, DependencyRemoved
+    ];
+}
+
 public static class WorkItemLinkKinds
 {
     public const string PullRequest = "pr";
