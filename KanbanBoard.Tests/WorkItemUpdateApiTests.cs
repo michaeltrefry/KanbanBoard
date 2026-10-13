@@ -572,6 +572,35 @@ public sealed class WorkItemUpdateApiTests
         Assert.True(afterDelete.UpdatedAtUtc > intoActive.UpdatedAtUtc);
     }
 
+    // On MariaDB a write that puts an item into the epic reads the epic's row and then adds to the index on the epic;
+    // an archive or a delete that took the items first and the epic's row last deadlocked with it.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Archiving_and_deleting_an_epic_hold_the_project_then_the_epic_before_they_take_its_items_out(bool delete)
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "LOCK");
+        var item = await CreateAsync(client, project, new { title = "Open", type = "Task", status = "Backlog", priority = "Medium", epicId = epic });
+        var entriesBefore = Entries(api).Count;
+        api.Commands.Clear();
+
+        using var response = delete
+            ? await client.DeleteAsync($"/api/epics/{epic}")
+            : await client.PutAsJsonAsync($"/api/epics/{epic}", new { name = "Epic", isArchived = true });
+        var writes = Writes(api);
+        var after = (await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{item.Id}", Json))!;
+
+        Assert.True(response.IsSuccessStatusCode);
+        Assert.StartsWith("UPDATE \"Projects\"", writes[0], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"Epics\"", writes[1], StringComparison.Ordinal);
+        Assert.StartsWith("UPDATE \"WorkItems\"", writes[2], StringComparison.Ordinal);
+        // What the write does is as it was: the item is out of the epic, one version on, with one entry in the feed.
+        Assert.Equal((null, 2L), (after.EpicId, after.Version));
+        Assert.Equal([WorkItemChangeKinds.ItemUpdated], Entries(api).Skip(entriesBefore));
+    }
+
     [Fact]
     public async Task A_new_status_puts_the_item_at_the_end_of_that_column_and_the_same_status_leaves_its_place()
     {

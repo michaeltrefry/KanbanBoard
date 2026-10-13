@@ -53,6 +53,17 @@ public static class Epics
     }
 
     /// <summary>
+    /// Holds the epic's row until the transaction ends and changes nothing; returns 0 when there is no such epic.
+    /// The archive and the delete of an epic take it after the project's row and before the rows of the epic's
+    /// items: a write that puts an item into the epic reads this row (its foreign key) before it adds the item to
+    /// the index on the epic, so it either comes first and is done, or waits here holding nothing the archive needs.
+    /// </summary>
+    public static Task<int> LockAsync(KanbanDbContext dbContext, Guid epicId, CancellationToken cancellationToken) =>
+        dbContext.Epics
+            .Where(epic => epic.Id == epicId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(epic => epic.IsArchived, epic => epic.IsArchived), cancellationToken);
+
+    /// <summary>
     /// Stores a new epic. With an <paramref name="idempotencyKeyHash"/> that already belongs to an epic of the
     /// project, nothing is written and that epic is reported, whatever its fields.
     /// </summary>

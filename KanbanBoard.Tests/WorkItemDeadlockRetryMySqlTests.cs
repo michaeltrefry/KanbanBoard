@@ -77,8 +77,9 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         // The first attempt and two more.
         Assert.Equal(3, texts.Count(text => text.Contains(HoldItems, StringComparison.Ordinal)));
         Assert.True(entries > 0);
+        // The statement that holds the epic's row (UPDATE `Epics` AS `e`, which changes nothing) is not the save of the epic.
         Assert.DoesNotContain(texts, text =>
-            text.Contains("INSERT INTO", StringComparison.Ordinal) || text.Contains("DELETE FROM", StringComparison.Ordinal) || text.Contains("UPDATE `Epics`", StringComparison.Ordinal));
+            text.Contains("INSERT INTO", StringComparison.Ordinal) || text.Contains("DELETE FROM", StringComparison.Ordinal) || text.Contains("UPDATE `Epics` SET", StringComparison.Ordinal));
         Assert.DoesNotContain("COMMIT", database.Locks);
     }
 

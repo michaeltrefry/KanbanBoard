@@ -380,7 +380,11 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
         List<WorkItemChange> detached = [];
         if (request.IsArchived && !epic.IsArchived)
         {
-            // Archiving takes the unfinished items out of the epic, which is a change to each of them.
+            // Archiving takes the unfinished items out of the epic, which is a change to each of them. The project's
+            // row first, like every write that takes several items, then the epic's, then the items (see
+            // Epics.LockAsync): taking the items first deadlocked with the writes that put an item into the epic.
+            await WorkItemWrites.HoldColumnsAsync(dbContext, epic.ProjectId, cancellationToken);
+            await Epics.LockAsync(dbContext, epicId, cancellationToken);
             detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: true, actor, timeProvider.GetUtcNow(), cancellationToken);
         }
 
@@ -426,6 +430,9 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
     await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        // The project's row, the epic's, then the items, as when the epic is archived.
+        await WorkItemWrites.HoldColumnsAsync(dbContext, epic.ProjectId, cancellationToken);
+        await Epics.LockAsync(dbContext, epicId, cancellationToken);
         var detached = await WorkItemWrites.DetachFromEpicAsync(dbContext, epicId, unfinishedOnly: false, actor, timeProvider.GetUtcNow(), cancellationToken);
         dbContext.Epics.Remove(epic);
         await dbContext.SaveChangesAsync(cancellationToken);
