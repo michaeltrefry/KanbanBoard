@@ -18,9 +18,10 @@ public sealed class KanbanToolsScopeTests
 {
     // Every MCP tool that creates, updates, moves, comments on, or deletes data.
     // Any tool not listed here is treated as a read tool and must work with a 'read' token using GETs only.
-    private static readonly string[] WriteTools =
+    internal static readonly string[] WriteTools =
     [
         nameof(KanbanTools.CreateProject),
+        nameof(KanbanTools.UpdateProject),
         nameof(KanbanTools.DeleteProject),
         nameof(KanbanTools.CreateEpic),
         nameof(KanbanTools.UpdateEpic),
@@ -31,9 +32,17 @@ public sealed class KanbanToolsScopeTests
         nameof(KanbanTools.AddIssueComment),
         nameof(KanbanTools.CreateWorkItem),
         nameof(KanbanTools.CreateEpicWorkItem),
+        nameof(KanbanTools.ImportEpicPlan),
         nameof(KanbanTools.MoveWorkItem),
         nameof(KanbanTools.UpdateWorkItem),
-        nameof(KanbanTools.DeleteWorkItem)
+        nameof(KanbanTools.DeleteWorkItem),
+        nameof(KanbanTools.ClaimWorkItem),
+        nameof(KanbanTools.RenewWorkItemClaim),
+        nameof(KanbanTools.ReleaseWorkItemClaim),
+        nameof(KanbanTools.AddWorkItemDependency),
+        nameof(KanbanTools.RemoveWorkItemDependency),
+        nameof(KanbanTools.AddWorkItemLink),
+        nameof(KanbanTools.RemoveWorkItemLink)
     ];
 
     public static TheoryData<string> WriteToolNames => new(WriteTools);
@@ -54,6 +63,7 @@ public sealed class KanbanToolsScopeTests
         Assert.Contains(nameof(KanbanTools.GetEpic), readTools);
         Assert.Contains(nameof(KanbanTools.GetWorkItem), readTools);
         Assert.Contains(nameof(KanbanTools.SearchWorkItems), readTools);
+        Assert.Contains(nameof(KanbanTools.ListChanges), readTools);
     }
 
     [Theory]
@@ -63,8 +73,9 @@ public sealed class KanbanToolsScopeTests
         var api = new FakeApi();
         var tools = CreateTools(api, PersonalAccessTokenScopes.Read);
 
-        var exception = await Assert.ThrowsAsync<McpException>(() => InvokeAsync(tools, toolName));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => InvokeAsync(tools, toolName));
 
+        Assert.Equal(KanbanErrorCodes.ScopeDenied, exception.Code);
         Assert.Equal(KanbanTools.ReadOnlyScopeErrorMessage, exception.Message);
         Assert.Empty(api.Requests);
     }
@@ -94,7 +105,7 @@ public sealed class KanbanToolsScopeTests
         await tools.CreateWorkItem(Guid.NewGuid(), "Title", WorkItemType.Story);
         await tools.MoveWorkItem(Guid.NewGuid(), WorkItemStatus.InProgress);
         await tools.DeleteWorkItem(Guid.NewGuid());
-        await tools.AddWorkItemComment(Guid.NewGuid(), "claude", "hello");
+        await tools.AddWorkItemComment(Guid.NewGuid(), "hello", "claude");
 
         Assert.Equal(
             [HttpMethod.Post, HttpMethod.Post, HttpMethod.Delete, HttpMethod.Post],
@@ -108,8 +119,9 @@ public sealed class KanbanToolsScopeTests
         var api = new FakeApi();
         var tools = CreateTools(api, scope: null, requirePersonalAccessToken: true);
 
-        var exception = await Assert.ThrowsAsync<McpException>(() => InvokeAsync(tools, toolName));
+        var exception = await Assert.ThrowsAsync<KanbanToolException>(() => InvokeAsync(tools, toolName));
 
+        Assert.Equal(KanbanErrorCodes.ScopeDenied, exception.Code);
         Assert.Equal(KanbanTools.MissingTokenErrorMessage, exception.Message);
         Assert.Empty(api.Requests);
     }
@@ -221,7 +233,8 @@ public sealed class KanbanToolsScopeTests
     }
 
     // Answers every call with a JSON null body, which the tools treat as "nothing found",
-    // except a single work item GET, which gets an empty object because GetWorkItem treats null as an error.
+    // except a single work item GET, which gets an empty object because GetWorkItem treats null as an error,
+    // and the change feed, for the same reason.
     private sealed class FakeApi : HttpMessageHandler
     {
         public List<HttpRequestMessage> Requests { get; } = [];
@@ -232,6 +245,7 @@ public sealed class KanbanToolsScopeTests
             var path = request.RequestUri!.AbsolutePath;
             var body = request.Method != HttpMethod.Get ? "null"
                 : path == "/api/projects" ? "[]"
+                : path == "/api/items/changes" ? """{"items":[],"next_cursor":"aC4w"}"""
                 : path.StartsWith("/api/items/", StringComparison.Ordinal) && Guid.TryParse(path["/api/items/".Length..], out _) ? "{}"
                 : "null";
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

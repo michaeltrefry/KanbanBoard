@@ -74,6 +74,10 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<string>("Description")
                         .HasColumnType("longtext");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<bool>("IsArchived")
                         .HasColumnType("tinyint(1)");
 
@@ -91,6 +95,9 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasColumnType("datetime(6)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("ProjectId", "Name");
 
@@ -116,6 +123,10 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasMaxLength(36)
                         .HasColumnType("varchar(36)");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<string>("Title")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -128,7 +139,38 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.HasIndex("EpicId", "CreatedAtUtc");
 
+                    b.HasIndex("EpicId", "IdempotencyKeyHash")
+                        .IsUnique();
+
                     b.ToTable("EpicDocuments");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.EpicPlanImport", b =>
+                {
+                    b.Property<string>("EpicId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.HasKey("EpicId");
+
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
+
+                    b.ToTable("EpicPlanImports");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.PersonalAccessToken", b =>
@@ -204,8 +246,16 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("DefaultBranch")
+                        .HasMaxLength(255)
+                        .HasColumnType("varchar(255)");
+
                     b.Property<string>("Description")
                         .HasColumnType("longtext");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.Property<bool>("IsArchived")
                         .HasColumnType("tinyint(1)");
@@ -220,7 +270,14 @@ namespace KanbanBoard.Api.Data.Migrations
                         .HasMaxLength(160)
                         .HasColumnType("varchar(160)");
 
+                    b.Property<string>("RepositoryUrl")
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
                     b.HasKey("Id");
+
+                    b.HasIndex("IdempotencyKeyHash")
+                        .IsUnique();
 
                     b.HasIndex("Key")
                         .IsUnique();
@@ -232,6 +289,22 @@ namespace KanbanBoard.Api.Data.Migrations
                 {
                     b.Property<string>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<DateTime?>("ClaimExpiresAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("ClaimMarker")
+                        .HasMaxLength(200)
+                        .HasColumnType("varchar(200)")
+                        .UseCollation("utf8mb4_bin");
+
+                    b.Property<string>("ClaimantName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("ClaimantUserId")
                         .HasMaxLength(36)
                         .HasColumnType("varchar(36)");
 
@@ -248,9 +321,13 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<int?>("Estimate")
                         .HasColumnType("int");
 
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
                     b.Property<string>("Labels")
-                        .HasMaxLength(240)
-                        .HasColumnType("varchar(240)");
+                        .HasMaxLength(4000)
+                        .HasColumnType("varchar(4000)");
 
                     b.Property<int>("Order")
                         .HasColumnType("int");
@@ -277,13 +354,64 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime>("UpdatedAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<long>("Version")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L);
+
                     b.HasKey("Id");
 
                     b.HasIndex("EpicId");
 
+                    b.HasIndex("ProjectId", "IdempotencyKeyHash")
+                        .IsUnique();
+
                     b.HasIndex("ProjectId", "Status", "Order");
 
                     b.ToTable("WorkItems");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemChange", b =>
+                {
+                    b.Property<long>("Sequence")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("ActorName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("ActorUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("Changes")
+                        .IsRequired()
+                        .HasColumnType("longtext");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("varchar(32)");
+
+                    b.Property<string>("ProjectId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("Sequence");
+
+                    b.HasIndex("ProjectId", "Sequence");
+
+                    b.ToTable("WorkItemChanges");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemComment", b =>
@@ -295,8 +423,12 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<string>("Author")
                         .IsRequired()
-                        .HasMaxLength(80)
-                        .HasColumnType("varchar(80)");
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("AuthorUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
 
                     b.Property<string>("Body")
                         .IsRequired()
@@ -304,6 +436,10 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
+
+                    b.Property<string>("IdempotencyKeyHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
 
                     b.Property<string>("WorkItemId")
                         .IsRequired()
@@ -314,7 +450,67 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.HasIndex("WorkItemId", "CreatedAtUtc");
 
+                    b.HasIndex("WorkItemId", "IdempotencyKeyHash")
+                        .IsUnique();
+
                     b.ToTable("WorkItemComments");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemDependency", b =>
+                {
+                    b.Property<string>("BlockedItemId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<string>("BlockerItemId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("BlockedItemId", "BlockerItemId");
+
+                    b.HasIndex("BlockerItemId");
+
+                    b.ToTable("WorkItemDependencies");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemLink", b =>
+                {
+                    b.Property<string>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime(6)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("varchar(16)");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(2048)
+                        .HasColumnType("varchar(2048)");
+
+                    b.Property<string>("UrlHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("varchar(64)");
+
+                    b.Property<string>("WorkItemId")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UrlHash");
+
+                    b.HasIndex("WorkItemId", "Kind", "UrlHash")
+                        .IsUnique();
+
+                    b.ToTable("WorkItemLinks");
                 });
 
             modelBuilder.Entity("KanbanBoard.Api.Models.Epic", b =>
@@ -333,6 +529,17 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.HasOne("KanbanBoard.Api.Models.Epic", "Epic")
                         .WithMany("Documents")
                         .HasForeignKey("EpicId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Epic");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.EpicPlanImport", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.Epic", "Epic")
+                        .WithOne()
+                        .HasForeignKey("KanbanBoard.Api.Models.EpicPlanImport", "EpicId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
@@ -372,6 +579,36 @@ namespace KanbanBoard.Api.Data.Migrations
                 {
                     b.HasOne("KanbanBoard.Api.Models.WorkItem", "WorkItem")
                         .WithMany("Comments")
+                        .HasForeignKey("WorkItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("WorkItem");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemDependency", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "BlockedItem")
+                        .WithMany()
+                        .HasForeignKey("BlockedItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "BlockerItem")
+                        .WithMany()
+                        .HasForeignKey("BlockerItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("BlockedItem");
+
+                    b.Navigation("BlockerItem");
+                });
+
+            modelBuilder.Entity("KanbanBoard.Api.Models.WorkItemLink", b =>
+                {
+                    b.HasOne("KanbanBoard.Api.Models.WorkItem", "WorkItem")
+                        .WithMany()
                         .HasForeignKey("WorkItemId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();

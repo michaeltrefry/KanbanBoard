@@ -3,6 +3,7 @@ using System.Data.Common;
 using System.Text.RegularExpressions;
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
+using KanbanBoard.Api.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -217,7 +218,7 @@ public sealed class StartupMigrationTests
 
     // Same provider and interceptor registration as Program.cs, but every connection, command and transaction
     // is answered by FakeDatabase, so the real EF Core / MySql.EntityFrameworkCore pipeline runs without a server.
-    private static KanbanDbContext CreatePipelineContext(DatabaseOptions options, FakeDatabase database) =>
+    internal static KanbanDbContext CreatePipelineContext(DatabaseOptions options, FakeDatabase database) =>
         new(new DbContextOptionsBuilder<KanbanDbContext>()
             .UseMySQL(UnreachableConnection, mySqlOptions => mySqlOptions.CommandTimeout(options.CommandTimeoutSeconds))
             .AddInterceptors(new MariaDbMigrationLockInterceptor(options.MigrationLockTimeoutSeconds), database)
@@ -237,14 +238,85 @@ public sealed class StartupMigrationTests
         public override void Delete() => throw new NotSupportedException();
     }
 
-    private sealed class FakeDatabase(int lockResult) : IDbConnectionInterceptor, IDbCommandInterceptor, IDbTransactionInterceptor
+    // rows answers a reader command with a result set; without it (or when it returns null) the result is empty.
+    internal sealed class FakeDatabase(int lockResult, Func<DbCommand, DataTable?>? rows = null)
+        : IDbConnectionInterceptor, IDbCommandInterceptor, IDbTransactionInterceptor
     {
         public List<(string Text, int Timeout)> Commands { get; } = [];
 
-        private void Record(DbCommand command) => Commands.Add((command.CommandText, command.CommandTimeout));
+        // What a command that returns no rows (such as the UPDATE of ExecuteUpdate) reports as rows affected.
+        public int NonQueryResult { get; init; }
+
+        /// <summary>Makes a command fail: the exception it returns is thrown in place of the command's answer.</summary>
+        public Func<DbCommand, Exception?>? Fail { get; init; }
+
+        private void Record(DbCommand command)
+        {
+            Commands.Add((command.CommandText, command.CommandTimeout));
+            if (Fail?.Invoke(command) is { } failure)
+            {
+                throw failure;
+            }
+        }
 
         private object? Scalar(DbCommand command) =>
             command.CommandText.Contains("GET_LOCK('__EFMigrationsLock'", StringComparison.Ordinal) ? lockResult : null;
+
+        /// <summary>
+        /// The named locks the commands took and released and the commits between them, in order: "GET name",
+        /// "COMMIT" and "RELEASE name". With this fake every SaveChanges commits as well, which it does not inside a
+        /// transaction on a real server: only the place of the last commit says something.
+        /// </summary>
+        public List<string> Locks { get; } = [];
+
+        /// <summary>How many commands had been sent when each transaction was started.</summary>
+        public List<int> TransactionStarts { get; } = [];
+
+        private DbDataReader Rows(DbCommand command)
+        {
+            var text = command.CommandText;
+            var isGet = text.Contains("GET_LOCK(", StringComparison.Ordinal);
+            if ((isGet || text.Contains("RELEASE_LOCK(", StringComparison.Ordinal)) && command.Parameters.Count > 0)
+            {
+                Locks.Add($"{(isGet ? "GET" : "RELEASE")} {command.Parameters[0].Value}");
+            }
+
+            // The entries of the change feed that end every logged write get a sequence each, whatever the test
+            // answers to other inserts: one result per INSERT of the command.
+            var entries = text.Split("INSERT INTO `WorkItemChanges`").Length - 1;
+            if (entries > 0)
+            {
+                return new DataTableReader(Enumerable.Range(1, entries).Select(sequence => Single("Sequence", (long)sequence)).ToArray());
+            }
+
+            // A save that writes several rows in one command reads one count of rows per statement.
+            var counts = text.Split("SELECT ROW_COUNT()").Length - 1;
+            if (counts > 1)
+            {
+                return new DataTableReader(Enumerable.Range(0, counts).Select(_ => Single("ROW_COUNT()", 1)).ToArray());
+            }
+
+            var answer = rows?.Invoke(command) ?? ChangeLogAnswer(command);
+            return answer?.CreateDataReader() ?? EmptyHistory();
+        }
+
+        // What a logged write asks before that insert, answered when the test's own rows do not: the item's project
+        // is found and the change log lock is free.
+        private static DataTable? ChangeLogAnswer(DbCommand command)
+        {
+            var text = command.CommandText;
+            return text.StartsWith("SELECT `w`.`ProjectId`", StringComparison.Ordinal) ? Single("ProjectId", ChangeLogProjectId.ToString())
+                : command.Parameters.Count > 0 && Equals(command.Parameters[0].Value, WorkItemChangeLog.LockName) ? Single("Value", 1L)
+                : null;
+        }
+
+        private static DataTable Single(string name, object value)
+        {
+            var table = new DataTable();
+            table.Columns.Add(name, value.GetType());
+            table.Rows.Add(value);
+            return table;
+        }
 
         private static DbDataReader EmptyHistory()
         {
@@ -283,27 +355,27 @@ public sealed class StartupMigrationTests
         public InterceptionResult<int> NonQueryExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<int> result)
         {
             Record(command);
-            return InterceptionResult<int>.SuppressWithResult(0);
+            return InterceptionResult<int>.SuppressWithResult(NonQueryResult);
         }
 
         public ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
             DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
         {
             Record(command);
-            return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(0));
+            return ValueTask.FromResult(InterceptionResult<int>.SuppressWithResult(NonQueryResult));
         }
 
         public InterceptionResult<DbDataReader> ReaderExecuting(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result)
         {
             Record(command);
-            return InterceptionResult<DbDataReader>.SuppressWithResult(EmptyHistory());
+            return InterceptionResult<DbDataReader>.SuppressWithResult(Rows(command));
         }
 
         public ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(
             DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
         {
             Record(command);
-            return ValueTask.FromResult(InterceptionResult<DbDataReader>.SuppressWithResult(EmptyHistory()));
+            return ValueTask.FromResult(InterceptionResult<DbDataReader>.SuppressWithResult(Rows(command)));
         }
 
         // MySqlCommand only accepts a MySqlTransaction, whose constructor is internal. Commit and rollback are
@@ -317,20 +389,32 @@ public sealed class StartupMigrationTests
                 culture: null)!;
 
         public InterceptionResult<DbTransaction> TransactionStarting(
-            DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result) =>
-            InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection));
+            DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result)
+        {
+            TransactionStarts.Add(Commands.Count);
+            return InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection));
+        }
 
         public ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
             DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection)));
+            CancellationToken cancellationToken = default)
+        {
+            TransactionStarts.Add(Commands.Count);
+            return ValueTask.FromResult(InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection)));
+        }
 
-        public InterceptionResult TransactionCommitting(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result) =>
-            InterceptionResult.Suppress();
+        public InterceptionResult TransactionCommitting(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result)
+        {
+            Locks.Add("COMMIT");
+            return InterceptionResult.Suppress();
+        }
 
         public ValueTask<InterceptionResult> TransactionCommittingAsync(
-            DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(InterceptionResult.Suppress());
+            DbTransaction transaction, TransactionEventData eventData, InterceptionResult result, CancellationToken cancellationToken = default)
+        {
+            Locks.Add("COMMIT");
+            return ValueTask.FromResult(InterceptionResult.Suppress());
+        }
 
         public InterceptionResult TransactionRollingBack(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result) =>
             InterceptionResult.Suppress();
@@ -340,7 +424,46 @@ public sealed class StartupMigrationTests
             ValueTask.FromResult(InterceptionResult.Suppress());
     }
 
-    private static string FindRepoFile(string relativePath)
+    /// <summary>The project FakeDatabase reports for an item when a logged write asks for it.</summary>
+    internal static readonly Guid ChangeLogProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+
+    /// <summary>
+    /// Checks that <paramref name="texts"/> (MySQL commands) end with the statements that record one entry of the
+    /// change feed, in the order that makes the feed safe to follow: the named lock, the INSERT, and the release
+    /// only after it. Returns the commands before them.
+    /// </summary>
+    internal static List<string> WithoutChangeLogEntry(List<string> texts, bool readsProject = true)
+    {
+        var tail = readsProject ? 4 : 3;
+        Assert.True(texts.Count >= tail, string.Join("\n---\n", texts));
+        var last = texts.TakeLast(tail).ToList();
+        if (readsProject)
+        {
+            Assert.StartsWith("SELECT `w`.`ProjectId`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", last[0].ReplaceLineEndings("\n"), StringComparison.Ordinal);
+        }
+
+        Assert.Contains("GET_LOCK(", last[^3], StringComparison.Ordinal);
+        Assert.StartsWith(
+            "INSERT INTO `WorkItemChanges` (`ActorName`, `ActorUserId`, `Changes`, `CreatedAtUtc`, `Kind`, `ProjectId`, `WorkItemId`)",
+            last[^2], StringComparison.Ordinal);
+        Assert.Contains("RELEASE_LOCK(", last[^1], StringComparison.Ordinal);
+        return texts.SkipLast(tail).ToList();
+    }
+
+    /// <summary>
+    /// Checks that the change log lock was taken, that the transaction was committed while it was held, and that
+    /// nothing was committed after it was released. Returns the locks without the commits.
+    /// </summary>
+    internal static List<string> LocksAroundTheCommit(FakeDatabase database)
+    {
+        var locks = database.Locks;
+        var taken = locks.IndexOf($"GET {WorkItemChangeLog.LockName}");
+        var released = locks.IndexOf($"RELEASE {WorkItemChangeLog.LockName}");
+        Assert.True(taken >= 0 && released == locks.LastIndexOf("COMMIT") + 1 && locks[taken..released].Contains("COMMIT"), string.Join(", ", locks));
+        return locks.Where(entry => entry != "COMMIT").ToList();
+    }
+
+    internal static string FindRepoFile(string relativePath)
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
