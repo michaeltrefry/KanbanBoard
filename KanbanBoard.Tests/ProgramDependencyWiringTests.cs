@@ -162,10 +162,74 @@ public sealed class ProgramDependencyWiringTests
         Assert.Equal(("Renamed", repository, "main"), (put.Name, put.RepositoryUrl, put.DefaultBranch));
         Assert.Equal(("Renamed", repository, null, true), (cleared.Name, cleared.RepositoryUrl, cleared.DefaultBranch, cleared.IsArchived));
         Assert.Equal(cleared, Assert.Single(listed!));
-        // An archived project still has a board, as when it is archived from the web UI.
+        // An archived project still has a board, as when it is archived from the web UI. The board carries the
+        // project's target, like the list.
         Assert.True(board!.IsArchived);
+        Assert.Equal((repository, null), (board.RepositoryUrl, board.DefaultBranch));
+        var boardJson = await client.GetStringAsync($"/api/projects/{created.Id}");
+        Assert.Contains($"\"repository_url\":\"{repository}\",\"default_branch\":null", boardJson, StringComparison.Ordinal);
         Assert.Equal(HttpStatusCode.NotFound, unknown.StatusCode);
         Assert.Equal(KanbanErrorCodes.NotFound, (await unknown.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code);
+    }
+
+    [Fact]
+    public async Task An_unknown_id_is_refused_not_found_with_a_message_that_names_the_object_and_a_missing_text_names_the_argument()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateCallerClient("Factory");
+        var project = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Project", key = "MSG" });
+        var epic = await PostAsync<EpicDto>(client, $"/api/projects/{project.Id}/epics", new { name = "Epic" });
+        var document = await PostAsync<EpicDocumentDto>(client, $"/api/epics/{epic.Id}/documents", new { title = "Doc", body = "b" });
+        var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = project.Id, title = "A", type = "Task", status = "Backlog", priority = "Medium" });
+        var unknown = Guid.NewGuid();
+        async Task<(HttpStatusCode Status, string? Code, string? Message)> AnswerAsync(HttpMethod method, string path, object? body = null)
+        {
+            using var response = await client.SendAsync(new HttpRequestMessage(method, path) { Content = body is null ? null : JsonContent.Create(body) });
+            var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>(Json);
+            return (response.StatusCode, error?.Code, error?.Message);
+        }
+
+        Assert.Equal(
+            [
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound, $"Project {unknown} was not found."),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound, $"Epic {unknown} was not found."),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound, $"Work item {unknown} was not found."),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound, $"Epic {unknown} was not found."),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound, $"Epic document {unknown} was not found.")
+            ],
+            new[]
+            {
+                await AnswerAsync(HttpMethod.Delete, $"/api/projects/{unknown}"),
+                await AnswerAsync(HttpMethod.Delete, $"/api/epics/{unknown}"),
+                await AnswerAsync(HttpMethod.Delete, $"/api/items/{unknown}"),
+                await AnswerAsync(HttpMethod.Put, $"/api/epics/{unknown}", new { name = "Epic" }),
+                await AnswerAsync(HttpMethod.Put, $"/api/epic-documents/{unknown}", new { title = "Doc", body = "b" })
+            });
+        // One wording for an argument that is refused, whatever the endpoint.
+        Assert.Equal(
+            [
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'name' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'name' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'title' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'body' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'body' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'title' is required."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, $"Argument 'marker' is required and must be at most {WorkItemClaimLimits.MaxMarkerLength} characters."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, $"Argument 'ttl_seconds' must be between {WorkItemClaimLimits.MinTtlSeconds} and {WorkItemClaimLimits.MaxTtlSeconds}."),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'query' is required.")
+            ],
+            new[]
+            {
+                await AnswerAsync(HttpMethod.Post, $"/api/projects/{project.Id}/epics", new { name = " " }),
+                await AnswerAsync(HttpMethod.Put, $"/api/epics/{epic.Id}", new { name = " " }),
+                await AnswerAsync(HttpMethod.Post, $"/api/epics/{epic.Id}/documents", new { title = " ", body = "b" }),
+                await AnswerAsync(HttpMethod.Post, $"/api/epics/{epic.Id}/documents", new { title = "Doc", body = " " }),
+                await AnswerAsync(HttpMethod.Put, $"/api/epic-documents/{document.Id}", new { title = "Doc", body = " " }),
+                await AnswerAsync(HttpMethod.Post, "/api/items", new { projectId = project.Id, title = " ", type = "Task", status = "Backlog", priority = "Medium" }),
+                await AnswerAsync(HttpMethod.Post, $"/api/items/{item.Id}/claim", new ClaimWorkItemRequest(" ", 60)),
+                await AnswerAsync(HttpMethod.Post, $"/api/items/{item.Id}/claim", new ClaimWorkItemRequest("run-1", 0)),
+                await AnswerAsync(HttpMethod.Get, "/api/items/search?query=%20")
+            });
     }
 
     internal static Task<T> PostAsync<T>(HttpClient client, string path, object body) => SendAsync<T>(client, HttpMethod.Post, path, body);

@@ -173,7 +173,7 @@ public sealed class EpicPlanImportApiTests
             await MessageAsync("""{"idempotency_key":"k","epic":{"name":"E"},"items":[{"ref":"A","title":"a","blocked_by":["C"]},{"ref":"B","title":"b","blocked_by":["A"]},{"ref":"C","title":"c","blocked_by":["B"]}]}"""),
             StringComparison.Ordinal);
         Assert.Equal(
-            "Item 'A' (items[0]): Field 'status' must be one of Backlog, Ready, InProgress, Blocked, Done, Closed.",
+            "Item 'A' (items[0]): Argument 'status' must be one of Backlog, Ready, InProgress, Blocked, Done, Closed.",
             await MessageAsync("""{"idempotency_key":"k","epic":{"name":"E"},"items":[{"ref":"A","title":"a","status":"Started"}]}"""));
         Assert.Equal(
             $"Item 'A' (items[0]): Argument 'title' must be at most {WorkItemLimits.MaxTitleLength} characters.",

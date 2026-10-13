@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using KanbanBoard.Mcp.Tools;
 using KanbanBoard.Shared.Contracts;
 using ModelContextProtocol.Protocol;
 using static KanbanBoard.Tests.KanbanToolsClaimTests;
@@ -16,9 +17,9 @@ public sealed class KanbanToolsArgumentTests
     private const string ItemJson =
         """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
 
-    // ItemJson as the tools return it: the null properties left out, except estimate.
+    // ItemJson as the tools return it: the null properties left out, except estimate and the four claim fields.
     private const string ItemText =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
 
     private const string ProjectJson =
         """{"id":"22222222-2222-2222-2222-222222222222","name":"App","key":"APP","description":null,"isArchived":false,"createdAtUtc":"2026-10-12T12:00:00+00:00","totalItems":2,"openItems":1,"repository_url":null,"default_branch":"main"}""";
@@ -28,6 +29,9 @@ public sealed class KanbanToolsArgumentTests
 
     private const string BoardStart =
         """{"id":"22222222-2222-2222-2222-222222222222","name":"App","key":"APP","description":"d","isArchived":false,"createdAtUtc":"2026-10-12T12:00:00+00:00","items":[""";
+
+    // The project's target, after the fields a board has always had: always written, also as null.
+    private const string BoardEnd = ""","repository_url":"https://example.test/r.git","default_branch":null}""";
 
     private const string EpicJson =
         """{"id":"44444444-4444-4444-4444-444444444444","projectId":"22222222-2222-2222-2222-222222222222","name":"Epic","description":null,"isArchived":false,"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00"}""";
@@ -205,6 +209,67 @@ public sealed class KanbanToolsArgumentTests
         Assert.Single(server.Api.Requests);
     }
 
+    public static TheoryData<string> WriteToolNames => new(KanbanTools.WriteToolNames);
+
+    [Fact]
+    public async Task The_write_tools_the_server_checks_the_scope_of_first_are_exactly_the_tools_that_ask_for_the_write_scope()
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Read, request => Answer("get_epic", request));
+        var listed = (await server.Client.ListToolsAsync()).Select(tool => tool.Name).ToList();
+        // create_work_item for CreateWorkItem: the name the server lists a method under.
+        var asked = KanbanToolsScopeTests.WriteTools.Select(method => System.Text.RegularExpressions.Regex.Replace(method, "(?<!^)([A-Z])", "_$1").ToLowerInvariant());
+
+        Assert.Equal(asked.Order(), KanbanTools.WriteToolNames.Order());
+        Assert.Subset(listed.ToHashSet(), KanbanTools.WriteToolNames.ToHashSet());
+        Assert.Equal(23, KanbanTools.WriteToolNames.Count);
+        Assert.Equal(37, listed.Count);
+    }
+
+    // What is wrong with the arguments of a call, three ways: one the tool does not have, a required one left out,
+    // and one of a type the tool does not take.
+    private static Dictionary<string, object?>[] MalformedCalls(string tool)
+    {
+        var call = Tools[tool].Calls[0];
+        return
+        [
+            new(call) { ["no_such_argument"] = 1 },
+            [],
+            new(call) { [call.Keys.First()] = new[] { new { not = "an id" } } }
+        ];
+    }
+
+    [Theory]
+    [MemberData(nameof(WriteToolNames))]
+    public async Task A_read_scope_token_is_refused_scope_denied_by_a_write_tool_whatever_is_wrong_with_the_arguments(string tool)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Read, request => Answer(tool, request));
+
+        foreach (var call in MalformedCalls(tool).Append(Tools[tool].Calls[0]))
+        {
+            var result = await server.CallAsync(tool, call);
+
+            Assert.Equal(KanbanTools.ReadOnlyScopeErrorMessage, AssertError(result, KanbanErrorCodes.ScopeDenied));
+        }
+
+        Assert.Empty(server.Api.Requests);
+    }
+
+    [Theory]
+    [MemberData(nameof(WriteToolNames))]
+    public async Task A_full_scope_token_is_told_invalid_argument_for_the_same_calls_and_nothing_is_called(string tool)
+    {
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, request => Answer(tool, request));
+
+        foreach (var call in MalformedCalls(tool))
+        {
+            var result = await server.CallAsync(tool, call);
+
+            AssertError(result, KanbanErrorCodes.InvalidArgument);
+        }
+
+        Assert.Empty(server.Api.Requests);
+    }
+
     // An exception of the kinds a malformed argument raises, thrown once the body of the tool runs: the call may have
     // written, so it is a fault of the server and must not be answered as "nothing was called".
     public static TheoryData<string, string> FaultsAfterTheBodyStarted
@@ -262,7 +327,7 @@ public sealed class KanbanToolsArgumentTests
         { "get_work_item", HttpStatusCode.NotFound, "", KanbanErrorCodes.NotFound, $"Work item {Id} was not found." },
         { "list_epics", HttpStatusCode.NotFound, """{"message":"Project not found."}""", KanbanErrorCodes.NotFound, "Project not found." },
         { "list_epic_documents", HttpStatusCode.NotFound, """{"message":"Epic not found."}""", KanbanErrorCodes.NotFound, "Epic not found." },
-        { "search_work_items", HttpStatusCode.BadRequest, """{"message":"Field 'query' is required."}""", KanbanErrorCodes.InvalidArgument, "Field 'query' is required." },
+        { "search_work_items", HttpStatusCode.BadRequest, """{"code":"invalid_argument","message":"Argument 'query' is required."}""", KanbanErrorCodes.InvalidArgument, "Argument 'query' is required." },
         { "list_projects", HttpStatusCode.Forbidden, """{"code":"scope_denied","message":"revoked"}""", KanbanErrorCodes.ScopeDenied, "revoked" },
         { "get_work_item", HttpStatusCode.Forbidden, """{"code":"scope_denied","message":"revoked"}""", KanbanErrorCodes.ScopeDenied, "revoked" },
         { "get_board", HttpStatusCode.ServiceUnavailable, """{"code":"busy","message":"later"}""", KanbanErrorCodes.Busy, "later" }
@@ -308,7 +373,7 @@ public sealed class KanbanToolsArgumentTests
     public static TheoryData<string, string, string, string> ReadResults => new()
     {
         { "list_projects", "/api/projects?includeArchived=False", $"[{ProjectJson}]", $"[{ProjectText}]" },
-        { "get_board", $"/api/projects/{Id}", $"{BoardStart}{ItemJson}]}}", $"{BoardStart}{ItemText}]}}" },
+        { "get_board", $"/api/projects/{Id}", $"{BoardStart}{ItemJson}]{BoardEnd}", $"{BoardStart}{ItemText}]{BoardEnd}" },
         { "list_epics", $"/api/projects/{Id}/epics?includeArchived=False", $"[{EpicJson}]", $"[{EpicText}]" },
         { "get_epic", $"/api/epics/{Id}", EpicJson, EpicText },
         { "list_epic_documents", $"/api/epics/{Id}/documents", $"[{DocumentJson}]", $"[{DocumentJson}]" },

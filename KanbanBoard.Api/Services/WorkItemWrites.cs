@@ -71,7 +71,7 @@ public static class WorkItemWrites
         };
         if (normalizedTitle.Length == 0)
         {
-            error = "Field 'title' is required.";
+            error = "Argument 'title' is required.";
             return false;
         }
 
@@ -152,8 +152,12 @@ public static class WorkItemWrites
 
     /// <summary>
     /// Writes the set fields of <paramref name="patch"/> to the item, or writes nothing and says why. With an
-    /// expected version, the first statement is one conditional UPDATE, so the database decides between concurrent
+    /// expected version, the item is written by one conditional UPDATE, so the database decides between concurrent
     /// updates: only one of them can match the version. Do not replace it with a read followed by SaveChanges.
+    ///
+    /// An update that names a status may put the item at the end of another column, so it starts by holding the
+    /// project's row, like a create and a move (<see cref="HoldColumnsAsync"/>): it reads the end of that column
+    /// after every earlier writer of the project's columns has committed.
     /// </summary>
     public static async Task<WorkItemWriteResult> UpdateAsync(
         KanbanDbContext dbContext,
@@ -181,15 +185,24 @@ public static class WorkItemWrites
             return Invalid(labelError);
         }
 
+        // Read before the transaction starts: a read inside it would come before the statement that holds the row.
+        var projectId = patch.Status is null ? null : await ProjectOfAsync(dbContext, itemId, cancellationToken);
+
         // The save below can rewrite the item's entries in the indexes on its column and its epic while this
         // transaction holds the item's row; a delete of the project or an archive of the epic takes the two in the
         // other order, and MariaDB then rolls one of them back (error 1213). Everything of the attempt is rolled
         // back with it, the version and the entry of the change feed included, so the update is run again.
         return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
-            // The UPDATE comes first and holds the item's row until the transaction ends: the updates of one item run
-            // one at a time, and each reads the item only after the one before it has committed.
+            // The UPDATE holds the item's row until the transaction ends: the updates of one item run one at a time,
+            // and each reads the item only after the one before it has committed. Only the project's row is held
+            // before it, and only by an update that names a status.
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            if (projectId is not null)
+            {
+                await HoldColumnsAsync(dbContext, projectId.Value, cancellationToken);
+            }
+
             var refusal = await AdvanceAsync(
                 dbContext, itemId, patch.ExpectedVersion, setters => setters.SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
             if (refusal is not null)
@@ -270,14 +283,16 @@ public static class WorkItemWrites
     }
 
     /// <summary>
-    /// Puts the item in a column at a position. The item itself is written by one conditional UPDATE; the siblings
-    /// it displaces are renumbered afterwards, in a save of their own, and keep their version and UpdatedAtUtc.
+    /// Puts the item in a column at a position and renumbers the other items of that column around it, in one
+    /// transaction. The item itself is written by one conditional UPDATE; the siblings keep their version and
+    /// UpdatedAtUtc and get no entry in the change feed.
     ///
-    /// The two are separate on purpose: renumbering inside the item's transaction would hold the moved item's row
-    /// while taking the rows of its siblings, and two moves in one column could then deadlock. The price is that
-    /// the renumbering can fail after the move is committed. That failure is logged and the moved item is still
-    /// returned, with its new version: answering with an error would tell the caller that a move which happened
-    /// did not. The column may then hold a duplicate or a gap in Order until the next move in it renumbers it.
+    /// The move starts by holding the project's row (<see cref="HoldColumnsAsync"/>), like a create, an import and an
+    /// update that names a status: every write that gives an item a place in a column of the project runs one at a
+    /// time, and reads the column after the one before it has committed. So no two items of a column end up with
+    /// the same <see cref="WorkItem.Order"/>, and two moves in one column cannot deadlock over the rows of their
+    /// siblings. The rows are taken in one order everywhere: the project, then items, then the lock of the change
+    /// feed. Do not renumber outside this transaction, and do not read anything in it before the project is held.
     /// </summary>
     public static async Task<WorkItemWriteResult> MoveAsync(
         KanbanDbContext dbContext,
@@ -287,23 +302,29 @@ public static class WorkItemWrites
         long? expectedVersion,
         ChangeActor? actor,
         DateTimeOffset now,
-        ILogger logger,
         CancellationToken cancellationToken)
     {
-        // The UPDATE rewrites the item's entry in the index on its column while the transaction holds the item's
-        // row; a delete of the project or an archive of the epic takes the two in the other order, and MariaDB then
-        // rolls one of them back (error 1213). The whole attempt is rolled back, the version and the entry of the
-        // change feed included, so the move is run again: it is recorded once and advances the version once.
-        var (refused, moved) = await WorkItemChangeLog.RetryDeadlocksAsync<(WorkItemWriteResult? Refused, WorkItem? Moved)>(dbContext, async () =>
+        // Read before the transaction starts: a read inside it would come before the statement that holds the row.
+        if (await ProjectOfAsync(dbContext, itemId, cancellationToken) is not { } projectId)
+        {
+            return new(WorkItemWriteOutcome.NotFound);
+        }
+
+        // The move holds the rows of several items while other writers hold one of them (a delete of the project
+        // or an archive of the epic takes them in another order), and MariaDB then rolls one of the two back
+        // (error 1213). The whole attempt is rolled back, the version, the renumbering and the entry of the change
+        // feed included, so the move is run again: it is recorded once and advances the version once.
+        return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
             await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            await HoldColumnsAsync(dbContext, projectId, cancellationToken);
             // The UPDATE below overwrites the column and the position, so the item is held and read first: the
             // entry of the change feed reports the values this move replaces.
             await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
             var before = await dbContext.WorkItems.AsNoTracking().FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
             if (before is null)
             {
-                return (new(WorkItemWriteOutcome.NotFound), null);
+                return new(WorkItemWriteOutcome.NotFound);
             }
 
             var refusal = await AdvanceAsync(
@@ -317,8 +338,12 @@ public static class WorkItemWrites
                 cancellationToken);
             if (refusal is not null)
             {
-                return (refusal, null);
+                // Leaving the transaction uncommitted: a refused move writes nothing, of the item or of a sibling.
+                return refusal;
             }
+
+            await NormalizeColumnOrderingAsync(dbContext, before.ProjectId, status, itemId, order, cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
 
             // Read while the UPDATE still holds the row, so the item that is returned carries this move's version.
             var written = await dbContext.WorkItems
@@ -328,7 +353,7 @@ public static class WorkItemWrites
                 .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
             if (written is null)
             {
-                return (new(WorkItemWriteOutcome.NotFound), null);
+                return new(WorkItemWriteOutcome.NotFound);
             }
 
             await WorkItemChangeLog.CommitAsync(
@@ -336,28 +361,8 @@ public static class WorkItemWrites
                 transaction,
                 WorkItemChangeLog.Entry(itemId, written.ProjectId, WorkItemChangeKinds.ItemMoved, actor, now, WorkItemChangeLog.Snapshot(before), WorkItemChangeLog.Snapshot(written)),
                 cancellationToken);
-            return (null, written);
+            return new WorkItemWriteResult(WorkItemWriteOutcome.Succeeded, written);
         });
-        if (moved is null)
-        {
-            return refused!;
-        }
-
-        // The siblings are written after that transaction, without holding the moved item's row. Each save writes
-        // its rows in the order of their keys, so two moves in one column wait for each other instead of deadlocking.
-        try
-        {
-            await NormalizeColumnOrderingAsync(dbContext, moved.ProjectId, status, itemId, order, cancellationToken);
-            await dbContext.SaveChangesAsync(cancellationToken);
-        }
-        catch (Exception exception)
-        {
-            // The move itself is committed (see the summary): report it, not this.
-            logger.LogError(exception, "Work item {ItemId} was moved to {Status} at {Order}, but renumbering the other items of that column failed.", itemId, status, order);
-            dbContext.ChangeTracker.Clear();
-        }
-
-        return new(WorkItemWriteOutcome.Succeeded, moved);
     }
 
     /// <summary>
@@ -462,6 +467,25 @@ public static class WorkItemWrites
     /// <summary>The stored labels as a list.</summary>
     public static IReadOnlyList<string> SplitLabels(string? stored) =>
         string.IsNullOrEmpty(stored) ? [] : stored.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+
+    // The project of an item, or null when there is no such item. A project id never changes, so it can be read
+    // before the write's transaction starts.
+    private static async Task<Guid?> ProjectOfAsync(KanbanDbContext dbContext, Guid itemId, CancellationToken cancellationToken) =>
+        await dbContext.WorkItems
+            .AsNoTracking()
+            .Where(item => item.Id == itemId)
+            .Select(item => (Guid?)item.ProjectId)
+            .FirstOrDefaultAsync(cancellationToken);
+
+    /// <summary>
+    /// Holds the row of the project until the transaction ends, as its first statement: the writes that give an item
+    /// a place in a column of the project (a create, an import, a move, an update that names a status) then run one
+    /// at a time. On MariaDB (REPEATABLE READ) the reads that follow see everything the earlier holders committed;
+    /// a read before it would fix the transaction's view too early. A project that was deleted in between holds
+    /// nothing, and the write then finds no item.
+    /// </summary>
+    private static Task<int> HoldColumnsAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
+        Projects.LockAsync(dbContext, projectId, cancellationToken);
 
     // One UPDATE that advances the version together with whatever else the write sets, and only when the item still
     // has the expected version. Returns null when it wrote, and the refusal when it did not.

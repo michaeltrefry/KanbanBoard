@@ -88,9 +88,14 @@ public sealed class WorkItemDeadlockRetryMySqlTests
     // A write to one item, the statement of it that deadlocks, and the entries it records.
     public static TheoryData<string, string, string?, string, int> ItemWrites => new()
     {
-        // The move, at the statement that holds the item and at the one that rewrites its column and position.
+        // The move, at the statement that holds the project, at the one that holds the item, at the one that rewrites
+        // its column and position, and at the save that renumbers its siblings.
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", WorkItemUpdateMySqlTests.HoldProject, 1 },
         { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", HoldOneItem, 1 },
         { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", AdvanceVersion, 1 },
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", "UPDATE `WorkItems` SET `Order`", 1 },
+        // The update that names a status, which holds the project first as well.
+        { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", WorkItemUpdateMySqlTests.HoldProject, 1 },
         { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", AdvanceVersion, 1 },
         // The save that moves the item to its new column, after the version was advanced.
         { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", "UPDATE `WorkItems` SET `Status`", 1 },
@@ -114,7 +119,8 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         // The statement that deadlocked was sent twice, and so was the first statement of the transaction: the whole
         // write was run again, not the rest of it.
         Assert.Equal(2, texts.Count(text => text.Contains(statement, StringComparison.Ordinal)));
-        Assert.Equal(2, texts.Count(text => text == texts[0]));
+        var first = texts.First(text => text.StartsWith("UPDATE", StringComparison.Ordinal));
+        Assert.Equal(2, texts.Count(text => text == first));
         // One entry per change, whatever the attempt before it did: the server rolled that one back.
         var insert = Assert.Single(texts, text => text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
         Assert.Equal(entries, insert.Split("INSERT INTO `WorkItemChanges`").Length - 1);

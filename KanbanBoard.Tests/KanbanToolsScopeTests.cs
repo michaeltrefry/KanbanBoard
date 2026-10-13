@@ -18,7 +18,7 @@ public sealed class KanbanToolsScopeTests
 {
     // Every MCP tool that creates, updates, moves, comments on, or deletes data.
     // Any tool not listed here is treated as a read tool and must work with a 'read' token using GETs only.
-    private static readonly string[] WriteTools =
+    internal static readonly string[] WriteTools =
     [
         nameof(KanbanTools.CreateProject),
         nameof(KanbanTools.UpdateProject),

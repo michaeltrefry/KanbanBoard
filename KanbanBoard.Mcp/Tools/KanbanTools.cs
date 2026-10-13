@@ -26,6 +26,24 @@ public sealed class KanbanTools(
 
     public sealed record DeleteResultDto(Guid Id, string EntityType, bool Deleted);
 
+    /// <summary>
+    /// The tools that create, change or delete data, by the names <c>tools/list</c> gives them. Every other tool is
+    /// a read tool. A token that may not write is refused these before their arguments are looked at
+    /// (<see cref="KanbanToolErrors.WithKanbanToolErrors"/>), and again as their first statement.
+    /// </summary>
+    public static readonly IReadOnlySet<string> WriteToolNames = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "create_project", "update_project", "delete_project",
+        "create_epic", "update_epic", "delete_epic",
+        "create_epic_document", "update_epic_document",
+        "create_work_item", "create_epic_work_item", "import_epic_plan",
+        "update_work_item", "move_work_item", "delete_work_item",
+        "claim_work_item", "renew_work_item_claim", "release_work_item_claim",
+        "add_work_item_dependency", "remove_work_item_dependency",
+        "add_work_item_link", "remove_work_item_link",
+        "add_work_item_comment", "add_issue_comment"
+    };
+
     private const string RepositoryUrlDescription =
         "Repository the project's work is done in: an http or https URL without user name or password (https://github.com/owner/repo.git), " +
         "or an SSH URL without password (ssh://git@github.com/owner/repo.git or git@github.com:owner/repo.git). At most 2048 characters, stored as given.";
@@ -182,12 +200,12 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Update an epic.")]
+    [McpServerTool, Description("Replace an epic: name, description and isArchived are all written, with the values of this call. An argument that is left out is not kept: without description the epic's description is emptied, and without isArchived an archived epic is restored (isArchived false). To change one of them, read the epic with get_epic and pass all three. The call is unconditional: the last writer wins. isArchived true takes the epic's unfinished work items out of the epic. Returns the epic. An unknown epicId is refused with code not_found, an empty name with invalid_argument.")]
     public async Task<EpicDto?> UpdateEpic(
         [Description("Epic id")] Guid epicId,
         [Description("Epic name")] string name,
-        [Description("Optional description")] string? description = null,
-        [Description("Whether the epic is archived")] bool isArchived = false)
+        [Description("The epic's description. Left out, the description is emptied.")] string? description = null,
+        [Description("Whether the epic is archived. Left out, the epic is not archived, also when it was.")] bool isArchived = false)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
@@ -196,7 +214,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Delete a project.")]
+    [McpServerTool, Description("Delete a project with its epics, documents and work items. An unknown projectId is refused with code not_found.")]
     public async Task<DeleteResultDto> DeleteProject(
         [Description("Project id")] Guid projectId)
     {
@@ -207,7 +225,7 @@ public sealed class KanbanTools(
         return new DeleteResultDto(projectId, "project", true);
     }
 
-    [McpServerTool, Description("Delete an epic.")]
+    [McpServerTool, Description("Delete an epic and its documents. Its work items are not deleted: they are taken out of the epic and stay in the project. An unknown epicId is refused with code not_found.")]
     public async Task<DeleteResultDto> DeleteEpic(
         [Description("Epic id")] Guid epicId)
     {
@@ -248,11 +266,11 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<EpicDocumentDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Update an epic document.")]
+    [McpServerTool, Description("Replace an epic document: title and body are both written, with the values of this call; the whole body is replaced, not appended to. The call is unconditional: the last writer wins. Returns the document. An unknown documentId is refused with code not_found, an empty title or body with invalid_argument.")]
     public async Task<EpicDocumentDto?> UpdateEpicDocument(
         [Description("Epic document id")] Guid documentId,
         [Description("Document title")] string title,
-        [Description("Document body")] string body)
+        [Description("The whole new body")] string body)
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
@@ -462,7 +480,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<IReadOnlyList<WorkItemDto>>(JsonOptions) ?? [];
     }
 
-    [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, project ids, titles, types, statuses, estimates (null when not set) and versions only (no bodies), including closed items, capped at a page size. Use GetWorkItem for full details.")]
+    [McpServerTool, Description("Search work items whose title or description contains every word in the query (case-insensitive). Returns ids, project ids, titles, types, statuses, estimates (null when not set) and versions only (no bodies), including closed items, capped at a page size. Use get_work_item for full details.")]
     public async Task<IReadOnlyList<WorkItemSearchResultDto>> SearchWorkItems(
         [Description("Words to match in work item titles and descriptions")] string query,
         [Description("Optional project id to limit the search to")] Guid? projectId = null,
@@ -682,7 +700,7 @@ public sealed class KanbanTools(
             ?? throw new InvalidOperationException("The Kanban API returned no result for the import.");
     }
 
-    [McpServerTool, Description("Move a work item to a column and a position in it; the items it displaces are renumbered and are otherwise unchanged. Pass expected_version to refuse the move with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version. An unknown itemId is refused with code not_found.")]
+    [McpServerTool, Description("Move a work item to a column and a position in it; the items it displaces are renumbered in the same write and are otherwise unchanged. A claim on the item does not stop a move by another caller: claims are advisory. Pass expected_version to refuse the move with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version. An unknown itemId is refused with code not_found.")]
     public async Task<WorkItemDto?> MoveWorkItem(
         [Description("Work item id")] Guid itemId,
         [Description("Target status")] WorkItemStatus status,
@@ -696,7 +714,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Change a work item. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value, so update_work_item(itemId, status) changes the status and nothing else. To empty an optional field, name it in clear (description, estimate, labels, epicId); an empty string or an empty label_list is refused with code invalid_argument, as are a field that is both passed and named in clear and a call that passes no field to change. One exception, kept for callers from before clear existed: description passed as an empty or whitespace-only string leaves the item with an empty description, and labels passed as a string with no label in it (\"\", \" \", \" , \") leaves it without labels. A new status puts the item at the end of that column. Pass expected_version to refuse the update with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version: version goes up by one with every update and every move of the item, and not when it is claimed, commented on, linked, given a dependency, or when another item is reordered around it. An unknown itemId is refused with code not_found.")]
+    [McpServerTool, Description("Change a work item. Only the arguments that are passed are changed: an argument that is left out, or passed as null, keeps its value, so update_work_item(itemId, status) changes the status and nothing else. To empty an optional field, name it in clear (description, estimate, labels, epicId); an empty string or an empty label_list is refused with code invalid_argument, as are a field that is both passed and named in clear and a call that passes no field to change. One exception, kept for callers from before clear existed: description passed as an empty or whitespace-only string leaves the item with an empty description, and labels passed as a string with no label in it (\"\", \" \", \" , \") leaves it without labels. A new status puts the item at the end of that column. A claim on the item does not stop an update by another caller: claims are advisory. Pass expected_version to refuse the update with code conflict, changing nothing, when the item was updated or moved after it was read. Returns the work item with its new version: version goes up by one with every update and every move of the item, and not when it is claimed, commented on, linked, given a dependency, or when another item is reordered around it. An unknown itemId is refused with code not_found.")]
     public async Task<WorkItemDto?> UpdateWorkItem(
         [Description("Work item id")] Guid itemId,
         [Description("New title, at most 240 characters")] string? title = null,
@@ -763,7 +781,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Delete a work item.")]
+    [McpServerTool, Description("Delete a work item with its comments, links and dependencies. An unknown itemId is refused with code not_found.")]
     public async Task<DeleteResultDto> DeleteWorkItem(
         [Description("Work item id")] Guid itemId)
     {
@@ -846,22 +864,22 @@ public sealed class KanbanTools(
     private void EnsureWriteScope()
     {
         KanbanToolErrors.ToolBodyEntered();
-        var token = httpContextAccessor.HttpContext?.Items[typeof(McpAuthenticatedToken)] as McpAuthenticatedToken;
-        if (token is null)
+        if (WriteScopeRefusal(httpContextAccessor.HttpContext, authenticationOptions.Value) is { } refusal)
+        {
+            throw refusal;
+        }
+    }
+
+    /// <summary>Why the request may not use a write tool, or null when it may.</summary>
+    public static KanbanToolException? WriteScopeRefusal(HttpContext? httpContext, McpAuthenticationOptions options)
+    {
+        if (httpContext?.Items[typeof(McpAuthenticatedToken)] is not McpAuthenticatedToken token)
         {
             // PAT auth is required but no token reached this request: fail closed rather than allow writes.
-            if (authenticationOptions.Value.RequirePersonalAccessToken)
-            {
-                throw KanbanToolErrors.ScopeDenied(MissingTokenErrorMessage);
-            }
-
-            return;
+            return options.RequirePersonalAccessToken ? KanbanToolErrors.ScopeDenied(MissingTokenErrorMessage) : null;
         }
 
-        if (!token.AllowsWrites)
-        {
-            throw KanbanToolErrors.ScopeDenied(ReadOnlyScopeErrorMessage);
-        }
+        return token.AllowsWrites ? null : KanbanToolErrors.ScopeDenied(ReadOnlyScopeErrorMessage);
     }
 
     private async Task<EpicDto> GetRequiredEpicAsync(Guid epicId) =>

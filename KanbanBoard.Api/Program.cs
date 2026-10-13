@@ -265,7 +265,7 @@ app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limi
 {
     if (!WorkItemSearch.TryNormalizeTerms(query, out _))
     {
-        return Results.BadRequest(new { message = "Field 'query' is required." });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'query' is required.");
     }
 
     return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
@@ -304,7 +304,7 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
     });
     if (!deleted)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Project {projectId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -353,12 +353,12 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     var validationError = ValidateRequiredText(("name", normalizedName));
     if (!await dbContext.Epics.AnyAsync(candidate => candidate.Id == epicId, cancellationToken))
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     if (validationError is not null)
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
     // Archiving holds the rows of several items at once, which can deadlock with other writers.
@@ -401,7 +401,7 @@ app.MapPut("/api/epics/{epicId:guid}", async (Guid epicId, UpdateEpicRequest req
     });
     if (updated is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -415,7 +415,7 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
     var epic = await dbContext.Epics.FirstOrDefaultAsync(candidate => candidate.Id == epicId, cancellationToken);
     if (epic is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic {epicId} was not found.");
     }
 
     // The database would take the items out of the epic by itself (ON DELETE SET NULL), without stamping them.
@@ -473,14 +473,14 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
     var document = await dbContext.EpicDocuments.FirstOrDefaultAsync(candidate => candidate.Id == documentId, cancellationToken);
     if (document is null)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Epic document {documentId} was not found.");
     }
 
     var normalizedTitle = request.Title.Trim();
     var validationError = ValidateRequiredText(("title", normalizedTitle), ("body", request.Body));
     if (validationError is not null)
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
     document.Title = normalizedTitle;
@@ -577,7 +577,7 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
     });
     if (!deleted)
     {
-        return Results.NotFound();
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Work item {itemId} was not found.");
     }
 
     changeNotifier.Publish();
@@ -602,7 +602,9 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup depe
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)
             .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies, links))
-            .ToList());
+            .ToList(),
+        project.RepositoryUrl,
+        project.DefaultBranch);
 
 static EpicDto ToEpicDto(Epic epic) =>
     new(
@@ -635,7 +637,7 @@ static string? ValidateRequiredText(params (string FieldName, string? Value)[] f
     {
         if (string.IsNullOrWhiteSpace(value))
         {
-            return $"Field '{fieldName}' is required.";
+            return $"Argument '{fieldName}' is required.";
         }
     }
 

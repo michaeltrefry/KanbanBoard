@@ -1,7 +1,9 @@
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using KanbanBoard.Mcp.Configuration;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -20,7 +22,8 @@ public sealed class KanbanToolException(string code, string message) : McpExcept
 /// The one error envelope for every tool. A refused call returns a tool result with <c>isError: true</c> whose
 /// <c>structuredContent</c> is <c>{"code": "...", "message": "..."}</c> and whose single text block is that same JSON.
 /// A call whose arguments cannot be read as the tool's parameters, or that passes an argument the tool does not declare,
-/// is refused the same way, with <c>invalid_argument</c>, before the tool runs.
+/// is refused the same way, with <c>invalid_argument</c>, before the tool runs. A call of a write tool by a token that
+/// may not write is refused <c>scope_denied</c> before that, whatever its arguments.
 /// </summary>
 public static class KanbanToolErrors
 {
@@ -145,9 +148,24 @@ public static class KanbanToolErrors
                 $"{tool.ProtocolTool.Name} has no argument '{undeclared}'. Its arguments are: {string.Join(", ", declared)}. Argument names are compared exactly. Nothing was called.");
     }
 
+    // The refusal of a write tool for a request that may not write; null for a read tool and for a request that may.
+    private static KanbanToolException? WriteScopeRefusal(RequestContext<CallToolRequestParams> request) =>
+        request.Params?.Name is { } name && KanbanTools.WriteToolNames.Contains(name) && request.Services is { } services
+            ? KanbanTools.WriteScopeRefusal(
+                services.GetRequiredService<IHttpContextAccessor>().HttpContext,
+                services.GetRequiredService<IOptions<McpAuthenticationOptions>>().Value)
+            : null;
+
     public static IMcpServerBuilder WithKanbanToolErrors(this IMcpServerBuilder builder) =>
         builder.WithRequestFilters(filters => filters.AddCallToolFilter(next => async (request, cancellationToken) =>
         {
+            // The scope comes first: a token that may not write is refused every write tool with scope_denied,
+            // whatever its arguments are, and is not told what is wrong with them.
+            if (WriteScopeRefusal(request) is { } denied)
+            {
+                return ToCallToolResult(denied);
+            }
+
             if (UndeclaredArgument(request) is { } undeclared)
             {
                 return ToCallToolResult(undeclared);

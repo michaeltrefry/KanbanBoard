@@ -140,7 +140,7 @@ public sealed class WorkItemChangeFeedApiTests
                 (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound), (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
                 (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound), (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
                 (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound), (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
-                (HttpStatusCode.NotFound, null),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
                 (HttpStatusCode.OK, null), (HttpStatusCode.OK, null), (HttpStatusCode.OK, null), (HttpStatusCode.OK, null), (HttpStatusCode.OK, null)
             ],
             answers);

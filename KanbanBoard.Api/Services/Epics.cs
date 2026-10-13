@@ -28,8 +28,8 @@ public static class Epics
             IsArchived = isArchived,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
-        error = normalizedName.Length == 0 ? "Field 'name' is required."
-            : normalizedName.Length > EpicLimits.MaxNameLength ? $"Field 'name' must be at most {EpicLimits.MaxNameLength} characters."
+        error = normalizedName.Length == 0 ? "Argument 'name' is required."
+            : normalizedName.Length > EpicLimits.MaxNameLength ? $"Argument 'name' must be at most {EpicLimits.MaxNameLength} characters."
             : string.Empty;
         return error.Length == 0;
     }
@@ -45,9 +45,9 @@ public static class Epics
             Body = body ?? string.Empty,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
-        error = normalizedTitle.Length == 0 ? "Field 'title' is required."
-            : normalizedTitle.Length > EpicLimits.MaxDocumentTitleLength ? $"Field 'title' must be at most {EpicLimits.MaxDocumentTitleLength} characters."
-            : string.IsNullOrWhiteSpace(body) ? "Field 'body' is required."
+        error = normalizedTitle.Length == 0 ? "Argument 'title' is required."
+            : normalizedTitle.Length > EpicLimits.MaxDocumentTitleLength ? $"Argument 'title' must be at most {EpicLimits.MaxDocumentTitleLength} characters."
+            : string.IsNullOrWhiteSpace(body) ? "Argument 'body' is required."
             : string.Empty;
         return error.Length == 0;
     }

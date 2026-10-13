@@ -269,6 +269,9 @@ public sealed class StartupMigrationTests
         /// </summary>
         public List<string> Locks { get; } = [];
 
+        /// <summary>How many commands had been sent when each transaction was started.</summary>
+        public List<int> TransactionStarts { get; } = [];
+
         private DbDataReader Rows(DbCommand command)
         {
             var text = command.CommandText;
@@ -386,13 +389,19 @@ public sealed class StartupMigrationTests
                 culture: null)!;
 
         public InterceptionResult<DbTransaction> TransactionStarting(
-            DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result) =>
-            InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection));
+            DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result)
+        {
+            TransactionStarts.Add(Commands.Count);
+            return InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection));
+        }
 
         public ValueTask<InterceptionResult<DbTransaction>> TransactionStartingAsync(
             DbConnection connection, TransactionStartingEventData eventData, InterceptionResult<DbTransaction> result,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection)));
+            CancellationToken cancellationToken = default)
+        {
+            TransactionStarts.Add(Commands.Count);
+            return ValueTask.FromResult(InterceptionResult<DbTransaction>.SuppressWithResult(BeginFakeTransaction(connection)));
+        }
 
         public InterceptionResult TransactionCommitting(DbTransaction transaction, TransactionEventData eventData, InterceptionResult result)
         {

@@ -154,7 +154,7 @@ For the work item update change (sc-25865) the API alters `WorkItems` on its fir
 
 For the change feed (sc-25866) the API creates the `WorkItemChanges` table on its first start (`20261013013744_AddWorkItemChanges`). Existing data is not touched and gets no rows: the feed holds the writes made from then on, and it is never pruned. `deploy/sql/009_work_item_changes.sql` is the manual equivalent. From this release every write to a work item also takes the MariaDB named lock `kanban_work_item_changes` for the moment it records its entry (see [mariadb-schema.md](mariadb-schema.md)).
 
-For the plan import and the idempotent creates (sc-25867) the API alters the schema on its first start (`20261013132811_AddCreateIdempotencyKeysAndEpicPlanImports`): `WorkItems`, `Epics` and `EpicDocuments` each get a nullable `IdempotencyKeyHash` column with a unique index, and the `EpicPlanImports` table is created. Existing rows keep `NULL` and are not rewritten. Building the unique index on `WorkItems` reads every work item once. `deploy/sql/010_create_idempotency_keys_and_epic_plan_imports.sql` is the manual equivalent. The acceptance script `tools/KanbanBoard.FactoryAcceptance` now creates its own scratch projects (it needs only `KANBAN_MCP_URL` and `KANBAN_FACTORY_TOKEN`, and `KANBAN_FACTORY_READ_TOKEN` for the read-scope checks), runs the eight acceptance tests of the epic and prints one PASS, FAIL or SKIP line for each; every project it creates is left archived.
+For the plan import and the idempotent creates (sc-25867) the API alters the schema on its first start (`20261013132811_AddCreateIdempotencyKeysAndEpicPlanImports`): `WorkItems`, `Epics` and `EpicDocuments` each get a nullable `IdempotencyKeyHash` column with a unique index, and the `EpicPlanImports` table is created. Existing rows keep `NULL` and are not rewritten. Building the unique index on `WorkItems` reads every work item once. `deploy/sql/010_create_idempotency_keys_and_epic_plan_imports.sql` is the manual equivalent. The acceptance script `tools/KanbanBoard.FactoryAcceptance` creates its own scratch projects, runs the eight acceptance tests of the epic and prints one PASS, FAIL or SKIP line for each; every project it creates is left archived. See [Acceptance run](#acceptance-run) for its variables.
 
 ### Factory service identity
 
@@ -184,6 +184,25 @@ Give the orchestrator the full-scope token (and the read-scope token where it on
 - Running it again with the same name (case-insensitive) adds a new token pair to the same identity and leaves the old tokens valid.
 - Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so the MCP server can still accept a revoked token for that long; the API does not: it looks the forwarded token up on every call and refuses a revoked or expired one `scope_denied`, read or write.
 - `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
+
+### Acceptance run
+
+After a deploy of the factory tools, run the acceptance script from a checkout of the deployed commit, with both tokens of the service identity and its name:
+
+```bash
+KANBAN_MCP_URL=https://kanban-mcp.trefry.net/mcp \
+KANBAN_FACTORY_TOKEN=kbp_... \
+KANBAN_FACTORY_READ_TOKEN=kbp_... \
+KANBAN_FACTORY_IDENTITY_NAME=factory \
+dotnet run --project tools/KanbanBoard.FactoryAcceptance
+```
+
+- `KANBAN_MCP_URL`, `KANBAN_FACTORY_TOKEN` and `KANBAN_FACTORY_IDENTITY_NAME` are required; without one of them the script prints a usage message and exits with code 2 before it calls anything.
+- `KANBAN_FACTORY_IDENTITY_NAME` is the name given to `create-service-identity --name`. The script asserts that the token's claims, comments and change-feed entries carry that name: run with a person's token from the settings page, tests 1, 3 and 4 fail.
+- Without `KANBAN_FACTORY_READ_TOKEN` test 7 is skipped, the last line is `ACCEPTANCE INCOMPLETE` and the exit code is 3. Only `ACCEPTANCE PASSED` with exit code 0 is an acceptance: all eight tests ran and every check passed. `ACCEPTANCE FAILED` exits with code 1.
+- The script writes only into scratch projects it creates and leaves archived (keys `ACC`, `ACI`, `ACE` plus 20 hex characters); it can be run again.
+
+The contract the script checks is [mcp-contract.md](mcp-contract.md).
 
 Open inbound ports:
 
@@ -317,5 +336,14 @@ set +a
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
+
+A rollback changes the images, not the database: the schema stays as the newest image left it, and no migration is undone. An image from before the factory work (before the change feed of sc-25866 and the `version` of sc-25865) starts against that schema and works: create, comment, move and delete all succeed. But its writes are not the writes the newer tools promise:
+
+- **They add no entry to the change feed.** A caller that follows `list_changes` does not see what the old image wrote, then or later: the entries are never backfilled. After rolling forward again, such a caller must read the board itself (`list_work_items`) to find the state it missed.
+- **They do not advance `version`.** An `update_work_item` or `move_work_item` with `expected_version`, made after rolling forward, succeeds against an item the old image changed in between: for the writes of that window the guard is unsound.
+
+So while an older image runs, stop the orchestrator, and after rolling forward have it take a new cursor (`list_changes` without `cursor`) and re-read its items before it writes.
+
+The same holds once at the first deploy: **the change feed starts empty.** Writes made before the release with sc-25866 have no entries, so `from_start: true` shows the history from that deploy on, not the board's.
 
 MariaDB data lives in the external MariaDB instance. The application container no longer stores the primary database in `/opt/kanban-board/data`.
