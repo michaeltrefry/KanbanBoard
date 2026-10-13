@@ -32,6 +32,7 @@ public sealed class KanbanToolsScopeTests
         nameof(KanbanTools.AddIssueComment),
         nameof(KanbanTools.CreateWorkItem),
         nameof(KanbanTools.CreateEpicWorkItem),
+        nameof(KanbanTools.ImportEpicPlan),
         nameof(KanbanTools.MoveWorkItem),
         nameof(KanbanTools.UpdateWorkItem),
         nameof(KanbanTools.DeleteWorkItem),

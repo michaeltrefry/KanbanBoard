@@ -19,6 +19,7 @@ public sealed class KanbanToolException(string code, string message) : McpExcept
 /// <summary>
 /// The one error envelope for every tool. A refused call returns a tool result with <c>isError: true</c> whose
 /// <c>structuredContent</c> is <c>{"code": "...", "message": "..."}</c> and whose single text block is that same JSON.
+/// A call whose arguments cannot be read as the tool's parameters is refused the same way, with <c>invalid_argument</c>.
 /// </summary>
 public static class KanbanToolErrors
 {
@@ -94,6 +95,14 @@ public static class KanbanToolErrors
         };
     }
 
+    // An argument that could not be turned into the tool's parameter: a required one that is missing, or JSON of
+    // another type or shape (a string where a list of plan items belongs). The MCP server throws these before the
+    // tool runs, so nothing was called and nothing was written. The same exceptions thrown from inside a tool are
+    // faults of the server, not of the caller, and stay plain errors.
+    private static bool IsMalformedArgument(Exception exception) =>
+        exception is JsonException or ArgumentException &&
+        exception.StackTrace?.Contains(typeof(KanbanTools).FullName!, StringComparison.Ordinal) != true;
+
     public static IMcpServerBuilder WithKanbanToolErrors(this IMcpServerBuilder builder) =>
         builder.WithRequestFilters(filters => filters.AddCallToolFilter(next => async (request, cancellationToken) =>
         {
@@ -104,6 +113,11 @@ public static class KanbanToolErrors
             catch (KanbanToolException exception)
             {
                 return ToCallToolResult(exception);
+            }
+            catch (Exception exception) when (IsMalformedArgument(exception))
+            {
+                return ToCallToolResult(InvalidArgument(
+                    $"An argument of {request.Params?.Name} is missing or is not of the type the tool takes: {exception.Message}"));
             }
         }));
 }

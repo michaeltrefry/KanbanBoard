@@ -27,10 +27,25 @@ public sealed class Epic
     public string Name { get; set; } = string.Empty;
     public string? Description { get; set; }
     public bool IsArchived { get; set; }
+    // IdempotencyKeys.Hash of the idempotency key the epic was created with, or null when none was passed.
+    public string? IdempotencyKeyHash { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public List<EpicDocument> Documents { get; set; } = [];
     public List<WorkItem> Items { get; set; } = [];
+}
+
+// What one import of an epic plan created, kept so that a repeat of its idempotency key answers with the same ids.
+// Written only by EpicPlans, in the transaction of the import, and never updated: it goes with its epic.
+public sealed class EpicPlanImport
+{
+    public Guid EpicId { get; set; }
+    public Epic? Epic { get; set; }
+    public Guid ProjectId { get; set; }
+    // IdempotencyKeys.Hash of the idempotency key of the import.
+    public string IdempotencyKeyHash { get; set; } = string.Empty;
+    // JSON: {"document_ids": [...], "item_ids": {"<ref>": "<id>", ...}}, as the import answered.
+    public string Result { get; set; } = "{}";
 }
 
 public sealed class EpicDocument
@@ -40,6 +55,8 @@ public sealed class EpicDocument
     public Epic? Epic { get; set; }
     public string Title { get; set; } = string.Empty;
     public string Body { get; set; } = string.Empty;
+    // IdempotencyKeys.Hash of the idempotency key the document was created with, or null when none was passed.
+    public string? IdempotencyKeyHash { get; set; }
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
 }
@@ -62,6 +79,8 @@ public sealed class WorkItem
     public string? Labels { get; set; }
     // Counts the writes to the item's own fields. Written only by WorkItemWrites, as Version + 1 inside the UPDATE.
     public long Version { get; set; } = 1;
+    // IdempotencyKeys.Hash of the idempotency key the item was created with, or null when none was passed.
+    public string? IdempotencyKeyHash { get; set; }
     public List<WorkItemComment> Comments { get; set; } = [];
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;

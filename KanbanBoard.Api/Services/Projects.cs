@@ -238,6 +238,16 @@ public static partial class Projects
     }
 
     /// <summary>
+    /// Holds the project's row until the transaction ends and changes nothing; returns 0 when there is no such
+    /// project. The keyed creates of the project's epics and items and the imports into it start with it, so they run
+    /// one at a time (see <see cref="IdempotencyKeys.CreateOnceAsync"/>).
+    /// </summary>
+    public static Task<int> LockAsync(KanbanDbContext dbContext, Guid projectId, CancellationToken cancellationToken) =>
+        dbContext.Projects
+            .Where(project => project.Id == projectId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(project => project.IsArchived, project => project.IsArchived), cancellationToken);
+
+    /// <summary>
     /// Stores a new project. With an <paramref name="idempotencyKeyHash"/> that already belongs to a project,
     /// nothing is written and that project is reported, whatever its fields.
     /// </summary>

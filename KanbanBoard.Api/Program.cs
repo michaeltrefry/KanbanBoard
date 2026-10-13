@@ -117,6 +117,7 @@ app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
 app.MapKanbanInternalApiEndpoints();
 app.MapKanbanProjectEndpoints();
+app.MapKanbanEpicPlanEndpoints();
 app.MapKanbanClaimEndpoints();
 app.MapKanbanDependencyEndpoints();
 app.MapKanbanLinkEndpoints();
@@ -311,35 +312,37 @@ app.MapDelete("/api/projects/{projectId:guid}", async (Guid projectId, HttpConte
 })
 .WithName("DeleteProject");
 
-app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, CreateEpicRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+// With an idempotency key that the caller already used in the project, nothing is created and that epic is returned
+// as it is now, with "created": false.
+app.MapPost("/api/projects/{projectId:guid}/epics", async (Guid projectId, CreateEpicRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
-    var normalizedName = request.Name.Trim();
-    var validationError = ValidateRequiredText(("name", normalizedName));
-    if (validationError is not null)
+    if (!Epics.TryNew(projectId, request.Name, request.Description, request.IsArchived, out var epic, out var validationError))
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
-    var projectExists = await dbContext.Projects.AnyAsync(project => project.Id == projectId, cancellationToken);
-    if (!projectExists)
+    var (keyHash, keyRefusal) = await IdempotencyKeys.HashForRequestAsync(httpContext, dbContext, request.IdempotencyKey, timeProvider.GetUtcNow(), cancellationToken);
+    if (keyRefusal is not null)
     {
-        return Results.NotFound(new { message = "Project not found." });
+        return keyRefusal;
     }
 
-    var epic = new Epic
+    var result = await Epics.CreateAsync(dbContext, epic, keyHash, cancellationToken);
+    var stored = result.Outcome == KeyedCreateOutcome.NotFound
+        ? null
+        : await dbContext.Epics.AsNoTracking().FirstOrDefaultAsync(candidate => candidate.Id == result.Id, cancellationToken);
+    if (stored is null)
     {
-        ProjectId = projectId,
-        Name = normalizedName,
-        Description = request.Description?.Trim(),
-        IsArchived = request.IsArchived,
-        UpdatedAtUtc = DateTimeOffset.UtcNow
-    };
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, "Project not found.");
+    }
 
-    dbContext.Epics.Add(epic);
-    await dbContext.SaveChangesAsync(cancellationToken);
+    if (result.Outcome != KeyedCreateOutcome.Created)
+    {
+        return Results.Ok(ToEpicDto(stored) with { Created = false });
+    }
 
     changeNotifier.Publish();
-    return Results.Created($"/api/epics/{epic.Id}", ToEpicDto(epic));
+    return Results.Created($"/api/epics/{stored.Id}", ToEpicDto(stored) with { Created = true });
 })
 .WithName("CreateEpic");
 
@@ -420,34 +423,37 @@ app.MapDelete("/api/epics/{epicId:guid}", async (Guid epicId, HttpContext httpCo
 })
 .WithName("DeleteEpic");
 
-app.MapPost("/api/epics/{epicId:guid}/documents", async (Guid epicId, CreateEpicDocumentRequest request, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
+// With an idempotency key that the caller already used on the epic, nothing is created and that document is returned
+// as it is now, with "created": false.
+app.MapPost("/api/epics/{epicId:guid}/documents", async (Guid epicId, CreateEpicDocumentRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
-    var normalizedTitle = request.Title.Trim();
-    var validationError = ValidateRequiredText(("title", normalizedTitle), ("body", request.Body));
-    if (validationError is not null)
+    if (!Epics.TryNewDocument(epicId, request.Title, request.Body, out var document, out var validationError))
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
-    var epicExists = await dbContext.Epics.AnyAsync(epic => epic.Id == epicId, cancellationToken);
-    if (!epicExists)
+    var (keyHash, keyRefusal) = await IdempotencyKeys.HashForRequestAsync(httpContext, dbContext, request.IdempotencyKey, timeProvider.GetUtcNow(), cancellationToken);
+    if (keyRefusal is not null)
     {
-        return Results.NotFound(new { message = "Epic not found." });
+        return keyRefusal;
     }
 
-    var document = new EpicDocument
+    var result = await Epics.CreateDocumentAsync(dbContext, document, keyHash, cancellationToken);
+    var stored = result.Outcome == KeyedCreateOutcome.NotFound
+        ? null
+        : await dbContext.EpicDocuments.AsNoTracking().FirstOrDefaultAsync(candidate => candidate.Id == result.Id, cancellationToken);
+    if (stored is null)
     {
-        EpicId = epicId,
-        Title = normalizedTitle,
-        Body = request.Body,
-        UpdatedAtUtc = DateTimeOffset.UtcNow
-    };
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, "Epic not found.");
+    }
 
-    dbContext.EpicDocuments.Add(document);
-    await dbContext.SaveChangesAsync(cancellationToken);
+    if (result.Outcome != KeyedCreateOutcome.Created)
+    {
+        return Results.Ok(ToEpicDocumentDto(stored) with { Created = false });
+    }
 
     changeNotifier.Publish();
-    return Results.Created($"/api/epic-documents/{document.Id}", ToEpicDocumentDto(document));
+    return Results.Created($"/api/epic-documents/{stored.Id}", ToEpicDocumentDto(stored) with { Created = true });
 })
 .WithName("CreateEpicDocument");
 
@@ -476,78 +482,57 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
 })
 .WithName("UpdateEpicDocument");
 
+// With an idempotency key that the caller already used in the project, nothing is created, nothing is recorded in the
+// change feed and that item is returned as it is now, with "created": false.
 app.MapPost("/api/items", async (CreateWorkItemRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
-    var normalizedTitle = request.Title.Trim();
-    var validationError = ValidateRequiredText(("title", normalizedTitle));
-    if (validationError is not null)
+    if (!WorkItemWrites.TryNew(
+            request.ProjectId, request.EpicId, request.Title, request.Description, request.Type, request.Status, request.Priority,
+            request.Estimate, request.Labels, request.LabelList, out var item, out var validationError))
     {
-        return Results.BadRequest(new { message = validationError });
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
     }
 
-    var exists = await dbContext.Projects.AnyAsync(project => project.Id == request.ProjectId, cancellationToken);
-    if (!exists)
+    var now = timeProvider.GetUtcNow();
+    var (keyHash, keyRefusal) = await IdempotencyKeys.HashForRequestAsync(httpContext, dbContext, request.IdempotencyKey, now, cancellationToken);
+    if (keyRefusal is not null)
     {
-        return Results.NotFound(new { message = "Project not found." });
-    }
-
-    if (request.EpicId is not null)
-    {
-        var epicExists = await dbContext.Epics.AnyAsync(
-            epic => epic.Id == request.EpicId && epic.ProjectId == request.ProjectId && !epic.IsArchived,
-            cancellationToken);
-
-        if (!epicExists)
-        {
-            return Results.BadRequest(new { message = "Epic must belong to the same project as the work item and be active." });
-        }
-    }
-
-    if (normalizedTitle.Length > WorkItemLimits.MaxTitleLength)
-    {
-        return Results.BadRequest(new { message = $"Argument 'title' must be at most {WorkItemLimits.MaxTitleLength} characters." });
-    }
-
-    if (!WorkItemWrites.TryNormalizeLabels(request.Labels, request.LabelList, out var labels, out var labelError))
-    {
-        return Results.BadRequest(new { message = labelError });
+        return keyRefusal;
     }
 
     var actor = await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken);
-    var order = await WorkItemWrites.NextOrderAsync(dbContext, request.ProjectId, request.Status, cancellationToken);
-    var item = new WorkItem
+    var result = await WorkItemWrites.CreateAsync(dbContext, item, keyHash, actor, now, cancellationToken);
+    if (result.Outcome == KeyedCreateOutcome.Invalid)
     {
-        ProjectId = request.ProjectId,
-        EpicId = request.EpicId,
-        Title = normalizedTitle,
-        Description = request.Description?.Trim(),
-        Type = request.Type,
-        Status = request.Status,
-        Priority = request.Priority,
-        Order = order,
-        Estimate = request.Estimate,
-        Labels = labels,
-        UpdatedAtUtc = DateTimeOffset.UtcNow
-    };
-
-    await using (var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken))
-    {
-        dbContext.WorkItems.Add(item);
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await WorkItemChangeLog.CommitAsync(
-            dbContext,
-            transaction,
-            WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemCreated, actor, timeProvider.GetUtcNow(), null, WorkItemChangeLog.Snapshot(item)),
-            cancellationToken);
+        return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, result.Message!);
     }
 
-    if (item.EpicId is not null)
+    // The item as it is now: for a repeated key that is the earlier item, whatever this request asked for.
+    var stored = result.Outcome == KeyedCreateOutcome.NotFound
+        ? null
+        : await dbContext.WorkItems
+            .AsNoTracking()
+            .Include(workItem => workItem.Epic)
+            .Include(workItem => workItem.Comments)
+            .FirstOrDefaultAsync(workItem => workItem.Id == result.Id, cancellationToken);
+    if (stored is null)
     {
-        await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
+        return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, "Project not found.");
+    }
+
+    var created = result.Outcome == KeyedCreateOutcome.Created;
+    var dto = WorkItemDtoMapper.ToDto(
+        stored,
+        now,
+        await WorkItemDependencies.LoadAsync(dbContext, stored.Id, cancellationToken),
+        await WorkItemLinks.LoadAsync(dbContext, stored.Id, cancellationToken)) with { Created = created };
+    if (!created)
+    {
+        return Results.Ok(dto);
     }
 
     changeNotifier.Publish();
-    return Results.Created($"/api/items/{item.Id}", ToWorkItemDto(item));
+    return Results.Created($"/api/items/{stored.Id}", dto);
 })
 .WithName("CreateWorkItem");
 
@@ -617,9 +602,8 @@ static EpicDocumentDto ToEpicDocumentDto(EpicDocument document) =>
         document.CreatedAtUtc,
         document.UpdatedAtUtc);
 
-// For an item that was just created, which cannot have dependencies or links yet.
-static WorkItemDto ToWorkItemDto(WorkItem item) =>
-    WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
+static IResult Refusal(int statusCode, string code, string message) =>
+    Results.Json(new KanbanErrorDto(code, message), statusCode: statusCode);
 
 static Task WriteServerSentChangeAsync(HttpResponse response, BoardChangeEvent change, CancellationToken cancellationToken) =>
     response.WriteAsync($"event: changed\ndata: {change.Sequence}\n\n", cancellationToken);

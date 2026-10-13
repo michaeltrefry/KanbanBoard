@@ -286,6 +286,13 @@ public sealed class StartupMigrationTests
                 return new DataTableReader(Enumerable.Range(1, entries).Select(sequence => Single("Sequence", (long)sequence)).ToArray());
             }
 
+            // A save that writes several rows in one command reads one count of rows per statement.
+            var counts = text.Split("SELECT ROW_COUNT()").Length - 1;
+            if (counts > 1)
+            {
+                return new DataTableReader(Enumerable.Range(0, counts).Select(_ => Single("ROW_COUNT()", 1)).ToArray());
+            }
+
             var answer = rows?.Invoke(command) ?? ChangeLogAnswer(command);
             return answer?.CreateDataReader() ?? EmptyHistory();
         }

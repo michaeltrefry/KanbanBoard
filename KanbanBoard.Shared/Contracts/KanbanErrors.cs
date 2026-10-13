@@ -104,6 +104,28 @@ public static class IdempotencyKeyLimits
     public const int MaxLength = 128;
 }
 
+public static class EpicLimits
+{
+    public const int MaxNameLength = 160;
+    public const int MaxDocumentTitleLength = 200;
+}
+
+/// <summary>The most one call of <c>import_epic_plan</c> may carry. A larger plan is refused whole.</summary>
+public static class EpicPlanLimits
+{
+    public const int MaxItems = 200;
+    public const int MaxDocuments = 20;
+
+    /// <summary>The most dependencies of a plan: all <c>blocked_by</c> entries of all its items together.</summary>
+    public const int MaxDependencies = 500;
+
+    /// <summary>The longest <c>ref</c> of an item.</summary>
+    public const int MaxRefLength = 64;
+
+    /// <summary>The largest plan, as the JSON the MCP server sends to the API, in bytes of UTF-8.</summary>
+    public const int MaxRequestBytes = 2 * 1024 * 1024;
+}
+
 public static class ProjectLimits
 {
     public const int MaxNameLength = 160;
