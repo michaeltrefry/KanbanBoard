@@ -94,6 +94,11 @@ public static class WorkItemWrites
     /// Stores a new item at the end of its column and records it in the change feed. With an
     /// <paramref name="idempotencyKeyHash"/> that already belongs to an item of the project, nothing is written, no
     /// entry is recorded and that item is reported, whatever its fields.
+    ///
+    /// With or without a key, the create starts by holding the project's row, like the import of an epic plan
+    /// (<see cref="IdempotencyKeys.CreateOnceAsync"/>): the creates into one project run one at a time, so each
+    /// reads the end of its column after the one before it has committed and no two of them take the same
+    /// <see cref="WorkItem.Order"/>. Do not read the end of the column outside that transaction.
     /// </summary>
     public static async Task<KeyedCreateResult> CreateAsync(
         KanbanDbContext dbContext,
@@ -118,32 +123,18 @@ public static class WorkItemWrites
         Task<bool> EpicIsUsableAsync() =>
             dbContext.Epics.AnyAsync(epic => epic.Id == item.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived, cancellationToken);
 
-        if (idempotencyKeyHash is null)
-        {
-            if (!await dbContext.Projects.AnyAsync(project => project.Id == item.ProjectId, cancellationToken))
-            {
-                return new(KeyedCreateOutcome.NotFound);
-            }
-
-            if (item.EpicId is not null && !await EpicIsUsableAsync())
-            {
-                return new(KeyedCreateOutcome.Invalid, Message: EpicRefusal);
-            }
-
-            item.Order = await NextOrderAsync(dbContext, item.ProjectId, item.Status, cancellationToken);
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-            return await InsertAsync(transaction);
-        }
-
         item.IdempotencyKeyHash = idempotencyKeyHash;
         return await IdempotencyKeys.CreateOnceAsync(
             dbContext,
             () => Projects.LockAsync(dbContext, item.ProjectId, cancellationToken),
-            async () => (await dbContext.WorkItems
-                .AsNoTracking()
-                .Where(candidate => candidate.ProjectId == item.ProjectId && candidate.IdempotencyKeyHash == idempotencyKeyHash)
-                .Select(candidate => new { candidate.Id })
-                .FirstOrDefaultAsync(cancellationToken))?.Id,
+            // A create without a key has no earlier item to find.
+            async () => idempotencyKeyHash is null
+                ? null
+                : (await dbContext.WorkItems
+                    .AsNoTracking()
+                    .Where(candidate => candidate.ProjectId == item.ProjectId && candidate.IdempotencyKeyHash == idempotencyKeyHash)
+                    .Select(candidate => new { candidate.Id })
+                    .FirstOrDefaultAsync(cancellationToken))?.Id,
             async transaction =>
             {
                 // After the look-up of the key: a repeat is not refused because its epic has been archived since.
@@ -190,85 +181,92 @@ public static class WorkItemWrites
             return Invalid(labelError);
         }
 
-        // The UPDATE comes first and holds the item's row until the transaction ends: the updates of one item run
-        // one at a time, and each reads the item only after the one before it has committed.
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var refusal = await AdvanceAsync(
-            dbContext, itemId, patch.ExpectedVersion, setters => setters.SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
-        if (refusal is not null)
+        // The save below can rewrite the item's entries in the indexes on its column and its epic while this
+        // transaction holds the item's row; a delete of the project or an archive of the epic takes the two in the
+        // other order, and MariaDB then rolls one of them back (error 1213). Everything of the attempt is rolled
+        // back with it, the version and the entry of the change feed included, so the update is run again.
+        return await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
         {
-            return refusal;
-        }
+            // The UPDATE comes first and holds the item's row until the transaction ends: the updates of one item run
+            // one at a time, and each reads the item only after the one before it has committed.
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+            var refusal = await AdvanceAsync(
+                dbContext, itemId, patch.ExpectedVersion, setters => setters.SetProperty(item => item.UpdatedAtUtc, now), cancellationToken);
+            if (refusal is not null)
+            {
+                return refusal;
+            }
 
-        var item = await dbContext.WorkItems
-            .Include(workItem => workItem.Epic)
-            .Include(workItem => workItem.Comments)
-            .FirstAsync(workItem => workItem.Id == itemId, cancellationToken);
+            var item = await dbContext.WorkItems
+                .Include(workItem => workItem.Epic)
+                .Include(workItem => workItem.Comments)
+                .FirstAsync(workItem => workItem.Id == itemId, cancellationToken);
 
-        // The row is held, so these are the values this update replaces. The version was advanced just above.
-        var before = WorkItemChangeLog.Snapshot(item);
-        before["version"] = item.Version - 1;
+            // The row is held, so these are the values this update replaces. The version was advanced just above.
+            var before = WorkItemChangeLog.Snapshot(item);
+            before["version"] = item.Version - 1;
 
-        // An epic is checked when the update names one: an update that leaves the epic alone is not refused
-        // because that epic has been archived since.
-        if (patch is { HasEpicId: true, EpicId: not null } &&
-            !await dbContext.Epics.AnyAsync(epic => epic.Id == patch.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived, cancellationToken))
-        {
-            // Leaving the transaction uncommitted takes the version and the stamp back.
-            return Invalid(EpicRefusal);
-        }
+            // An epic is checked when the update names one: an update that leaves the epic alone is not refused
+            // because that epic has been archived since.
+            if (patch is { HasEpicId: true, EpicId: not null } &&
+                !await dbContext.Epics.AnyAsync(epic => epic.Id == patch.EpicId && epic.ProjectId == item.ProjectId && !epic.IsArchived, cancellationToken))
+            {
+                // Leaving the transaction uncommitted takes the version and the stamp back.
+                return Invalid(EpicRefusal);
+            }
 
-        if (patch.HasEpicId)
-        {
-            item.EpicId = patch.EpicId;
-        }
+            if (patch.HasEpicId)
+            {
+                item.EpicId = patch.EpicId;
+            }
 
-        if (patch.HasTitle)
-        {
-            item.Title = title!;
-        }
+            if (patch.HasTitle)
+            {
+                item.Title = title!;
+            }
 
-        if (patch.HasDescription)
-        {
-            item.Description = patch.Description?.Trim();
-        }
+            if (patch.HasDescription)
+            {
+                item.Description = patch.Description?.Trim();
+            }
 
-        if (patch.HasEstimate)
-        {
-            item.Estimate = patch.Estimate;
-        }
+            if (patch.HasEstimate)
+            {
+                item.Estimate = patch.Estimate;
+            }
 
-        if (patch.HasLabels)
-        {
-            item.Labels = labels;
-        }
+            if (patch.HasLabels)
+            {
+                item.Labels = labels;
+            }
 
-        item.Type = patch.Type ?? item.Type;
-        item.Priority = patch.Priority ?? item.Priority;
-        if (patch.Status is { } status && status != item.Status)
-        {
-            // A new column: the item goes to its end.
-            item.Status = status;
-            item.Order = await NextOrderAsync(dbContext, item.ProjectId, status, cancellationToken);
-        }
+            item.Type = patch.Type ?? item.Type;
+            item.Priority = patch.Priority ?? item.Priority;
+            if (patch.Status is { } status && status != item.Status)
+            {
+                // A new column: the item goes to its end.
+                item.Status = status;
+                item.Order = await NextOrderAsync(dbContext, item.ProjectId, status, cancellationToken);
+            }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await WorkItemChangeLog.CommitAsync(
-            dbContext,
-            transaction,
-            WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemUpdated, actor, now, before, WorkItemChangeLog.Snapshot(item)),
-            cancellationToken);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await WorkItemChangeLog.CommitAsync(
+                dbContext,
+                transaction,
+                WorkItemChangeLog.Entry(item.Id, item.ProjectId, WorkItemChangeKinds.ItemUpdated, actor, now, before, WorkItemChangeLog.Snapshot(item)),
+                cancellationToken);
 
-        if (item.EpicId is null)
-        {
-            item.Epic = null;
-        }
-        else
-        {
-            await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
-        }
+            if (item.EpicId is null)
+            {
+                item.Epic = null;
+            }
+            else
+            {
+                await dbContext.Entry(item).Reference(workItem => workItem.Epic).LoadAsync(cancellationToken);
+            }
 
-        return new(WorkItemWriteOutcome.Succeeded, item);
+            return new WorkItemWriteResult(WorkItemWriteOutcome.Succeeded, item);
+        });
     }
 
     /// <summary>
@@ -292,16 +290,20 @@ public static class WorkItemWrites
         ILogger logger,
         CancellationToken cancellationToken)
     {
-        WorkItem? moved;
-        await using (var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken))
+        // The UPDATE rewrites the item's entry in the index on its column while the transaction holds the item's
+        // row; a delete of the project or an archive of the epic takes the two in the other order, and MariaDB then
+        // rolls one of them back (error 1213). The whole attempt is rolled back, the version and the entry of the
+        // change feed included, so the move is run again: it is recorded once and advances the version once.
+        var (refused, moved) = await WorkItemChangeLog.RetryDeadlocksAsync<(WorkItemWriteResult? Refused, WorkItem? Moved)>(dbContext, async () =>
         {
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
             // The UPDATE below overwrites the column and the position, so the item is held and read first: the
             // entry of the change feed reports the values this move replaces.
             await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
             var before = await dbContext.WorkItems.AsNoTracking().FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
             if (before is null)
             {
-                return new(WorkItemWriteOutcome.NotFound);
+                return (new(WorkItemWriteOutcome.NotFound), null);
             }
 
             var refusal = await AdvanceAsync(
@@ -315,25 +317,30 @@ public static class WorkItemWrites
                 cancellationToken);
             if (refusal is not null)
             {
-                return refusal;
+                return (refusal, null);
             }
 
             // Read while the UPDATE still holds the row, so the item that is returned carries this move's version.
-            moved = await dbContext.WorkItems
+            var written = await dbContext.WorkItems
                 .AsNoTracking()
                 .Include(workItem => workItem.Epic)
                 .Include(workItem => workItem.Comments)
                 .FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-            if (moved is null)
+            if (written is null)
             {
-                return new(WorkItemWriteOutcome.NotFound);
+                return (new(WorkItemWriteOutcome.NotFound), null);
             }
 
             await WorkItemChangeLog.CommitAsync(
                 dbContext,
                 transaction,
-                WorkItemChangeLog.Entry(itemId, moved.ProjectId, WorkItemChangeKinds.ItemMoved, actor, now, WorkItemChangeLog.Snapshot(before), WorkItemChangeLog.Snapshot(moved)),
+                WorkItemChangeLog.Entry(itemId, written.ProjectId, WorkItemChangeKinds.ItemMoved, actor, now, WorkItemChangeLog.Snapshot(before), WorkItemChangeLog.Snapshot(written)),
                 cancellationToken);
+            return (null, written);
+        });
+        if (moved is null)
+        {
+            return refused!;
         }
 
         // The siblings are written after that transaction, without holding the moved item's row. Each save writes

@@ -60,12 +60,19 @@ public sealed class KanbanTools(
         Converters = { new JsonStringEnumConverter() }
     };
 
+    // The body of an import: every character as itself, so that the size that is checked is the size of the plan and
+    // not of its escapes (the default writes <, >, &, ', + and every non-ASCII character as six bytes).
+    private static readonly JsonSerializerOptions PlanJsonOptions = new(JsonOptions)
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     [McpServerTool, Description("List all projects in the kanban board. Each project carries repository_url and default_branch, the repository and branch its work is done in; both are null when not set.")]
     public async Task<IReadOnlyList<ProjectSummaryDto>> ListProjects(
         [Description("Whether to include archived projects")] bool includeArchived = false)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
-        return await client.GetFromJsonAsync<IReadOnlyList<ProjectSummaryDto>>($"/api/projects?includeArchived={includeArchived}", JsonOptions)
+        KanbanToolErrors.ToolBodyEntered();
+        return await GetAsync<IReadOnlyList<ProjectSummaryDto>>($"/api/projects?includeArchived={includeArchived}")
             ?? [];
     }
 
@@ -122,7 +129,7 @@ public sealed class KanbanTools(
         [Description("Optional status filter")] WorkItemStatus? status = null,
         [Description("Whether to include items that belong to archived epics")] bool includeArchivedEpics = false)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
+        KanbanToolErrors.ToolBodyEntered();
         var path = $"/api/projects/{projectId}";
         var parameters = new List<string>();
         if (status is not null)
@@ -140,7 +147,7 @@ public sealed class KanbanTools(
             path = $"{path}?{string.Join('&', parameters)}";
         }
 
-        return await client.GetFromJsonAsync<ProjectBoardDto>(path, JsonOptions);
+        return await GetAsync<ProjectBoardDto>(path, $"Project {projectId} was not found.");
     }
 
     [McpServerTool, Description("List epics that belong to a project.")]
@@ -148,16 +155,16 @@ public sealed class KanbanTools(
         [Description("Project id")] Guid projectId,
         [Description("Whether to include archived epics")] bool includeArchived = false)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
-        return await client.GetFromJsonAsync<IReadOnlyList<EpicDto>>($"/api/projects/{projectId}/epics?includeArchived={includeArchived}", JsonOptions) ?? [];
+        KanbanToolErrors.ToolBodyEntered();
+        return await GetAsync<IReadOnlyList<EpicDto>>($"/api/projects/{projectId}/epics?includeArchived={includeArchived}") ?? [];
     }
 
     [McpServerTool, Description("Fetch a single epic.")]
     public async Task<EpicDto?> GetEpic(
         [Description("Epic id")] Guid epicId)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
-        return await client.GetFromJsonAsync<EpicDto>($"/api/epics/{epicId}", JsonOptions);
+        KanbanToolErrors.ToolBodyEntered();
+        return await GetAsync<EpicDto>($"/api/epics/{epicId}", $"Epic {epicId} was not found.");
     }
 
     [McpServerTool, Description("Create an epic in a project." + RepeatedKeyInProject + " An unknown projectId is refused with code not_found, a name that is empty or longer than 160 characters with invalid_argument.")]
@@ -215,16 +222,16 @@ public sealed class KanbanTools(
     public async Task<IReadOnlyList<EpicDocumentDto>> ListEpicDocuments(
         [Description("Epic id")] Guid epicId)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
-        return await client.GetFromJsonAsync<IReadOnlyList<EpicDocumentDto>>($"/api/epics/{epicId}/documents", JsonOptions) ?? [];
+        KanbanToolErrors.ToolBodyEntered();
+        return await GetAsync<IReadOnlyList<EpicDocumentDto>>($"/api/epics/{epicId}/documents") ?? [];
     }
 
     [McpServerTool, Description("Fetch a single epic document.")]
     public async Task<EpicDocumentDto?> GetEpicDocument(
         [Description("Epic document id")] Guid documentId)
     {
-        var client = httpClientFactory.CreateClient("kanban-api");
-        return await client.GetFromJsonAsync<EpicDocumentDto>($"/api/epic-documents/{documentId}", JsonOptions);
+        KanbanToolErrors.ToolBodyEntered();
+        return await GetAsync<EpicDocumentDto>($"/api/epic-documents/{documentId}", $"Epic document {documentId} was not found.");
     }
 
     [McpServerTool, Description("Create a document for an epic. Pass idempotency_key to make the call safe to repeat: when the same identity already used the key on this epic, nothing is created and the document it created is returned as it is now, whatever the other arguments. The answer carries created (false for a repeat). An unknown epicId is refused with code not_found, an empty body or a title that is empty or longer than 200 characters with invalid_argument.")]
@@ -269,6 +276,7 @@ public sealed class KanbanTools(
         [Description("next_cursor of the previous page, passed back unchanged together with the same filters. Each matching item is returned exactly once across the pages, also when items are moved or edited in between. Page size is 50 when limit is not passed.")] string? cursor = null,
         [Description("When false, every item is returned with an empty comments list and no comment is read")] bool include_comments = true)
     {
+        KanbanToolErrors.ToolBodyEntered();
         var added = new List<string>();
         void Add(string name, string? value)
         {
@@ -303,6 +311,7 @@ public sealed class KanbanTools(
         bool unblockedOnly = false,
         IEnumerable<string>? added = null)
     {
+        KanbanToolErrors.ToolBodyEntered();
         var client = httpClientFactory.CreateClient("kanban-api");
         var parameters = new List<string>();
 
@@ -352,6 +361,7 @@ public sealed class KanbanTools(
     public async Task<WorkItemDto> GetWorkItem(
         [Description("Work item id")] Guid itemId)
     {
+        KanbanToolErrors.ToolBodyEntered();
         var client = httpClientFactory.CreateClient("kanban-api");
         using var response = await client.GetAsync($"/api/items/{itemId}");
         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -359,7 +369,7 @@ public sealed class KanbanTools(
             throw KanbanToolErrors.NotFound($"Work item {itemId} was not found.");
         }
 
-        response.EnsureSuccessStatusCode();
+        await KanbanToolErrors.EnsureSuccessAsync(response);
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions)
             ?? throw KanbanToolErrors.NotFound($"Work item {itemId} was not found.");
     }
@@ -438,6 +448,7 @@ public sealed class KanbanTools(
     public async Task<IReadOnlyList<WorkItemDto>> FindWorkItemsByLink(
         [Description("The URL, exactly as it was added: URLs are compared character for character")] string url)
     {
+        KanbanToolErrors.ToolBodyEntered();
         // A URL too long for the request line never reaches the API. The API drops surrounding whitespace as well.
         url = url.Trim();
         if (!WorkItemLinkLimits.FitsLookup(url))
@@ -457,12 +468,12 @@ public sealed class KanbanTools(
         [Description("Optional project id to limit the search to")] Guid? projectId = null,
         [Description("Optional maximum number of results (default 25, max 100)")] int? limit = null)
     {
+        KanbanToolErrors.ToolBodyEntered();
         if (string.IsNullOrWhiteSpace(query))
         {
-            throw new ModelContextProtocol.McpException("Search query is required.");
+            throw KanbanToolErrors.InvalidArgument("Search query is required.");
         }
 
-        var client = httpClientFactory.CreateClient("kanban-api");
         var parameters = new List<string> { $"query={Uri.EscapeDataString(query)}" };
         if (projectId is not null)
         {
@@ -474,9 +485,7 @@ public sealed class KanbanTools(
             parameters.Add($"limit={limit}");
         }
 
-        return await client.GetFromJsonAsync<IReadOnlyList<WorkItemSearchResultDto>>(
-            $"/api/items/search?{string.Join('&', parameters)}",
-            JsonOptions) ?? [];
+        return await GetAsync<IReadOnlyList<WorkItemSearchResultDto>>($"/api/items/search?{string.Join('&', parameters)}") ?? [];
     }
 
     [McpServerTool, Description("List work items that belong to a specific epic backlog.")]
@@ -511,12 +520,13 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Add a comment to an issue. Same as add_work_item_comment without an idempotency key: with a personal access token the author is the token's identity and the author argument is ignored.")]
+    [McpServerTool, Description("Add a comment to an issue. Same as add_work_item_comment, with author required: with a personal access token the author is the token's identity and the author argument is ignored. Pass idempotency_key to make the call safe to repeat: add_issue_comment and add_work_item_comment share their keys, so when the same identity already used the key on this item with either tool, nothing is added and the earlier comment is reported. Returns the work item with all its comments, plus comment_id and comment_created (false for a repeat).")]
     public Task<WorkItemDto?> AddIssueComment(
         [Description("Issue work item id")] Guid itemId,
         [Description("Comment author, used only when the call carries no personal access token")] string author,
-        [Description("Comment text")] string body) =>
-        AddWorkItemComment(itemId, body, author);
+        [Description("Comment text")] string body,
+        [Description("Caller-chosen key for this comment, such as a run id plus a step name: " + IdempotencyKeyRules + " It belongs to the calling identity and this work item.")] string? idempotency_key = null) =>
+        AddWorkItemComment(itemId, body, author, idempotency_key);
 
     [McpServerTool, Description("List the comments of work item id, oldest first, one page at a time: an object {\"items\": [...], \"next_cursor\": \"...\"}, where next_cursor is left out on the last page. Each comment is {id, workItemId, author, author_id, body, createdAtUtc}: author_id is the id of the identity whose token wrote the comment and is left out for a comment written without a token; author is that identity's name when the comment was written, or the name the writer gave. An unknown id is refused with code not_found, a limit outside 1 to 200 or a malformed cursor with invalid_argument.")]
     public async Task<WorkItemCommentPageDto> ListWorkItemComments(
@@ -524,6 +534,7 @@ public sealed class KanbanTools(
         [Description("Page size, 1 to 200. 50 when not passed.")] int? limit = null,
         [Description("next_cursor of the previous page, passed back unchanged. Each comment is returned exactly once across the pages, also when comments are added in between: a new comment always comes after every earlier one.")] string? cursor = null)
     {
+        KanbanToolErrors.ToolBodyEntered();
         var parameters = new List<string>();
         if (limit is not null)
         {
@@ -549,6 +560,7 @@ public sealed class KanbanTools(
         [Description("Most entries to return, 1 to 200. 50 when not passed.")] int? limit = null,
         [Description("true reads from the oldest entry of the feed. Cannot be combined with cursor.")] bool from_start = false)
     {
+        KanbanToolErrors.ToolBodyEntered();
         var parameters = new List<string>();
         if (cursor is not null)
         {
@@ -625,7 +637,7 @@ public sealed class KanbanTools(
     {
         EnsureWriteScope();
         var client = httpClientFactory.CreateClient("kanban-api");
-        var epic = await GetRequiredEpicAsync(client, epicId);
+        var epic = await GetRequiredEpicAsync(epicId);
 
         using var response = await client.PostAsJsonAsync("/api/items", new CreateWorkItemRequest(
             epic.ProjectId,
@@ -644,7 +656,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<WorkItemDto>(JsonOptions);
     }
 
-    [McpServerTool, Description("Turn a plan into a board in one call: creates one epic in the project, the plan's documents as documents of that epic, its items as work items of that epic, and the dependencies its items name with blocked_by, all in one transaction. Either everything is created or nothing is: a plan with a malformed item, a ref used twice, a blocked_by that names no item of the plan, or a dependency cycle is refused and leaves no epic, document, item or dependency behind. Only the structure of the plan is checked. The idempotency_key is required and makes the call safe to repeat: when the same identity already used the key in this project, nothing is created and the answer is the one the first import gave, with created false, whatever the plan of the repeat says and whatever has happened to the objects since. Returns {created, project_id, epic_id, document_ids, item_ids}: document_ids in the order of the plan, item_ids an object that maps each ref of the plan to the id of the work item created for it. Items are put at the end of their columns in the order of the plan, at version 1. The change feed gets one item_created entry per item and then one dependency_added entry per dependency, with the calling identity as actor. A plan holds at most 200 items, 20 documents and 500 dependencies and is at most 2 MB (2097152 bytes) of JSON. Refused with code not_found for an unknown project_id, cycle for a dependency cycle (an item blocked by itself included), invalid_argument for every other fault of the plan or of the key, and busy, with nothing created, when other writers kept it waiting 10 seconds; retry with the same key.")]
+    [McpServerTool, Description("Turn a plan into a board in one call: creates one epic in the project, the plan's documents as documents of that epic, its items as work items of that epic, and the dependencies its items name with blocked_by, all in one transaction. Either everything is created or nothing is: a plan with a malformed item, a ref used twice, a blocked_by that names no item of the plan, or a dependency cycle is refused and leaves no epic, document, item or dependency behind. Only the structure of the plan is checked. The idempotency_key is required and makes the call safe to repeat: when the same identity already used the key in this project, nothing is created and the answer is the one the first import gave, with created false, whatever the plan of the repeat says and whatever has happened to the objects since. The key lasts as long as the epic: delete_epic frees it and leaves the items of the import in the project without an epic, so a repeat after that creates a second epic and a second set of items, and a repeat that meets the delete while it runs is refused with code conflict, creating nothing. Returns {created, project_id, epic_id, document_ids, item_ids}: document_ids in the order of the plan, item_ids an object that maps each ref of the plan to the id of the work item created for it. Items are put at the end of their columns in the order of the plan, at version 1. The change feed gets one item_created entry per item and then one dependency_added entry per dependency, with the calling identity as actor. A plan holds at most 200 items, 20 documents and 500 dependencies and is at most 2 MB (2097152 bytes) of JSON. Refused with code not_found for an unknown project_id, cycle for a dependency cycle (an item blocked by itself included), invalid_argument for every other fault of the plan or of the key (an argument the tool does not have included), conflict when the epic of the key was deleted while the call ran, and busy, with nothing created, when other writers kept it waiting 10 seconds; retry with the same key.")]
     public async Task<ImportEpicPlanResultDto> ImportEpicPlan(
         [Description("Id of the project the epic is created in")] Guid project_id,
         [Description("The epic to create: {name, description?}. name is at most 160 characters.")] ImportEpicPlanEpic epic,
@@ -653,7 +665,7 @@ public sealed class KanbanTools(
         [Description("Documents to create on the epic, at most 20: {title, body}. title is at most 200 characters.")] ImportEpicPlanDocument[]? documents = null)
     {
         EnsureWriteScope();
-        var body = JsonSerializer.SerializeToUtf8Bytes(new ImportEpicPlanRequest(epic, items, idempotency_key, documents), JsonOptions);
+        var body = JsonSerializer.SerializeToUtf8Bytes(new ImportEpicPlanRequest(epic, items, idempotency_key, documents), PlanJsonOptions);
         if (body.Length > EpicPlanLimits.MaxRequestBytes)
         {
             // A plan this large never reaches the API.
@@ -802,6 +814,21 @@ public sealed class KanbanTools(
         return body;
     }
 
+    // A read, with API refusals turned into the typed error envelope: an id the API does not know is not_found.
+    // notFound: what to say when the API answers 404 without a message of its own.
+    private async Task<TResult?> GetAsync<TResult>(string path, string? notFound = null)
+    {
+        var client = httpClientFactory.CreateClient("kanban-api");
+        using var response = await client.GetAsync(path);
+        if (notFound is not null && response.StatusCode == System.Net.HttpStatusCode.NotFound && response.Content.Headers.ContentLength is null or 0)
+        {
+            throw KanbanToolErrors.NotFound(notFound);
+        }
+
+        await KanbanToolErrors.EnsureSuccessAsync(response);
+        return await response.Content.ReadFromJsonAsync<TResult>(JsonOptions);
+    }
+
     // A write that returns the work item, with API refusals turned into the typed error envelope.
     private async Task<WorkItemDto> SendWorkItemWriteAsync(Func<HttpClient, Task<HttpResponseMessage>> send)
     {
@@ -813,10 +840,12 @@ public sealed class KanbanTools(
             ?? throw new InvalidOperationException($"The Kanban API returned no work item for {response.RequestMessage?.RequestUri?.AbsolutePath}.");
     }
 
-    // Write tools call this before touching the API. Tools that do not call it are read tools
-    // and stay available to 'read' scope tokens without any change.
+    // Write tools call this before touching the API, as their first statement: it also says that the body of the tool
+    // has started (see KanbanToolErrors.ToolBodyEntered). Tools that do not call it are read tools, which say so
+    // themselves, and stay available to 'read' scope tokens without any change.
     private void EnsureWriteScope()
     {
+        KanbanToolErrors.ToolBodyEntered();
         var token = httpContextAccessor.HttpContext?.Items[typeof(McpAuthenticatedToken)] as McpAuthenticatedToken;
         if (token is null)
         {
@@ -835,9 +864,7 @@ public sealed class KanbanTools(
         }
     }
 
-    private async Task<EpicDto> GetRequiredEpicAsync(HttpClient client, Guid epicId)
-    {
-        var epic = await client.GetFromJsonAsync<EpicDto>($"/api/epics/{epicId}", JsonOptions);
-        return epic ?? throw new InvalidOperationException($"Epic {epicId} was not found.");
-    }
+    private async Task<EpicDto> GetRequiredEpicAsync(Guid epicId) =>
+        await GetAsync<EpicDto>($"/api/epics/{epicId}", $"Epic {epicId} was not found.")
+            ?? throw KanbanToolErrors.NotFound($"Epic {epicId} was not found.");
 }

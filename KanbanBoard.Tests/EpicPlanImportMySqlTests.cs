@@ -205,6 +205,72 @@ public sealed class EpicPlanImportMySqlTests
     }
 
     [Fact]
+    public async Task An_item_without_a_key_holds_the_project_before_it_reads_the_column_end_and_looks_for_no_key()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer()) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+        var item = new WorkItem { ProjectId = ProjectId, Title = "Item", Status = WorkItemStatus.Ready };
+
+        var result = await WorkItemWrites.CreateAsync(dbContext, item, null, null, Now, CancellationToken.None);
+
+        Assert.Equal(new KeyedCreateResult(KeyedCreateOutcome.Created, item.Id), result);
+        var texts = WithoutChangeLogEntry(Texts(database), readsProject: false);
+        Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
+        // The same first statement as a keyed create and an import: the creates into one project run one at a time,
+        // so the end of the column that is read next is the one this item is put at.
+        Assert.Equal(LockProject, texts[0]);
+        Assert.Equal(NextOrder, texts[1]);
+        Assert.StartsWith("INSERT INTO `WorkItems` (", texts[2], StringComparison.Ordinal);
+        Assert.Equal((null, 5), (item.IdempotencyKeyHash, item.Order));
+        Assert.Equal([$"GET {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemChangeLog.LockName}"], LocksAroundTheCommit(database));
+    }
+
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(3, false)]
+    public async Task An_item_without_a_key_that_deadlocks_is_created_again_once_or_refused_busy(int deadlocks, bool created)
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer())
+        {
+            NonQueryResult = 1,
+            Fail = command => command.CommandText.StartsWith("INSERT INTO `WorkItems`", StringComparison.Ordinal) && deadlocks-- > 0
+                ? WorkItemDeadlockRetryMySqlTests.MySqlFailure(1213)
+                : null
+        };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+        var item = new WorkItem { ProjectId = ProjectId, Title = "Item", Status = WorkItemStatus.Ready };
+
+        var create = () => WorkItemWrites.CreateAsync(dbContext, item, null, null, Now, CancellationToken.None);
+
+        if (created)
+        {
+            Assert.Equal(new KeyedCreateResult(KeyedCreateOutcome.Created, item.Id), await create());
+        }
+        else
+        {
+            await Assert.ThrowsAsync<KanbanBusyException>(create);
+        }
+
+        var texts = Texts(database);
+        // Every attempt starts again from the statement that holds the project.
+        Assert.Equal(created ? 2 : 3, texts.Count(text => text == LockProject));
+        Assert.Equal(created ? 2 : 3, texts.Count(text => text.StartsWith("INSERT INTO `WorkItems`", StringComparison.Ordinal)));
+        Assert.Equal(created ? 1 : 0, texts.Count(text => text.StartsWith("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task An_item_without_a_key_for_a_project_that_does_not_exist_is_not_found_and_reads_nothing()
+    {
+        var database = new FakeDatabase(lockResult: 1, Answer()) { NonQueryResult = 0 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        var result = await WorkItemWrites.CreateAsync(dbContext, new WorkItem { ProjectId = ProjectId, Title = "Item" }, null, null, Now, CancellationToken.None);
+
+        Assert.Equal(new KeyedCreateResult(KeyedCreateOutcome.NotFound), result);
+        Assert.Equal([LockProject], Texts(database));
+    }
+
+    [Fact]
     public async Task A_keyed_item_for_an_epic_checks_the_epic_after_the_key()
     {
         var database = new FakeDatabase(lockResult: 1, Answer()) { NonQueryResult = 1 };

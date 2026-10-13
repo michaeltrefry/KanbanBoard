@@ -553,23 +553,33 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
 
     // The item is held before it is read, so the entry of the change feed reports the item as it was deleted. So
     // are the dependencies in which it blocks another item: the database deletes them with it, and each is a change
-    // to the item it blocked.
-    await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-    await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
-    var blocking = dbContext.WorkItemDependencies.Where(edge => edge.BlockerItemId == itemId);
-    await WorkItemDependencies.HoldAsync(blocking, cancellationToken);
-    var item = await dbContext.WorkItems.FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
-    if (item is null)
+    // to the item it blocked. The delete takes the item's entries out of the indexes while it holds the item's row,
+    // and a delete of the project or an archive of the epic takes the two in the other order: a deadlock is run again.
+    var deleted = await WorkItemChangeLog.RetryDeadlocksAsync(dbContext, async () =>
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        await WorkItemChangeLog.LockItemAsync(dbContext, itemId, cancellationToken);
+        var blocking = dbContext.WorkItemDependencies.Where(edge => edge.BlockerItemId == itemId);
+        await WorkItemDependencies.HoldAsync(blocking, cancellationToken);
+        var item = await dbContext.WorkItems.FirstOrDefaultAsync(workItem => workItem.Id == itemId, cancellationToken);
+        if (item is null)
+        {
+            return false;
+        }
+
+        var now = timeProvider.GetUtcNow();
+        var entries = await WorkItemDependencies.RemovedWithBlockersAsync(blocking, null, actor, now, cancellationToken);
+        entries.Add(WorkItemChangeLog.Entry(itemId, item.ProjectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null));
+        dbContext.WorkItems.Remove(item);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await WorkItemChangeLog.CommitAsync(dbContext, transaction, entries, cancellationToken);
+        return true;
+    });
+    if (!deleted)
     {
         return Results.NotFound();
     }
 
-    var now = timeProvider.GetUtcNow();
-    var entries = await WorkItemDependencies.RemovedWithBlockersAsync(blocking, null, actor, now, cancellationToken);
-    entries.Add(WorkItemChangeLog.Entry(itemId, item.ProjectId, WorkItemChangeKinds.ItemDeleted, actor, now, WorkItemChangeLog.Snapshot(item), null));
-    dbContext.WorkItems.Remove(item);
-    await dbContext.SaveChangesAsync(cancellationToken);
-    await WorkItemChangeLog.CommitAsync(dbContext, transaction, entries, cancellationToken);
     changeNotifier.Publish();
     return Results.NoContent();
 })

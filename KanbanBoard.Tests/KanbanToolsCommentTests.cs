@@ -27,7 +27,9 @@ public sealed class KanbanToolsCommentTests
         // itemId, author and body are the arguments the tool has always had; author is no longer required.
         Assert.Equal(["author", "body", "idempotency_key", "itemId"], ArgumentNames(tools["add_work_item_comment"]));
         Assert.Equal(["body", "itemId"], RequiredArguments(tools["add_work_item_comment"]));
-        Assert.Equal(["author", "body", "itemId"], ArgumentNames(tools["add_issue_comment"]));
+        // add_issue_comment keeps its three required arguments and gains the optional key.
+        Assert.Equal(["author", "body", "idempotency_key", "itemId"], ArgumentNames(tools["add_issue_comment"]));
+        Assert.Equal(["author", "body", "itemId"], RequiredArguments(tools["add_issue_comment"]));
         Assert.Equal(["cursor", "id", "limit"], ArgumentNames(tools["list_work_item_comments"]));
         Assert.Equal(["id"], RequiredArguments(tools["list_work_item_comments"]));
     }
@@ -54,6 +56,28 @@ public sealed class KanbanToolsCommentTests
         Assert.Contains("\"comment_created\":true", text, StringComparison.Ordinal);
         // The comment exactly as the API sent it: same names, same values.
         Assert.Contains($"\"comments\":[{CommentJson}]", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Add_issue_comment_posts_its_idempotency_key_to_the_same_endpoint_and_returns_the_comment_of_a_repeat()
+    {
+        var repeated = CommentedItemJson.Replace("\"comment_created\":true", "\"comment_created\":false", StringComparison.Ordinal);
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Full, _ => Json(HttpStatusCode.OK, repeated));
+
+        var viaIssue = await server.CallAsync("add_issue_comment", new() { ["itemId"] = ItemId, ["author"] = "claude", ["body"] = "shipped", ["idempotency_key"] = "run-1:done" });
+        var viaItem = await server.CallAsync("add_work_item_comment", new() { ["itemId"] = ItemId, ["author"] = "claude", ["body"] = "shipped", ["idempotency_key"] = "run-1:done" });
+
+        Assert.NotEqual(true, viaIssue.IsError);
+        // The two tools send the same request, so they share their keys: the API scopes a key to the item and the caller.
+        Assert.Equal(2, server.Api.Requests.Count);
+        Assert.Equal(server.Api.Requests[1], server.Api.Requests[0]);
+        Assert.Equal((HttpMethod.Post, $"/api/items/{ItemId}/comments"), (server.Api.Requests[0].Method, server.Api.Requests[0].Path));
+        using var body = JsonDocument.Parse(server.Api.Requests[0].Body);
+        Assert.Equal("run-1:done", body.RootElement.GetProperty("idempotencyKey").GetString());
+        // The earlier comment, as the API reports it for a repeat.
+        Assert.Equal(Text(viaItem), Text(viaIssue));
+        Assert.Contains("\"comment_id\":\"77777777-7777-7777-7777-777777777777\"", Text(viaIssue), StringComparison.Ordinal);
+        Assert.Contains("\"comment_created\":false", Text(viaIssue), StringComparison.Ordinal);
     }
 
     [Fact]

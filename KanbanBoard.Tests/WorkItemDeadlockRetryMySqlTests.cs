@@ -18,7 +18,9 @@ namespace KanbanBoard.Tests;
 
 // The writes that hold the rows of several items at once (deleting a project, archiving or deleting an epic), on
 // the real application (Program.cs) with the SQL MySql.EntityFrameworkCore writes: MariaDB can pick them as the
-// victim of a deadlock (error 1213), which SQLite never does. FakeDatabase records each command and answers it.
+// victim of a deadlock (error 1213), which SQLite never does. So can a write to one item that rewrites the item's
+// index entries while it holds the item's row (a move, an update, a delete), when it meets one of those.
+// FakeDatabase records each command and answers it.
 public sealed class WorkItemDeadlockRetryMySqlTests
 {
     private const string HoldItems = "SET `Version` = `w`.`Version`";
@@ -78,6 +80,85 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         Assert.DoesNotContain(texts, text =>
             text.Contains("INSERT INTO", StringComparison.Ordinal) || text.Contains("DELETE FROM", StringComparison.Ordinal) || text.Contains("UPDATE `Epics`", StringComparison.Ordinal));
         Assert.DoesNotContain("COMMIT", database.Locks);
+    }
+
+    private const string HoldOneItem = "SET `Version` = `w`.`Version`\nWHERE `w`.`Id` = @itemId";
+    private const string AdvanceVersion = "SET `Version` = `w`.`Version` + 1";
+
+    // A write to one item, the statement of it that deadlocks, and the entries it records.
+    public static TheoryData<string, string, string?, string, int> ItemWrites => new()
+    {
+        // The move, at the statement that holds the item and at the one that rewrites its column and position.
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", HoldOneItem, 1 },
+        { "POST", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}/move", """{"status":"Done","order":0}""", AdvanceVersion, 1 },
+        { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", AdvanceVersion, 1 },
+        // The save that moves the item to its new column, after the version was advanced.
+        { "PATCH", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", """{"status":"Done"}""", "UPDATE `WorkItems` SET `Status`", 1 },
+        // One entry for the item that was blocked, one for the item that was deleted.
+        { "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", null, HoldOneItem, 2 },
+        { "DELETE", $"/api/items/{WorkItemUpdateMySqlTests.ItemId}", null, "DELETE FROM `WorkItems`", 2 }
+    };
+
+    [Theory]
+    [MemberData(nameof(ItemWrites))]
+    public async Task A_write_to_one_item_that_was_the_victim_of_one_deadlock_is_run_again_and_recorded_once(string method, string path, string? body, string statement, int entries)
+    {
+        var deadlocks = 1;
+        var database = ItemDatabase(statement, () => deadlocks-- > 0);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, method, path, body);
+
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        // The statement that deadlocked was sent twice, and so was the first statement of the transaction: the whole
+        // write was run again, not the rest of it.
+        Assert.Equal(2, texts.Count(text => text.Contains(statement, StringComparison.Ordinal)));
+        Assert.Equal(2, texts.Count(text => text == texts[0]));
+        // One entry per change, whatever the attempt before it did: the server rolled that one back.
+        var insert = Assert.Single(texts, text => text.Contains("INSERT INTO `WorkItemChanges`", StringComparison.Ordinal));
+        Assert.Equal(entries, insert.Split("INSERT INTO `WorkItemChanges`").Length - 1);
+        Assert.Equal([$"GET {WorkItemChangeLog.LockName}", $"RELEASE {WorkItemChangeLog.LockName}"], LocksAroundTheCommit(database));
+    }
+
+    [Theory]
+    [MemberData(nameof(ItemWrites))]
+    public async Task A_write_to_one_item_that_deadlocks_three_times_is_refused_busy_and_records_nothing(string method, string path, string? body, string statement, int entries)
+    {
+        var database = ItemDatabase(statement, () => true);
+        using var api = new FakeBackedApplication(database);
+
+        using var response = await SendAsync(api, method, path, body);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var error = await response.Content.ReadFromJsonAsync<KanbanErrorDto>();
+        Assert.Equal(KanbanErrorCodes.Busy, error!.Code);
+        Assert.Contains("Nothing was changed", error.Message, StringComparison.Ordinal);
+        var texts = database.Commands.Select(command => command.Text.ReplaceLineEndings("\n").TrimEnd()).ToList();
+        // The first attempt and two more.
+        Assert.Equal(3, texts.Count(text => text.Contains(statement, StringComparison.Ordinal)));
+        Assert.True(entries > 0);
+        Assert.DoesNotContain(texts, text => text.Contains("INSERT INTO", StringComparison.Ordinal));
+        Assert.DoesNotContain($"GET {WorkItemChangeLog.LockName}", database.Locks);
+    }
+
+    // The item has no dependencies to return with it once the write is done; the delete still finds the one it blocks.
+    private static FakeDatabase ItemDatabase(string statement, Func<bool> deadlock) =>
+        new(lockResult: 1, command => command.CommandText.Contains("`Title`", StringComparison.Ordinal) && command.CommandText.Contains("FROM `WorkItemDependencies`", StringComparison.Ordinal) ? null : Answer(command))
+        {
+            NonQueryResult = 1,
+            Fail = command => command.CommandText.ReplaceLineEndings("\n").Contains(statement, StringComparison.Ordinal) && deadlock() ? MySqlFailure(1213) : null
+        };
+
+    private static async Task<HttpResponseMessage> SendAsync(FakeBackedApplication api, string method, string path, string? body)
+    {
+        var request = new HttpRequestMessage(new HttpMethod(method), path);
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+        }
+
+        return await api.CreateClient().SendAsync(request);
     }
 
     [Fact]
@@ -148,7 +229,7 @@ public sealed class WorkItemDeadlockRetryMySqlTests
         };
 
     // MySqlException has no public constructor that takes the server's error number.
-    private static MySqlException MySqlFailure(int number) =>
+    internal static MySqlException MySqlFailure(int number) =>
         (MySqlException)typeof(MySqlException)
             .GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, [typeof(string), typeof(int)])!
             .Invoke(["Deadlock found when trying to get lock; try restarting transaction", number]);

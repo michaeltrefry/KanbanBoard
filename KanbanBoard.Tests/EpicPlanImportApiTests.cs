@@ -54,6 +54,10 @@ public sealed class EpicPlanImportApiTests
         using var dbContext = api.OpenDatabase();
         var epic = await dbContext.Epics.SingleAsync();
         Assert.Equal((result.EpicId, project, "Checkout", "d", false), (epic.Id, epic.ProjectId, epic.Name, epic.Description, epic.IsArchived));
+        // The row a repeat of the key is answered from, with the names the answer has.
+        Assert.Equal(
+            $"{{\"document_ids\":[\"{result.DocumentIds[0]}\",\"{result.DocumentIds[1]}\"],\"item_ids\":{{\"A\":\"{a}\",\"B\":\"{b}\",\"C\":\"{c}\"}}}}",
+            (await dbContext.EpicPlanImports.SingleAsync()).Result);
         var documents = await client.GetFromJsonAsync<List<EpicDocumentDto>>($"/api/epics/{epic.Id}/documents", Json);
         Assert.Equal(result.DocumentIds, documents!.Select(document => document.Id).ToArray());
         Assert.Equal([("Requirements", "R"), ("Plan", "P")], documents!.Select(document => (document.Title, document.Body)).ToArray());
@@ -310,6 +314,16 @@ public sealed class EpicPlanImportApiTests
         var again = await ImportAsync(factory, project, ThreeItems());
         Assert.True(again.Created);
         Assert.NotEqual(first.EpicId, again.EpicId);
+        // delete_epic took the items of the first import out of the epic and left them in the project: the second
+        // import created three more.
+        using (var dbContext = api.OpenDatabase())
+        {
+            var left = await dbContext.WorkItems.Where(item => first.ItemIds.Values.Contains(item.Id)).ToListAsync();
+            Assert.Equal(3, left.Count);
+            Assert.All(left, item => Assert.Null(item.EpicId));
+            Assert.Empty(first.ItemIds.Values.Intersect(again.ItemIds.Values));
+            Assert.Equal(3, await dbContext.WorkItems.CountAsync(item => item.EpicId == again.EpicId));
+        }
     }
 
     [Fact]

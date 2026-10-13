@@ -157,7 +157,9 @@ public sealed class CreateIdempotencyApiTests
     }
 
     // A create with a key holds the row of its parent, which makes the creates in that parent wait for each other.
-    // A create without one must not: it is what the web UI and every caller from before the key sends.
+    // A create of an epic or a document without one must not: it is what the web UI and every caller from before
+    // the key sends. A create of a work item holds its project either way, before it reads the end of its column:
+    // two creates that read it at once would take the same Order.
     [Theory]
     [MemberData(nameof(Kinds))]
     public async Task Only_a_keyed_create_holds_the_row_of_its_parent(string kind)
@@ -174,7 +176,19 @@ public sealed class CreateIdempotencyApiTests
         await scenario.CreateAsync(client, "run-1");
         var keyed = api.Commands.ToList();
 
-        Assert.DoesNotContain(plain, text => text.StartsWith("UPDATE", StringComparison.Ordinal) || text.Contains("\"IdempotencyKeyHash\" =", StringComparison.Ordinal));
+        Assert.DoesNotContain(plain, text => text.Contains("\"IdempotencyKeyHash\" =", StringComparison.Ordinal));
+        if (kind == "item")
+        {
+            var heldByPlain = plain.FindIndex(text => text.StartsWith("UPDATE \"Projects\"", StringComparison.Ordinal));
+            var columnEnd = plain.FindIndex(text => text.Contains("MAX(", StringComparison.Ordinal));
+            Assert.True(heldByPlain >= 0 && columnEnd > heldByPlain, string.Join("\n---\n", plain));
+            Assert.DoesNotContain(plain.Take(heldByPlain), text => text.Contains("FROM \"WorkItems\"", StringComparison.Ordinal));
+        }
+        else
+        {
+            Assert.DoesNotContain(plain, text => text.StartsWith("UPDATE", StringComparison.Ordinal));
+        }
+
         // The UPDATE is the first statement, before the look-up of the key.
         var held = keyed.FindIndex(text => text.StartsWith($"UPDATE \"{parent}\"", StringComparison.Ordinal));
         var lookedUp = keyed.FindIndex(text => text.Contains("\"IdempotencyKeyHash\" =", StringComparison.Ordinal));
