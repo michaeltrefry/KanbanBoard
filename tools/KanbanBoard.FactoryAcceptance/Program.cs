@@ -3,13 +3,20 @@
 //
 //   KANBAN_MCP_URL                 MCP endpoint, for example https://kanban-mcp.example.net/mcp
 //   KANBAN_FACTORY_TOKEN           full-scope token of the factory service identity
-//   KANBAN_ACCEPTANCE_PROJECT_ID   project in which the script creates (and afterwards deletes) its scratch work items
 //   KANBAN_FACTORY_READ_TOKEN      optional: read-scope token of the same identity; when set, the script also checks
-//                                  that the claim, dependency, link, comment, project and work item write tools
-//                                  refuse it with scope_denied, and that it can read the change feed
+//                                  that the write tools refuse it with scope_denied and that it can use every read
+//                                  tool. Without it epic acceptance test 7 is skipped.
+//   KANBAN_ACCEPTANCE_PROJECT_ID   optional: an existing project in which the finer-grained checks create (and
+//                                  afterwards delete) their scratch work items. Without it the script creates a
+//                                  scratch project for them.
 //
-// The project checks create one scratch project of their own per run (key ACC plus 20 random hex characters) and leave it archived,
-// which keeps it out of list_projects; the script can be run again against the same database.
+// The script first runs its finer-grained checks, tool by tool, and then the eight acceptance tests of the epic,
+// literally and in order, in a scratch project it creates with a repository URL. It ends with one line per epic
+// acceptance test (PASS, FAIL or SKIP), which can be pasted onto the epic.
+//
+// Every scratch project the script creates (keys ACC, ACI and ACE plus 20 random hex characters) is left archived,
+// which keeps it out of list_projects; the script can be run again against the same database. Run it against a
+// stack of your own: it writes.
 //
 //   dotnet run --project tools/KanbanBoard.FactoryAcceptance
 //
@@ -23,9 +30,9 @@ var mcpUrl = Environment.GetEnvironmentVariable("KANBAN_MCP_URL");
 var token = Environment.GetEnvironmentVariable("KANBAN_FACTORY_TOKEN");
 var projectId = Environment.GetEnvironmentVariable("KANBAN_ACCEPTANCE_PROJECT_ID");
 var readToken = Environment.GetEnvironmentVariable("KANBAN_FACTORY_READ_TOKEN");
-if (string.IsNullOrWhiteSpace(mcpUrl) || string.IsNullOrWhiteSpace(token) || string.IsNullOrWhiteSpace(projectId))
+if (string.IsNullOrWhiteSpace(mcpUrl) || string.IsNullOrWhiteSpace(token))
 {
-    Console.Error.WriteLine("Set KANBAN_MCP_URL, KANBAN_FACTORY_TOKEN and KANBAN_ACCEPTANCE_PROJECT_ID.");
+    Console.Error.WriteLine("Set KANBAN_MCP_URL and KANBAN_FACTORY_TOKEN.");
     return 2;
 }
 
@@ -36,6 +43,25 @@ var failures = 0;
 var run = Guid.NewGuid().ToString("N")[..8];
 var markerA = $"acceptance-{run}-a";
 var markerB = $"acceptance-{run}-b";
+var epicTests = new List<(int Number, string Text, string Result)>();
+
+// Without a project of the caller's, the finer-grained checks get a scratch project of their own.
+string? ownProjectId = null;
+if (string.IsNullOrWhiteSpace(projectId))
+{
+    var ownProject = await CallAsync("create_project", new()
+    {
+        ["name"] = $"Factory acceptance scratch items {run}", ["key"] = $"ACI{Guid.NewGuid().ToString("N")[..20]}".ToUpperInvariant()
+    });
+    if (ownProject.Code is not null)
+    {
+        Console.Error.WriteLine($"Could not create the scratch project: {ownProject.Code}: {ownProject.Message}");
+        return 1;
+    }
+
+    projectId = ownProjectId = StringField(ownProject.Body, "id")!;
+    Console.WriteLine($"Scratch project {projectId}");
+}
 
 var created = await CallAsync("create_work_item", new()
 {
@@ -1102,24 +1128,444 @@ finally
     }
 }
 
+if (ownProjectId is not null)
+{
+    var archivedOwn = await CallAsync("update_project", new() { ["id"] = ownProjectId, ["is_archived"] = true });
+    Check("the scratch project of the finer-grained checks is archived", archivedOwn.Code is null, archivedOwn);
+}
+
+// The acceptance tests of the epic, literally and in order, in a scratch project of their own.
+string? epicProjectId = null;
+string? savedCursor = null;
+string? planKey = null;
+string? epicId = null;
+string? factoryIdentityName = null;
+string? factoryIdentityId = null;
+string? commentIdOnA = null;
+var plan = new Dictionary<string, string>();
+var planDocuments = new List<string?>();
+const string epicRepositoryUrl = "https://github.com/acme/factory-acceptance.git";
+var prUrlOnA = $"https://example.com/acceptance/{run}/epic/pull/1";
+var epicMarker = $"acceptance-{run}-epic";
+var readyFilter = new Dictionary<string, object?> { ["status"] = "Ready", ["unblocked_only"] = true, ["claim_state"] = "unclaimed" };
+Dictionary<string, object?> PlanArguments(string? key) => new()
+{
+    ["project_id"] = epicProjectId,
+    ["idempotency_key"] = key,
+    ["epic"] = new { name = $"Factory acceptance plan {run}", description = "Imported by the acceptance script." },
+    ["documents"] = new[] { new { title = "Requirements", body = $"Requirements of run {run}." }, new { title = "Plan", body = $"Plan of run {run}." } },
+    ["items"] = new object[]
+    {
+        new { @ref = "A", title = $"Plan item A {run}", type = "Task", status = "Ready", priority = "High", estimate = 1, label_list = new[] { "acceptance" } },
+        new { @ref = "B", title = $"Plan item B {run}", type = "Task", status = "Ready", blocked_by = new[] { "A" } },
+        new { @ref = "C", title = $"Plan item C {run}", type = "Task", status = "Ready", blocked_by = new[] { "B" } }
+    }
+};
+try
+{
+    await EpicTestAsync(1, "Import a plan of 3 items where C is blocked by B and B by A; list ready, unblocked and unclaimed items and get only A; claim A; a second claim with another marker is refused already_claimed; move A to Done; the list now returns B.", async () =>
+    {
+        var head = await CallAsync("list_changes", new());
+        savedCursor = head.Code is null ? StringField(head.Body, "next_cursor") : null;
+        Check("the cursor of the newest entry of the change feed is taken first", savedCursor is not null, head);
+
+        var project = await CallAsync("create_project", new()
+        {
+            ["name"] = $"Factory acceptance epic tests {run}", ["key"] = $"ACE{Guid.NewGuid().ToString("N")[..20]}".ToUpperInvariant(),
+            ["repository_url"] = epicRepositoryUrl, ["default_branch"] = "main", ["idempotency_key"] = $"acceptance-{run}:epic-project"
+        });
+        epicProjectId = project.Code is null ? StringField(project.Body, "id") : null;
+        Check("create_project with a repository URL creates the scratch project",
+            epicProjectId is not null && StringField(project.Body, "repository_url") == epicRepositoryUrl && StringField(project.Body, "default_branch") == "main", project);
+        Console.WriteLine($"Epic test project {epicProjectId}");
+
+        planKey = $"acceptance-{run}:plan";
+        var imported = await CallAsync("import_epic_plan", PlanArguments(planKey));
+        epicId = imported.Code is null ? StringField(imported.Body, "epic_id") : null;
+        if (imported.Code is null && imported.Body.TryGetProperty("item_ids", out var itemIds) && itemIds.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var entry in itemIds.EnumerateObject())
+            {
+                plan[entry.Name] = entry.Value.GetString()!;
+            }
+        }
+
+        planDocuments.AddRange(CommentsOf(imported.Body, "document_ids").Select(id => id.GetString()));
+        Check("import_epic_plan returns created true, the epic id, two document ids and an item id for each of A, B and C",
+            imported.Code is null && IsFlag(imported.Body, "created", true) && epicId is not null && planDocuments.Count == 2 &&
+            plan.Keys.Order().SequenceEqual(["A", "B", "C"]) && plan.Values.Distinct().Count() == 3 &&
+            StringField(imported.Body, "project_id") == epicProjectId,
+            imported);
+        if (plan.Count != 3)
+        {
+            return true;
+        }
+
+        var readA = await CallAsync("get_work_item", new() { ["itemId"] = plan["A"] });
+        var readB = await CallAsync("get_work_item", new() { ["itemId"] = plan["B"] });
+        var readC = await CallAsync("get_work_item", new() { ["itemId"] = plan["C"] });
+        Check("the imported items are Ready, in the epic, at version 1, and carry the dependencies of the plan",
+            new[] { readA, readB, readC }.All(read => read.Code is null && StringField(read.Body, "status") == "Ready" && StringField(read.Body, "epicId") == epicId && IntField(read.Body, "version") == 1) &&
+            ReferencedIds(readA.Body, "blockers").Length == 0 &&
+            ReferencedIds(readB.Body, "blockers").SequenceEqual([plan["A"]]) &&
+            ReferencedIds(readC.Body, "blockers").SequenceEqual([plan["B"]]) &&
+            StringField(readA.Body, "priority") == "High" && IntField(readA.Body, "estimate") == 1 && LabelsOf(readA.Body).SequenceEqual(["acceptance"]),
+            readC);
+        var documents = await CallAsync("list_epic_documents", new() { ["epicId"] = epicId });
+        Check("the epic has the two documents of the plan, in the order of the plan",
+            documents.Code is null && documents.Body.EnumerateArray().Select(document => StringField(document, "id")).SequenceEqual(planDocuments) &&
+            documents.Body.EnumerateArray().Select(document => StringField(document, "title")).SequenceEqual(["Requirements", "Plan"]),
+            documents);
+
+        var ready = await IdsAsync(new(readyFilter) { ["projectId"] = epicProjectId });
+        Check("list_work_items (Ready, unblocked_only, unclaimed) returns only A", ready.SequenceEqual([plan["A"]]),
+            new ToolOutcome("error", $"listed {string.Join(", ", ready)}", default));
+
+        var claimedA = await CallAsync("claim_work_item", new() { ["id"] = plan["A"], ["marker"] = epicMarker, ["ttl_seconds"] = 600 });
+        factoryIdentityName = StringField(claimedA.Body, "claimant");
+        factoryIdentityId = StringField(claimedA.Body, "claimant_id");
+        Check("claim_work_item claims A for the factory identity", claimedA.Code is null && StringField(claimedA.Body, "claim_marker") == epicMarker && factoryIdentityId is not null, claimedA);
+        var secondClaim = await CallAsync("claim_work_item", new() { ["id"] = plan["A"], ["marker"] = $"{epicMarker}-other", ["ttl_seconds"] = 600 });
+        Check("a second claim of A with another marker is refused already_claimed", secondClaim.Code == "already_claimed", secondClaim);
+
+        var movedA = await CallAsync("move_work_item", new() { ["itemId"] = plan["A"], ["status"] = "Done" });
+        Check("move_work_item moves A to Done", movedA.Code is null && StringField(movedA.Body, "status") == "Done", movedA);
+        var readyAfter = await IdsAsync(new(readyFilter) { ["projectId"] = epicProjectId });
+        Check("the same list now returns B, and only B", readyAfter.SequenceEqual([plan["B"]]),
+            new ToolOutcome("error", $"listed {string.Join(", ", readyAfter)}", default));
+        return true;
+    });
+
+    await EpicTestAsync(2, "Repeat the plan import with the same idempotency key: nothing new is created and the same ids come back.", async () =>
+    {
+        var (before, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        var repeated = await CallAsync("import_epic_plan", PlanArguments(planKey));
+        Check("the repeated import returns created false with the same epic id, document ids and item ids",
+            repeated.Code is null && IsFlag(repeated.Body, "created", false) && StringField(repeated.Body, "epic_id") == epicId &&
+            CommentsOf(repeated.Body, "document_ids").Select(id => id.GetString()).SequenceEqual(planDocuments) &&
+            repeated.Body.TryGetProperty("item_ids", out var repeatedIds) && plan.Count == 3 &&
+            repeatedIds.EnumerateObject().ToDictionary(entry => entry.Name, entry => entry.Value.GetString()).OrderBy(entry => entry.Key)
+                .SequenceEqual(plan.OrderBy(entry => entry.Key).Select(entry => new KeyValuePair<string, string?>(entry.Key, entry.Value))),
+            repeated);
+        var epics = await CallAsync("list_epics", new() { ["projectId"] = epicProjectId });
+        var items = await CallAsync("list_work_items", new() { ["projectId"] = epicProjectId });
+        var documents = await CallAsync("list_epic_documents", new() { ["epicId"] = epicId });
+        var (after, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        Check("the project still has one epic, three items and two documents, and its change feed gained no entry",
+            epics.Code is null && epics.Body.GetArrayLength() == 1 && items.Code is null && items.Body.GetArrayLength() == 3 &&
+            documents.Code is null && documents.Body.GetArrayLength() == 2 && before.Count > 0 && after.Count == before.Count,
+            new ToolOutcome("error", $"feed entries before {before.Count}, after {after.Count}", default));
+        return true;
+    });
+
+    await EpicTestAsync(3, "Attach a PR link to A and find A by that URL; add a comment and read it back with its id and the factory identity as author.", async () =>
+    {
+        var linked = await CallAsync("add_work_item_link", new() { ["id"] = plan.GetValueOrDefault("A"), ["kind"] = "pr", ["url"] = prUrlOnA });
+        Check("add_work_item_link attaches the PR link to A", linked.Code is null && IsOnlyLink(linked.Body, "pr", prUrlOnA), linked);
+        var found = await CallAsync("find_work_items_by_link", new() { ["url"] = prUrlOnA });
+        Check("find_work_items_by_link with that URL returns exactly A",
+            found.Code is null && found.Body.ValueKind == JsonValueKind.Array && found.Body.GetArrayLength() == 1 && StringField(found.Body[0], "id") == plan.GetValueOrDefault("A"),
+            found);
+        var commented = await CallAsync("add_work_item_comment", new() { ["itemId"] = plan.GetValueOrDefault("A"), ["body"] = $"epic test comment {run}", ["idempotency_key"] = $"acceptance-{run}:epic-comment" });
+        commentIdOnA = StringField(commented.Body, "comment_id");
+        Check("add_work_item_comment returns the comment's id", commented.Code is null && commentIdOnA is not null, commented);
+        var comments = await CallAsync("list_work_item_comments", new() { ["id"] = plan.GetValueOrDefault("A") });
+        Check("list_work_item_comments returns the comment with its id, its body and the factory identity as author and author_id",
+            comments.Code is null && factoryIdentityId is not null && CommentsOf(comments.Body, "items") is [var comment] &&
+            StringField(comment, "id") == commentIdOnA && StringField(comment, "body") == $"epic test comment {run}" &&
+            StringField(comment, "author") == factoryIdentityName && StringField(comment, "author_id") == factoryIdentityId,
+            comments);
+        return true;
+    });
+
+    await EpicTestAsync(4, "Read the change feed from the saved cursor: it holds the claim, the move and the comment with their content, in order; read again from the same cursor: same entries.", async () =>
+    {
+        var (feed, _, feedFailure) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        Check("list_changes from the saved cursor reads to the end of the feed", feedFailure is null, feedFailure ?? new ToolOutcome(null, null, default));
+        var kinds = feed.Select(entry => $"{StringField(entry, "kind")}:{plan.FirstOrDefault(item => item.Value == StringField(entry, "item_id")).Key}").ToList();
+        Check("the feed of the project holds the import (three items, then two dependencies), the claim, the move, the link and the comment, in that order",
+            kinds.SequenceEqual(["item_created:A", "item_created:B", "item_created:C", "dependency_added:B", "dependency_added:C", "claimed:A", "item_moved:A", "link_added:A", "comment_added:A"]),
+            new ToolOutcome("error", string.Join(", ", kinds), default));
+        Check("every entry has the factory identity as actor and a later sequence than the one before",
+            factoryIdentityId is not null &&
+            feed.All(entry => entry.TryGetProperty("actor", out var actor) && StringField(actor, "id") == factoryIdentityId && StringField(actor, "name") == factoryIdentityName) &&
+            feed.Zip(feed.Skip(1)).All(pair => IntField(pair.First, "sequence") < IntField(pair.Second, "sequence")),
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed)));
+        if (feed.Count == 9)
+        {
+            Check("the import's entries carry the items as they were created and the blocking items",
+                ChangeOf(feed[0], "status") is { } createdStatus && IsNullField(createdStatus, "old") && StringField(createdStatus, "new") == "Ready" &&
+                ChangeOf(feed[0], "epic_id") is { } createdEpic && StringField(createdEpic, "new") == epicId &&
+                ChangeOf(feed[3], "blocked_by") is { } firstEdge && StringField(firstEdge, "new") == plan["A"] &&
+                ChangeOf(feed[4], "blocked_by") is { } secondEdge && StringField(secondEdge, "new") == plan["B"],
+                new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Take(5))));
+            Check("the claim entry has the marker and the claimant, the move entry the old and the new status, the comment entry the comment's id, author and body",
+                ChangeOf(feed[5], "claim_marker") is { } markerChange && IsNullField(markerChange, "old") && StringField(markerChange, "new") == epicMarker &&
+                ChangeOf(feed[5], "claimant_id") is { } claimantChange && StringField(claimantChange, "new") == factoryIdentityId &&
+                ChangeOf(feed[6], "status") is { } statusChange && StringField(statusChange, "old") == "Ready" && StringField(statusChange, "new") == "Done" &&
+                ChangeOf(feed[8], "comment") is { } commentChange && commentChange.GetProperty("new") is var comment &&
+                StringField(comment, "id") == commentIdOnA && StringField(comment, "author") == factoryIdentityName && StringField(comment, "body") == $"epic test comment {run}",
+                new ToolOutcome(null, null, JsonSerializer.SerializeToElement(feed.Skip(5))));
+        }
+
+        var (again, _, againFailure) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        Check("reading again from the same cursor returns the same entries",
+            againFailure is null && feed.Count > 0 && again.Select(entry => entry.GetRawText()).SequenceEqual(feed.Select(entry => entry.GetRawText())),
+            new ToolOutcome(null, null, JsonSerializer.SerializeToElement(again)));
+        return true;
+    });
+
+    await EpicTestAsync(5, "A short-TTL claim lapses, another marker then claims.", async () =>
+    {
+        var shortClaim = await CallAsync("claim_work_item", new() { ["id"] = plan.GetValueOrDefault("B"), ["marker"] = $"{epicMarker}-short", ["ttl_seconds"] = 2 });
+        Check("claim_work_item claims B for 2 seconds", shortClaim.Code is null && StringField(shortClaim.Body, "claim_marker") == $"{epicMarker}-short", shortClaim);
+        var whileHeld = await CallAsync("claim_work_item", new() { ["id"] = plan.GetValueOrDefault("B"), ["marker"] = $"{epicMarker}-next", ["ttl_seconds"] = 600 });
+        Check("while the claim is live, another marker is refused already_claimed", whileHeld.Code == "already_claimed", whileHeld);
+        await Task.Delay(TimeSpan.FromSeconds(4));
+        var lapsed = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B") });
+        Check("once it lapses, B reads as unclaimed", lapsed.Code is null && ClaimFields.All(field => IsNullField(lapsed.Body, field)), lapsed);
+        var afterLapse = await CallAsync("claim_work_item", new() { ["id"] = plan.GetValueOrDefault("B"), ["marker"] = $"{epicMarker}-next", ["ttl_seconds"] = 600 });
+        Check("another marker then claims B", afterLapse.Code is null && StringField(afterLapse.Body, "claim_marker") == $"{epicMarker}-next", afterLapse);
+        return true;
+    });
+
+    await EpicTestAsync(6, "update_work_item with a stale expected version is refused conflict, and nothing is written.", async () =>
+    {
+        var read = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B") });
+        var version = IntField(read.Body, "version") ?? -1;
+        var current = await CallAsync("update_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B"), ["estimate"] = 3, ["expected_version"] = version });
+        Check("an update with the version that was read succeeds and advances it", current.Code is null && IntField(current.Body, "version") == version + 1, current);
+        var (feedBefore, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        var stale = await CallAsync("update_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B"), ["title"] = "never written", ["status"] = "Done", ["expected_version"] = version });
+        Check("an update with that version again, now stale, is refused conflict", stale.Code == "conflict", stale);
+        var after = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("B") });
+        var (feedAfter, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        Check("the refused update wrote nothing: same title, status, version and updatedAtUtc, and no entry in the change feed",
+            after.Code is null && StringField(after.Body, "title") == $"Plan item B {run}" && StringField(after.Body, "status") == "Ready" &&
+            IntField(after.Body, "version") == version + 1 && StringField(after.Body, "updatedAtUtc") == StringField(current.Body, "updatedAtUtc") &&
+            feedBefore.Count > 0 && feedAfter.Count == feedBefore.Count,
+            after);
+        return true;
+    });
+
+    await EpicTestAsync(7, "With the read token every read tool succeeds and claim_work_item, import_epic_plan and add_work_item_link are refused scope_denied, nothing written.", async () =>
+    {
+        if (string.IsNullOrWhiteSpace(readToken))
+        {
+            Console.WriteLine("SKIP  KANBAN_FACTORY_READ_TOKEN is not set");
+            return false;
+        }
+
+        using var readHttpClient = new HttpClient();
+        await using var readClient = await ConnectAsync(readHttpClient, readToken);
+        var reads = new (string Tool, Dictionary<string, object?> Arguments)[]
+        {
+            ("list_projects", new()),
+            ("get_board", new() { ["projectId"] = epicProjectId }),
+            ("list_epics", new() { ["projectId"] = epicProjectId }),
+            ("get_epic", new() { ["epicId"] = epicId }),
+            ("list_epic_documents", new() { ["epicId"] = epicId }),
+            ("get_epic_document", new() { ["documentId"] = planDocuments.FirstOrDefault() }),
+            ("list_work_items", new(readyFilter) { ["projectId"] = epicProjectId, ["limit"] = 10 }),
+            ("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("A") }),
+            ("search_work_items", new() { ["query"] = $"Plan item {run}", ["projectId"] = epicProjectId }),
+            ("list_epic_work_items", new() { ["epicId"] = epicId, ["unblocked_only"] = true }),
+            ("get_issues", new() { ["projectId"] = epicProjectId }),
+            ("find_work_items_by_link", new() { ["url"] = prUrlOnA }),
+            ("list_work_item_comments", new() { ["id"] = plan.GetValueOrDefault("A") }),
+            ("list_changes", new() { ["cursor"] = savedCursor, ["project_id"] = epicProjectId })
+        };
+        foreach (var (tool, arguments) in reads)
+        {
+            var answered = await CallAsync(tool, arguments, readClient);
+            Check($"{tool} with the read-scope token succeeds", answered.Code is null, answered);
+        }
+
+        var (feedBefore, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        var itemBefore = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("C") });
+        var refusedClaim = await CallAsync("claim_work_item", new() { ["id"] = plan.GetValueOrDefault("C"), ["marker"] = $"{epicMarker}-read", ["ttl_seconds"] = 60 }, readClient);
+        Check("claim_work_item with the read-scope token is refused scope_denied", refusedClaim.Code == "scope_denied", refusedClaim);
+        var refusedImport = await CallAsync("import_epic_plan", PlanArguments($"acceptance-{run}:read-plan"), readClient);
+        Check("import_epic_plan with the read-scope token is refused scope_denied", refusedImport.Code == "scope_denied", refusedImport);
+        var refusedLink = await CallAsync("add_work_item_link", new() { ["id"] = plan.GetValueOrDefault("C"), ["kind"] = "pr", ["url"] = $"{prUrlOnA}-read" }, readClient);
+        Check("add_work_item_link with the read-scope token is refused scope_denied", refusedLink.Code == "scope_denied", refusedLink);
+
+        var itemAfter = await CallAsync("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("C") });
+        var epics = await CallAsync("list_epics", new() { ["projectId"] = epicProjectId });
+        var foundRefused = await CallAsync("find_work_items_by_link", new() { ["url"] = $"{prUrlOnA}-read" });
+        var (feedAfter, _, _) = await ReadProjectFeedAsync(savedCursor, epicProjectId);
+        Check("the refused calls wrote nothing: C is unclaimed and unlinked as before, the project has one epic, and its change feed gained no entry",
+            itemBefore.Code is null && itemAfter.Code is null && itemAfter.Body.GetRawText() == itemBefore.Body.GetRawText() &&
+            ClaimFields.All(field => IsNullField(itemAfter.Body, field)) && LinksOf(itemAfter.Body).Length == 0 &&
+            epics.Code is null && epics.Body.GetArrayLength() == 1 &&
+            foundRefused.Code is null && foundRefused.Body.GetArrayLength() == 0 &&
+            feedBefore.Count > 0 && feedAfter.Count == feedBefore.Count,
+            itemAfter);
+        return true;
+    });
+
+    await EpicTestAsync(8, "The 11 pre-epic read tools answer calls made with their pre-epic arguments.", async () =>
+    {
+        // Exactly the arguments each tool took before the epic, all of them passed.
+        var calls = new (string Tool, Dictionary<string, object?> Arguments, Func<JsonElement, bool> Answered)[]
+        {
+            ("list_projects", new() { ["includeArchived"] = true },
+                body => body.ValueKind == JsonValueKind.Array && body.EnumerateArray().Any(project => StringField(project, "id") == epicProjectId)),
+            ("get_board", new() { ["projectId"] = epicProjectId, ["status"] = "Ready", ["includeArchivedEpics"] = false },
+                body => StringField(body, "id") == epicProjectId && CommentsOf(body, "items").Length == 2),
+            ("list_epics", new() { ["projectId"] = epicProjectId, ["includeArchived"] = false },
+                body => body.ValueKind == JsonValueKind.Array && body.GetArrayLength() == 1 && StringField(body[0], "id") == epicId),
+            ("get_epic", new() { ["epicId"] = epicId }, body => StringField(body, "id") == epicId && StringField(body, "projectId") == epicProjectId),
+            ("list_epic_documents", new() { ["epicId"] = epicId }, body => body.ValueKind == JsonValueKind.Array && body.GetArrayLength() == 2),
+            ("get_epic_document", new() { ["documentId"] = planDocuments.FirstOrDefault() },
+                body => StringField(body, "id") == planDocuments.FirstOrDefault() && StringField(body, "title") == "Requirements"),
+            ("list_work_items", new() { ["projectId"] = epicProjectId, ["epicId"] = epicId, ["type"] = "Task", ["status"] = "Ready", ["includeArchivedEpics"] = false },
+                body => body.ValueKind == JsonValueKind.Array && body.EnumerateArray().Select(item => StringField(item, "id")).Order().SequenceEqual(new[] { plan.GetValueOrDefault("B"), plan.GetValueOrDefault("C") }.Order())),
+            ("get_work_item", new() { ["itemId"] = plan.GetValueOrDefault("A") }, body => StringField(body, "id") == plan.GetValueOrDefault("A") && StringField(body, "status") == "Done"),
+            ("search_work_items", new() { ["query"] = $"Plan item {run}", ["projectId"] = epicProjectId, ["limit"] = 10 },
+                body => body.ValueKind == JsonValueKind.Array && body.GetArrayLength() == 3),
+            ("list_epic_work_items", new() { ["epicId"] = epicId, ["type"] = "Task", ["status"] = "Done", ["includeArchivedEpics"] = false },
+                body => body.ValueKind == JsonValueKind.Array && body.GetArrayLength() == 1 && StringField(body[0], "id") == plan.GetValueOrDefault("A")),
+            ("get_issues", new() { ["projectId"] = epicProjectId, ["status"] = "Ready" }, body => body.ValueKind == JsonValueKind.Array && body.GetArrayLength() == 0)
+        };
+        var tools = (await client.ListToolsAsync()).Select(tool => tool.Name).ToHashSet();
+        foreach (var (tool, arguments, answered) in calls)
+        {
+            var result = await CallAsync(tool, arguments);
+            Check($"{tool}({string.Join(", ", arguments.Keys)}) is still listed and answers", tools.Contains(tool) && result.Code is null && answered(result.Body), result);
+        }
+
+        return true;
+    });
+
+    // Finer-grained checks of the import and of the keys of the other create tools, in the same scratch project.
+    if (epicProjectId is not null && epicId is not null)
+    {
+        var refusedPlans = new (string What, string Code, object[] Items)[]
+        {
+            ("a dependency cycle", "cycle", [new { @ref = "X", title = "x", blocked_by = new[] { "Y" } }, new { @ref = "Y", title = "y", blocked_by = new[] { "X" } }]),
+            ("a blocked_by that names no item of the plan", "invalid_argument", [new { @ref = "X", title = "x" }, new { @ref = "Y", title = "y", blocked_by = new[] { "Z" } }]),
+            ("an item with an unknown status", "invalid_argument", [new { @ref = "X", title = "x" }, new { @ref = "Y", title = "y", status = "Started" }]),
+            ("a ref used twice", "invalid_argument", [new { @ref = "X", title = "x" }, new { @ref = "X", title = "y" }])
+        };
+        foreach (var (what, code, items) in refusedPlans)
+        {
+            var arguments = PlanArguments($"acceptance-{run}:refused");
+            arguments["items"] = items;
+            var refused = await CallAsync("import_epic_plan", arguments);
+            Check($"import_epic_plan of a plan with {what} is refused {code}", refused.Code == code, refused);
+        }
+
+        var missingKey = PlanArguments(null);
+        missingKey.Remove("idempotency_key");
+        var withoutKey = await CallAsync("import_epic_plan", missingKey);
+        Check("import_epic_plan without an idempotency_key is refused invalid_argument", withoutKey.Code == "invalid_argument", withoutKey);
+        var unknownProject = PlanArguments($"acceptance-{run}:unknown-project");
+        unknownProject["project_id"] = Guid.NewGuid().ToString();
+        var inUnknownProject = await CallAsync("import_epic_plan", unknownProject);
+        Check("import_epic_plan into an unknown project is refused not_found", inUnknownProject.Code == "not_found", inUnknownProject);
+        var epicsAfterRefusals = await CallAsync("list_epics", new() { ["projectId"] = epicProjectId, ["includeArchived"] = true });
+        var itemsAfterRefusals = await CallAsync("list_work_items", new() { ["projectId"] = epicProjectId });
+        Check("the refused imports created nothing: the project still has one epic and three items",
+            epicsAfterRefusals.Code is null && epicsAfterRefusals.Body.GetArrayLength() == 1 && itemsAfterRefusals.Code is null && itemsAfterRefusals.Body.GetArrayLength() == 3,
+            epicsAfterRefusals);
+
+        var keyedCreates = new (string Tool, Dictionary<string, object?> Arguments, string NameField)[]
+        {
+            ("create_epic", new() { ["projectId"] = epicProjectId, ["name"] = $"Keyed epic {run}" }, "name"),
+            ("create_epic_document", new() { ["epicId"] = epicId, ["title"] = $"Keyed document {run}", ["body"] = "body" }, "title"),
+            ("create_work_item", new() { ["projectId"] = epicProjectId, ["title"] = $"Keyed item {run}", ["type"] = "Task" }, "title"),
+            ("create_epic_work_item", new() { ["epicId"] = epicId, ["title"] = $"Keyed epic item {run}" }, "title")
+        };
+        foreach (var (tool, arguments, nameField) in keyedCreates)
+        {
+            var key = $"acceptance-{run}:{tool}";
+            var first = await CallAsync(tool, new(arguments) { ["idempotency_key"] = key });
+            var repeat = await CallAsync(tool, new(arguments) { [nameField] = "another name", ["idempotency_key"] = key });
+            Check($"{tool} with an idempotency key says created true, and a repeat returns the same id with created false and the first call's {nameField}",
+                first.Code is null && IsFlag(first.Body, "created", true) && StringField(first.Body, "id") is { } firstId &&
+                repeat.Code is null && IsFlag(repeat.Body, "created", false) && StringField(repeat.Body, "id") == firstId &&
+                StringField(repeat.Body, nameField) == StringField(first.Body, nameField),
+                repeat.Code is null ? repeat : first);
+            var badKey = await CallAsync(tool, new(arguments) { ["idempotency_key"] = "two words" });
+            Check($"{tool} with a malformed idempotency key is refused invalid_argument", badKey.Code == "invalid_argument", badKey);
+        }
+
+        var keyedTotals = await CallAsync("list_work_items", new() { ["projectId"] = epicProjectId });
+        var keyedEpics = await CallAsync("list_epics", new() { ["projectId"] = epicProjectId });
+        var keyedDocuments = await CallAsync("list_epic_documents", new() { ["epicId"] = epicId });
+        Check("each keyed create created one object: two epics, three documents and five items in the project",
+            keyedEpics.Code is null && keyedEpics.Body.GetArrayLength() == 2 && keyedDocuments.Code is null && keyedDocuments.Body.GetArrayLength() == 3 &&
+            keyedTotals.Code is null && keyedTotals.Body.GetArrayLength() == 5,
+            keyedTotals);
+    }
+}
+finally
+{
+    // Leave nothing claimed, and archive the scratch project: it leaves list_projects, and the script can run again.
+    if (plan.TryGetValue("A", out var claimedA))
+    {
+        await CallAsync("release_work_item_claim", new() { ["id"] = claimedA, ["marker"] = epicMarker });
+    }
+
+    if (plan.TryGetValue("B", out var claimedB))
+    {
+        await CallAsync("release_work_item_claim", new() { ["id"] = claimedB, ["marker"] = $"{epicMarker}-next" });
+    }
+
+    if (epicProjectId is not null)
+    {
+        var archivedEpicProject = await CallAsync("update_project", new() { ["id"] = epicProjectId, ["is_archived"] = true });
+        Check("the scratch project of the epic acceptance tests is archived", archivedEpicProject.Code is null && IsFlag(archivedEpicProject.Body, "isArchived", true), archivedEpicProject);
+    }
+}
+
+Console.WriteLine();
+Console.WriteLine("EPIC ACCEPTANCE TESTS (sc-25857)");
+foreach (var (number, text, result) in epicTests)
+{
+    Console.WriteLine($"{number}. {result}  {text}");
+}
+
+Console.WriteLine();
 Console.WriteLine(failures == 0 ? "ACCEPTANCE PASSED" : $"ACCEPTANCE FAILED ({failures} failure(s))");
 return failures == 0 ? 0 : 1;
 
-// Reads the feed of the acceptance project from a cursor to its end and keeps the entries of the given items.
-// Returns them with the cursor to go on from.
-async Task<(List<JsonElement> Entries, string? Cursor, ToolOutcome? Failure)> ReadFeedAsync(string cursor, params string[] itemIds)
+// Runs one acceptance test of the epic and records whether every check in it passed. The test returns false when it
+// could not be run at all.
+async Task EpicTestAsync(int number, string text, Func<Task<bool>> test)
+{
+    Console.WriteLine();
+    Console.WriteLine($"Epic acceptance test {number}: {text}");
+    var failuresBefore = failures;
+    bool ran;
+    try
+    {
+        ran = await test();
+    }
+    catch (Exception exception) when (exception is not OperationCanceledException)
+    {
+        Check($"epic acceptance test {number} ran to its end", false, new ToolOutcome("error", exception.Message, default));
+        ran = true;
+    }
+
+    epicTests.Add((number, text, !ran ? "SKIP" : failures == failuresBefore ? "PASS" : "FAIL"));
+}
+
+// Every entry of one project in the feed from a cursor to its end.
+async Task<(List<JsonElement> Entries, string? Cursor, ToolOutcome? Failure)> ReadProjectFeedAsync(string? cursor, string? project)
 {
     var entries = new List<JsonElement>();
     for (var pages = 1; pages <= 1000; pages++)
     {
-        var page = await CallAsync("list_changes", new() { ["cursor"] = cursor, ["project_id"] = projectId, ["limit"] = 200 });
-        if (page.Code is not null || page.Body.ValueKind != JsonValueKind.Object || !page.Body.TryGetProperty("items", out var items) ||
-            StringField(page.Body, "next_cursor") is not { } next)
+        var page = await CallAsync("list_changes", new() { ["cursor"] = cursor, ["project_id"] = project, ["limit"] = 200 });
+        if (cursor is null || project is null || page.Code is not null || page.Body.ValueKind != JsonValueKind.Object ||
+            !page.Body.TryGetProperty("items", out var items) || StringField(page.Body, "next_cursor") is not { } next)
         {
-            return (entries, null, page.Code is null ? new ToolOutcome("error", $"not a page of the feed: {page.Body.GetRawText()}", default) : page);
+            return (entries, null, page.Code is null ? new ToolOutcome("error", "not a page of the feed of the scratch project", default) : page);
         }
 
-        entries.AddRange(items.EnumerateArray().Where(entry => itemIds.Contains(StringField(entry, "item_id"))));
+        entries.AddRange(items.EnumerateArray());
         cursor = next;
         if (items.GetArrayLength() < 200)
         {
@@ -1128,6 +1574,14 @@ async Task<(List<JsonElement> Entries, string? Cursor, ToolOutcome? Failure)> Re
     }
 
     return (entries, null, new ToolOutcome("error", "the feed did not end within 1000 pages", default));
+}
+
+// Reads the feed of the acceptance project from a cursor to its end and keeps the entries of the given items.
+// Returns them with the cursor to go on from.
+async Task<(List<JsonElement> Entries, string? Cursor, ToolOutcome? Failure)> ReadFeedAsync(string cursor, params string[] itemIds)
+{
+    var (entries, next, failure) = await ReadProjectFeedAsync(cursor, projectId);
+    return (entries.Where(entry => itemIds.Contains(StringField(entry, "item_id"))).ToList(), next, failure);
 }
 
 // Follows next_cursor from the first page to the last; the last page is the one without a next_cursor.
