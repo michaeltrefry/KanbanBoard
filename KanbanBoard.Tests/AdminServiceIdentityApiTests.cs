@@ -726,6 +726,218 @@ public sealed class AdminServiceIdentityApiTests
         Assert.Null(tokens.Single(token => token.Id != old.Token.Id).RevokedAtUtc);
     }
 
+    [Fact]
+    public async Task Each_token_issued_rotated_revoked_or_revoked_by_a_disable_records_the_acting_admin_and_the_list_shows_who()
+    {
+        const string SecondAdmin = "second-admin";
+        using var api = new AdminApi($"{AdminSubject} {SecondAdmin}");
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var first = api.CreateSessionClient(AdminSubject);
+        using var second = api.CreateSessionClient(SecondAdmin);
+        // Their user rows, as the page creates them when it loads.
+        var firstUser = (await first.GetFromJsonAsync<CurrentUserDto>("/api/me", ProgramDependencyWiringTests.Json))!;
+        var secondUser = (await second.GetFromJsonAsync<CurrentUserDto>("/api/me", ProgramDependencyWiringTests.Json))!;
+        var firstAdmin = new PersonalAccessTokenAdminDto(firstUser.Id, $"User {AdminSubject}");
+        var secondAdmin = new PersonalAccessTokenAdminDto(secondUser.Id, $"User {SecondAdmin}");
+
+        var writer = await IssueAsync(first, identity.Id, "Writer", "full");
+        var reader = await IssueAsync(first, identity.Id, "Reader", "read");
+        // The second admin rotates the writer, the first revokes its replacement, the second revokes it again.
+        using var rotateResponse = await SendAsync(second, HttpMethod.Post, RotatePath(identity.Id, writer.Token.Id), new { }, withCsrfToken: true);
+        var replacement = (await rotateResponse.Content.ReadFromJsonAsync<RotatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+        var replacementPath = $"/api/admin/service-identities/{identity.Id}/tokens/{replacement.Token.Id}";
+        using (var revoke = await SendAsync(first, HttpMethod.Delete, replacementPath, null, withCsrfToken: true))
+        using (var revokeAgain = await SendAsync(second, HttpMethod.Delete, replacementPath, null, withCsrfToken: true))
+        {
+            Assert.Equal((HttpStatusCode.NoContent, HttpStatusCode.NoContent), (revoke.StatusCode, revokeAgain.StatusCode));
+        }
+
+        // The second admin disables the identity: it revokes the reader, and the tokens revoked before keep their revoker.
+        using (var disable = await SendAsync(second, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/disable", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+        }
+
+        using var response = await first.GetAsync($"/api/admin/service-identities/{identity.Id}/tokens");
+        var json = await response.Content.ReadAsStringAsync();
+        var listed = System.Text.Json.JsonSerializer.Deserialize<List<ServiceIdentityTokenDto>>(json, ProgramDependencyWiringTests.Json)!;
+        Assert.Equal(
+            [
+                (writer.Token.Id, firstAdmin, secondAdmin),
+                (reader.Token.Id, firstAdmin, secondAdmin),
+                (replacement.Token.Id, secondAdmin, firstAdmin)
+            ],
+            listed.OrderBy(token => token.Id == replacement.Token.Id).ThenBy(token => token.Name != "Writer")
+                .Select(token => (token.Id, token.IssuedBy, token.RevokedBy)).ToList());
+        Assert.Contains($"\"issuedBy\":{{\"id\":\"{firstUser.Id}\",\"name\":\"User {AdminSubject}\"}}", json, StringComparison.Ordinal);
+        Assert.Contains($"\"revokedBy\":{{\"id\":\"{secondUser.Id}\",\"name\":\"User {SecondAdmin}\"}}", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_token_of_the_command_of_the_settings_page_or_from_before_shows_no_admin_and_still_works()
+    {
+        using var api = new AdminApi();
+        var legacy = Identity("Legacy", DateTimeOffset.UtcNow);
+        var legacyRevoked = Token(legacy, name: "Revoked before", revoked: DateTimeOffset.UtcNow.AddDays(-1));
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.Add(legacy);
+            dbContext.PersonalAccessTokens.Add(legacyRevoked);
+        });
+        // As a token stored before the admin columns existed: written with none of them set.
+        var legacyToken = await api.CreateTokenAsync(legacy.Id, "From before");
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateMcpClient();
+
+        // The command issues a pair, then rotates it: neither the pairs nor the revocations name an admin.
+        var issued = await api.ProvisionAsync("Factory");
+        var rotated = await api.ProvisionAsync("Factory", rotate: true);
+        // The admin's own token, issued and revoked on the Settings page, as its owner.
+        using var createOwn = await SendAsync(admin, HttpMethod.Post, "/api/me/personal-access-tokens", new { name = "Mine" }, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.Created, createOwn.StatusCode);
+        var own = (await createOwn.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+        using (var revokeOwn = await SendAsync(admin, HttpMethod.Delete, $"/api/me/personal-access-tokens/{own.Token.Id}", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, revokeOwn.StatusCode);
+        }
+
+        var tokens = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        Assert.Equal(7, tokens.Count);
+        Assert.Equal(4, tokens.Count(token => token.RevokedAtUtc is not null));
+        Assert.All(tokens, token => Assert.Equal(
+            (token.Id, (Guid?)null, (string?)null, (Guid?)null, (string?)null),
+            (token.Id, token.IssuedByUserId, token.IssuedByName, token.RevokedByUserId, token.RevokedByName)));
+        foreach (var identityId in new[] { legacy.Id, rotated.User.Id })
+        {
+            var listed = await admin.GetFromJsonAsync<List<ServiceIdentityTokenDto>>($"/api/admin/service-identities/{identityId}/tokens", ProgramDependencyWiringTests.Json);
+            Assert.All(listed!, token => Assert.Equal((token.Name, (PersonalAccessTokenAdminDto?)null, (PersonalAccessTokenAdminDto?)null), (token.Name, token.IssuedBy, token.RevokedBy)));
+        }
+
+        // The Settings page's list of the user's own tokens is unchanged: it names no admin.
+        using (var ownList = await admin.GetAsync("/api/me/personal-access-tokens"))
+        {
+            var ownJson = await ownList.Content.ReadAsStringAsync();
+            Assert.Contains("\"tokenPrefix\"", ownJson, StringComparison.Ordinal);
+            Assert.DoesNotContain("issuedBy", ownJson, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("revokedBy", ownJson, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // A token from before still works through MCP, as do the command's new pair; the rotated-away pair does not.
+        var validatedLegacy = await ValidateAsync(mcp, legacyToken.PlaintextToken);
+        using (var forward = await ForwardAsync(mcp, validatedLegacy, HttpMethod.Get, "/api/projects", null))
+        {
+            Assert.Equal(HttpStatusCode.OK, forward.StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, await ValidationStatusAsync(mcp, rotated.FullToken.PlaintextToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, issued.FullToken.PlaintextToken));
+    }
+
+    // Every "now" of the admin endpoints is the application's clock: here a day behind the real one.
+    [Fact]
+    public async Task The_admin_endpoints_judge_expiry_by_the_applications_clock()
+    {
+        var clock = new WorkItemClaimApiTests.MutableClock();
+        var realNow = DateTimeOffset.UtcNow;
+        clock.Advance(realNow.AddDays(-1) - clock.Now);
+        using var api = new AdminApi(clock: clock);
+        var identity = Identity("Factory", realNow.AddDays(-2));
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var admin = api.CreateSessionClient(AdminSubject);
+        // In the past by the real clock, in the future by the application's.
+        var expires = realNow.AddHours(-1);
+
+        using var issueResponse = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/tokens",
+            new { name = "Writer", expiresAtUtc = expires }, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.Created, issueResponse.StatusCode);
+        var issued = (await issueResponse.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.True(issued.Token.IsActive);
+
+        using var rotateResponse = await SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, issued.Token.Id),
+            new { expiresAtUtc = realNow.AddMinutes(-30) }, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.Created, rotateResponse.StatusCode);
+        Assert.True((await rotateResponse.Content.ReadFromJsonAsync<RotatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!.Token.IsActive);
+
+        var listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
+        Assert.Equal(1, Assert.Single(listed!).ActiveTokenCount);
+
+        // Now a day ahead of the real clock: an expiry in the real future is refused, and the token has expired.
+        clock.Advance(TimeSpan.FromDays(2));
+        Assert.Equal(
+            (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument),
+            await AnswerAsync(admin, $"/api/admin/service-identities/{identity.Id}/tokens", new { name = "Late", expiresAtUtc = realNow.AddDays(1) }));
+        var tokens = await admin.GetFromJsonAsync<List<ServiceIdentityTokenDto>>($"/api/admin/service-identities/{identity.Id}/tokens", ProgramDependencyWiringTests.Json);
+        var active = tokens!.Single(token => token.RevokedAtUtc is null);
+        Assert.Equal(
+            (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument),
+            await AnswerAsync(admin, RotatePath(identity.Id, active.Id), new { expiresAtUtc = realNow.AddDays(1) }));
+        listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
+        Assert.Equal(0, Assert.Single(listed!).ActiveTokenCount);
+    }
+
+    // In Production, as the server runs: no developer exception page answers for the endpoint.
+    [Fact]
+    public async Task A_malformed_wrong_typed_or_empty_body_is_refused_with_a_typed_code_writes_nothing_and_logs_no_error()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var token = Token(identity, name: "Writer");
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.Add(identity);
+            dbContext.PersonalAccessTokens.Add(token);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+        var create = "/api/admin/service-identities";
+        var issue = $"/api/admin/service-identities/{identity.Id}/tokens";
+        var rotate = RotatePath(identity.Id, token.Id);
+
+        var answers = new List<(string Path, string Body, HttpStatusCode Status, string? Code, bool HasMessage)>();
+        foreach (var (path, body) in new[]
+        {
+            (create, "{"), (create, "{\"name\": 1}"), (create, "[]"), (create, ""), (create, "null"),
+            (issue, "{"), (issue, "{\"name\": \"Token\", \"expiresAtUtc\": \"tomorrow\"}"), (issue, "{\"name\": {}}"), (issue, ""), (issue, "null"),
+            (rotate, "{"), (rotate, "{\"expiresAtUtc\": \"tomorrow\"}"), (rotate, "{\"expiresAtUtc\": 5}"), (rotate, "[1]")
+        })
+        {
+            using var response = await SendRawAsync(admin, path, body);
+            var text = await response.Content.ReadAsStringAsync();
+            var error = text.Length == 0 ? null : System.Text.Json.JsonSerializer.Deserialize<KanbanErrorDto>(text, ProgramDependencyWiringTests.Json);
+            answers.Add((path, body, response.StatusCode, error?.Code, !string.IsNullOrWhiteSpace(error?.Message)));
+        }
+
+        Assert.All(answers, answer => Assert.Equal((answer.Path, answer.Body, HttpStatusCode.BadRequest, (string?)KanbanErrorCodes.InvalidArgument, true), answer));
+        Assert.Equal(1, await api.ReadAsync(dbContext => dbContext.AppUsers.CountAsync()));
+        var stored = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().SingleAsync());
+        Assert.Null(stored.RevokedAtUtc);
+        Assert.Empty(api.Logs.Entries.Where(entry => entry.Level >= LogLevel.Error));
+    }
+
+    // Disable and enable read no body: whatever is sent is ignored and nothing is logged as an error.
+    [Fact]
+    public async Task Disable_and_enable_ignore_a_malformed_body_and_log_no_error()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        using var disable = await SendRawAsync(admin, $"/api/admin/service-identities/{identity.Id}/disable", "{");
+        using var enable = await SendRawAsync(admin, $"/api/admin/service-identities/{identity.Id}/enable", "{\"x\": 1");
+
+        Assert.Equal((HttpStatusCode.OK, HttpStatusCode.OK), (disable.StatusCode, enable.StatusCode));
+        Assert.Empty(api.Logs.Entries.Where(entry => entry.Level >= LogLevel.Error));
+    }
+
+    private static async Task<HttpResponseMessage> SendRawAsync(HttpClient client, string path, string body)
+    {
+        var antiforgery = await client.GetFromJsonAsync<AntiforgeryToken>("/api/auth/antiforgery");
+        var request = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
+        request.Headers.Add("X-CSRF-TOKEN", antiforgery!.Token);
+        return await client.SendAsync(request);
+    }
+
     private static string RotatePath(Guid identityId, Guid tokenId) => $"/api/admin/service-identities/{identityId}/tokens/{tokenId}/rotate";
 
     // The SQLite tests never see the SQL of MySql.EntityFrameworkCore, which cannot translate every query.
@@ -854,7 +1066,10 @@ public sealed class AdminServiceIdentityApiTests
         private readonly ProgramDependencyWiringTests.ApiApplication inner = new();
         private readonly WebApplicationFactory<KanbanDbContext> factory;
 
-        public AdminApi(string? adminSubjects = AdminSubject, bool personalAccessTokensEnabled = true)
+        /// <summary>Every log entry the application writes.</summary>
+        public CapturedLogs Logs { get; } = new();
+
+        public AdminApi(string? adminSubjects = AdminSubject, bool personalAccessTokensEnabled = true, TimeProvider? clock = null)
         {
             factory = inner.WithWebHostBuilder(builder =>
             {
@@ -866,8 +1081,14 @@ public sealed class AdminServiceIdentityApiTests
                 builder.UseSetting("Auth:AdminSubjects", adminSubjects ?? string.Empty);
                 builder.UseSetting("PersonalAccessTokens:Enabled", personalAccessTokensEnabled ? "true" : "false");
                 builder.UseSetting("PersonalAccessTokens:EncryptionKey", Convert.ToBase64String(Enumerable.Range(1, 32).Select(value => (byte)value).ToArray()));
+                builder.ConfigureLogging(logging => logging.AddProvider(Logs));
                 builder.ConfigureTestServices(services =>
                 {
+                    if (clock is not null)
+                    {
+                        services.AddSingleton<TimeProvider>(clock);
+                    }
+
                     services.AddAuthentication().AddScheme<AuthenticationSchemeOptions, TestSessionHandler>(TestSessionHandler.SchemeName, null);
                     services.PostConfigure<AuthenticationOptions>(options =>
                     {
@@ -901,15 +1122,25 @@ public sealed class AdminServiceIdentityApiTests
         }
 
         /// <summary>Runs the create-service-identity command's provisioning against the application's database.</summary>
-        public async Task<ProvisionedServiceIdentity> ProvisionAsync(string name)
+        public async Task<ProvisionedServiceIdentity> ProvisionAsync(string name, bool rotate = false)
         {
             using var scope = factory.Services.CreateScope();
             return await ServiceIdentityProvisioner.ProvisionAsync(
                 scope.ServiceProvider.GetRequiredService<KanbanDbContext>(),
                 scope.ServiceProvider.GetRequiredService<IPersonalAccessTokenService>(),
                 name,
-                rotate: false,
+                rotate,
                 CancellationToken.None);
+        }
+
+        /// <summary>Stores a full-scope token for the user with the application's token service, naming no admin.</summary>
+        public async Task<CreatedPersonalAccessToken> CreateTokenAsync(Guid userId, string name)
+        {
+            using var scope = factory.Services.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<KanbanDbContext>();
+            var user = await dbContext.AppUsers.SingleAsync(candidate => candidate.Id == userId);
+            return await scope.ServiceProvider.GetRequiredService<IPersonalAccessTokenService>()
+                .CreateAsync(user, name, null, PersonalAccessTokenScopes.Full, CancellationToken.None);
         }
 
         public HttpClient CreateClient(WebApplicationFactoryClientOptions options) => factory.CreateClient(options);
@@ -963,6 +1194,29 @@ public sealed class AdminServiceIdentityApiTests
         {
             factory.Dispose();
             inner.Dispose();
+        }
+    }
+
+    internal sealed class CapturedLogs : ILoggerProvider
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<(LogLevel Level, string Category, string Message)> entries = new();
+
+        public IReadOnlyList<(LogLevel Level, string Category, string Message)> Entries => entries.ToList();
+
+        public ILogger CreateLogger(string categoryName) => new Logger(this, categoryName);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Logger(CapturedLogs logs, string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+                logs.entries.Enqueue((logLevel, category, $"{formatter(state, exception)} {exception}"));
         }
     }
 

@@ -1084,6 +1084,11 @@ body::before {
   gap: 8px;
   min-width: 0;
 }
+.rotate-no-expiry {
+  color: var(--status-blocked-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
 .token-actions {
   display: flex;
   gap: 6px;

@@ -139,7 +139,8 @@ public static class ServiceIdentityProvisioner
 
     /// <summary>
     /// Issues a token for the service identity in one transaction that holds the identity's row first: a disable of it
-    /// waits for this issue (and then revokes the token) or this issue sees the disable and writes nothing.
+    /// waits for this issue (and then revokes the token) or this issue sees the disable and writes nothing. The token
+    /// records <paramref name="admin"/> as the admin who issued it.
     /// </summary>
     public static async Task<ServiceIdentityTokenResult> IssueTokenAsync(
         KanbanDbContext dbContext,
@@ -148,6 +149,7 @@ public static class ServiceIdentityProvisioner
         string name,
         DateTimeOffset? expiresAtUtc,
         string scope,
+        ChangeActor? admin,
         CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -157,7 +159,7 @@ public static class ServiceIdentityProvisioner
             return refusal;
         }
 
-        var created = await personalAccessTokenService.CreateAsync(identity!, name, expiresAtUtc, scope, cancellationToken);
+        var created = await personalAccessTokenService.CreateAsync(identity!, name, expiresAtUtc, scope, cancellationToken, admin);
         await transaction.CommitAsync(cancellationToken);
         return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.Issued, identity, created);
     }
@@ -169,6 +171,7 @@ public static class ServiceIdentityProvisioner
     /// disable, the command's rotate) holds that row, so rotates of one token run one at a time: the first replaces
     /// it, the others find it revoked and write nothing. A revoked token is not rotated; an
     /// expired one is. Whatever is refused or fails, nothing is written and the old token stays as it was.
+    /// <paramref name="admin"/> is recorded as the admin who issued the replacement and who revoked the old token.
     /// </summary>
     public static async Task<ServiceIdentityTokenResult> RotateTokenAsync(
         KanbanDbContext dbContext,
@@ -176,6 +179,7 @@ public static class ServiceIdentityProvisioner
         Guid identityId,
         Guid tokenId,
         DateTimeOffset? expiresAtUtc,
+        ChangeActor? admin,
         CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -198,21 +202,30 @@ public static class ServiceIdentityProvisioner
             return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.TokenRevoked, identity);
         }
 
-        var created = await personalAccessTokenService.CreateAsync(identity!, old.Name, expiresAtUtc, old.Scope, cancellationToken);
+        var created = await personalAccessTokenService.CreateAsync(identity!, old.Name, expiresAtUtc, old.Scope, cancellationToken, admin);
+        var (revokedById, revokedByName) = (admin?.Id, admin?.Name);
         await dbContext.PersonalAccessTokens
             .Where(token => token.Id == tokenId)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(token => token.RevokedAtUtc, created.Token.CreatedAtUtc), cancellationToken);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(token => token.RevokedAtUtc, created.Token.CreatedAtUtc)
+                .SetProperty(token => token.RevokedByUserId, revokedById)
+                .SetProperty(token => token.RevokedByName, revokedByName), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.Issued, identity, created);
     }
 
     /// <summary>
     /// Revokes the service identity's token <paramref name="tokenId"/>; revoking a revoked token keeps the time it was
-    /// first revoked. False when the identity is no service identity or the token is not one of its tokens. Holds the
-    /// identity's row first, as every write of its tokens does, so a revoke and a rotate of one token run one after
-    /// the other.
+    /// first revoked and the admin who first revoked it. False when the identity is no service identity or the token is
+    /// not one of its tokens. Holds the identity's row first, as every write of its tokens does, so a revoke and a
+    /// rotate of one token run one after the other.
     /// </summary>
-    public static async Task<bool> RevokeTokenAsync(KanbanDbContext dbContext, Guid identityId, Guid tokenId, CancellationToken cancellationToken)
+    public static async Task<bool> RevokeTokenAsync(
+        KanbanDbContext dbContext,
+        Guid identityId,
+        Guid tokenId,
+        ChangeActor? admin,
+        CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         if (await LockAsync(dbContext, identityId, cancellationToken) == 0)
@@ -227,8 +240,14 @@ public static class ServiceIdentityProvisioner
             return false;
         }
 
-        token.RevokedAtUtc ??= DateTimeOffset.UtcNow;
-        await dbContext.SaveChangesAsync(cancellationToken);
+        if (token.RevokedAtUtc is null)
+        {
+            token.RevokedAtUtc = DateTimeOffset.UtcNow;
+            token.RevokedByUserId = admin?.Id;
+            token.RevokedByName = admin?.Name;
+            await dbContext.SaveChangesAsync(cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
         return true;
     }
@@ -258,9 +277,10 @@ public static class ServiceIdentityProvisioner
 
     /// <summary>
     /// Disables the service identity and revokes every token of it that is not revoked yet, in one transaction.
-    /// Disabling a disabled identity keeps the time it was first disabled. False when there is no such identity.
+    /// Disabling a disabled identity keeps the time it was first disabled. Each token it revokes records
+    /// <paramref name="admin"/> as its revoker; a token revoked before keeps its own. False when there is no such identity.
     /// </summary>
-    public static async Task<bool> DisableAsync(KanbanDbContext dbContext, Guid identityId, CancellationToken cancellationToken)
+    public static async Task<bool> DisableAsync(KanbanDbContext dbContext, Guid identityId, ChangeActor? admin, CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         if (await LockAsync(dbContext, identityId, cancellationToken) == 0)
@@ -269,6 +289,7 @@ public static class ServiceIdentityProvisioner
         }
 
         var now = DateTimeOffset.UtcNow;
+        var (revokedById, revokedByName) = (admin?.Id, admin?.Name);
         await dbContext.AppUsers
             .Where(user => user.Id == identityId && user.DisabledAtUtc == null)
             .ExecuteUpdateAsync(setters => setters
@@ -276,7 +297,10 @@ public static class ServiceIdentityProvisioner
                 .SetProperty(user => user.UpdatedAtUtc, now), cancellationToken);
         await dbContext.PersonalAccessTokens
             .Where(token => token.AppUserId == identityId && token.RevokedAtUtc == null)
-            .ExecuteUpdateAsync(setters => setters.SetProperty(token => token.RevokedAtUtc, now), cancellationToken);
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(token => token.RevokedAtUtc, now)
+                .SetProperty(token => token.RevokedByUserId, revokedById)
+                .SetProperty(token => token.RevokedByName, revokedByName), cancellationToken);
         await transaction.CommitAsync(cancellationToken);
         return true;
     }
