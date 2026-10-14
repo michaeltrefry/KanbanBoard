@@ -735,12 +735,29 @@ function CommandPalette({ open, onClose, items, projects, epics, currentProject,
 }
 
 /* ============ Story editor (shared by the detail sheet and the story page) ============ */
+// The fields the editor writes, each with the fields of the story that come with it (the epic's name with its id).
+const EDITABLE_FIELDS = {
+  title: ["title"], description: ["description"], type: ["type"], status: ["status"], priority: ["priority"],
+  epicId: ["epicId", "epic"], estimate: ["estimate"], labels: ["labels", "labelList"],
+};
+
+// The editable field whose control has the focus (each control carries data-field), if any.
+function focusedStoryField() {
+  return document.activeElement?.dataset?.field || null;
+}
+
 // Local copy of the story with a 400ms debounced autosave. flush() saves a pending edit now, before navigating away.
+// A save sends only the fields edited since the last one, so it does not write back other fields as they were read.
 function useStoryEditor(story, onUpdate) {
   const [local, setLocal] = useState(story);
   const [saving, setSaving] = useState(false);
   const saveTimer = useRef(null);
   const pending = useRef(null);
+  const pendingFields = useRef(new Set());
+  // Fields of saves under way, with how many of them name each.
+  const savingFields = useRef(new Map());
+  // The highest version a save of this editor answered with: a copy read before that save is older than the page.
+  const savedVersion = useRef(0);
   const inFlight = useRef(Promise.resolve());
 
   // Another story (or none): an edit of the previous one still waiting for its debounce is saved now, not dropped.
@@ -749,13 +766,25 @@ function useStoryEditor(story, onUpdate) {
       clearTimeout(saveTimer.current);
       save(pending.current);
     }
+    savedVersion.current = 0;
     setLocal(story);
   }, [story?.id]);
 
   const save = (next) => {
+    const fields = [...pendingFields.current];
     pending.current = null;
+    pendingFields.current = new Set();
+    fields.forEach(f => savingFields.current.set(f, (savingFields.current.get(f) || 0) + 1));
     setSaving(true);
-    const request = Promise.resolve(onUpdate(next)).finally(() => setSaving(false));
+    const request = Promise.resolve(onUpdate(next, fields))
+      .then(saved => {
+        if (saved?.id === next.id) savedVersion.current = Math.max(savedVersion.current, saved.version || 0);
+        return saved;
+      })
+      .finally(() => {
+        fields.forEach(f => savingFields.current.set(f, savingFields.current.get(f) - 1));
+        setSaving(false);
+      });
     inFlight.current = request.catch(() => {});
     return request;
   };
@@ -763,6 +792,7 @@ function useStoryEditor(story, onUpdate) {
   const patch = (p) => {
     const next = { ...local, ...p };
     setLocal(next);
+    Object.keys(p).forEach(f => pendingFields.current.add(f));
     pending.current = next;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => save(next), 400);
@@ -774,7 +804,33 @@ function useStoryEditor(story, onUpdate) {
     return pending.current ? save(pending.current) : inFlight.current;
   };
 
-  return { local, setLocal, saving, patch, flush };
+  // Drops an edit not yet saved, when there is nothing left to save it to (the story was deleted).
+  const discard = () => {
+    clearTimeout(saveTimer.current);
+    pending.current = null;
+    pendingFields.current = new Set();
+  };
+
+  // Whether a field is being edited here: its control has the focus, or an edit of it is not yet saved.
+  const isEditing = (field) =>
+    focusedStoryField() === field || pendingFields.current.has(field) || savingFields.current.get(field) > 0;
+
+  // Takes a copy of the story read from the server, except for the fields being edited here, which keep what the
+  // viewer typed. A copy older than the editor's own last save is dropped. Answers the held fields it would change.
+  const merge = (fresh) => {
+    if (!fresh || (fresh.version || 0) < savedVersion.current) return [];
+    const held = Object.keys(EDITABLE_FIELDS).filter(isEditing);
+    const differs = (f) => local?.id === fresh.id && (fresh[f] ?? null) !== (local[f] ?? null);
+    setLocal(current => {
+      if (!current || current.id !== fresh.id) return current;
+      const next = { ...fresh };
+      held.forEach(f => EDITABLE_FIELDS[f].forEach(key => { next[key] = current[key]; }));
+      return next;
+    });
+    return held.filter(differs);
+  };
+
+  return { local, saving, patch, flush, discard, merge };
 }
 
 function StoryFields({ local, epics, patch }) {
@@ -782,37 +838,37 @@ function StoryFields({ local, epics, patch }) {
     <div>
       <div className="sheet-row">
         <label>Type</label>
-        <select value={local.type} onChange={e => patch({ type: e.target.value })}>
+        <select data-field="type" value={local.type} onChange={e => patch({ type: e.target.value })}>
           {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
         </select>
       </div>
       <div className="sheet-row">
         <label>Status</label>
-        <select value={local.status} onChange={e => patch({ status: e.target.value })}>
+        <select data-field="status" value={local.status} onChange={e => patch({ status: e.target.value })}>
           {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
         </select>
       </div>
       <div className="sheet-row">
         <label>Priority</label>
-        <select value={local.priority} onChange={e => patch({ priority: e.target.value })}>
+        <select data-field="priority" value={local.priority} onChange={e => patch({ priority: e.target.value })}>
           {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
         </select>
       </div>
       <div className="sheet-row">
         <label>Epic</label>
-        <select value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
+        <select data-field="epicId" value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
           <option value="">(no epic)</option>
           {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
         </select>
       </div>
       <div className="sheet-row">
         <label>Estimate</label>
-        <input type="number" min={0} max={100} value={local.estimate ?? 0}
+        <input data-field="estimate" type="number" min={0} max={100} value={local.estimate ?? 0}
                onChange={e => patch({ estimate: Number(e.target.value) })} />
       </div>
       <div className="sheet-row">
         <label>Labels</label>
-        <input value={parseLabels(local.labels).join(", ")}
+        <input data-field="labels" value={parseLabels(local.labels).join(", ")}
                onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
       </div>
     </div>
@@ -820,7 +876,7 @@ function StoryFields({ local, epics, patch }) {
 }
 
 // Description, comments and the comment composer. Key it by story id so another story starts with an empty draft.
-function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
+function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
   const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem("kanban-comment-author") || "");
   const [commentBody, setCommentBody] = useState("");
   const [commenting, setCommenting] = useState(false);
@@ -839,8 +895,9 @@ function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
     try {
       localStorage.setItem("kanban-comment-author", author);
       const saved = await onAddComment(storyId, { author, body });
-      // Only while the editor still shows this story; it may have switched to another while the comment saved.
-      setLocal(current => current?.id === saved.id ? saved : current);
+      // Only while the editor still shows this story (it may have switched to another while the comment saved), and
+      // without the fields being edited, whose edit is not saved yet.
+      merge(saved);
       setCommentBody("");
     } finally {
       setCommenting(false);
@@ -852,6 +909,7 @@ function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
       <div className="sheet-section-title">Description</div>
       <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
         <textarea
+          data-field="description"
           placeholder="Add a description…"
           value={local.description || ""}
           onChange={e => patch({ description: e.target.value })}
@@ -903,7 +961,7 @@ function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
 
 /* ============ Detail sheet ============ */
 function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage }) {
-  const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
+  const { local, saving, patch, flush, merge } = useStoryEditor(story, onUpdate);
 
   // Saves a pending edit first, so the page loads the story as it was left here.
   const openPage = () => {
@@ -920,6 +978,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
           <div style={{flex:1}}>
             <div className="sheet-eyebrow">{shortKey(projectKey, story.id)} {saving && "· saving…"}</div>
             <input
+              data-field="title"
               className="sheet-title"
               style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
               value={local.title}
@@ -938,7 +997,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
         </header>
         <div className="sheet-body">
           <StoryFields local={local} epics={epics} patch={patch}/>
-          <StoryNotes key={story.id} storyId={story.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
+          <StoryNotes key={story.id} storyId={story.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}/>
         </div>
       </aside>
     </>
@@ -1024,7 +1083,7 @@ function changeValue(field, value, titles) {
 }
 
 // The story's change history, newest first. Read again after each save on this page and after a comment.
-function StoryHistory({ storyId, local, saving }) {
+function StoryHistory({ storyId, local, saving, refreshCount }) {
   const [entries, setEntries] = useState(null);
   const [error, setError] = useState(null);
   const request = useRef(0);
@@ -1035,7 +1094,7 @@ function StoryHistory({ storyId, local, saving }) {
     api.listItemHistory(storyId).then(
       loaded => { if (current === request.current) { setEntries(loaded.reverse()); setError(null); } },
       e => { if (current === request.current) setError(e.message); });
-  }, [storyId, saving, local.comments?.length]);
+  }, [storyId, saving, local.comments?.length, refreshCount]);
 
   const titles = useMemo(() => Object.fromEntries(
     [...(local.blockers || []), ...(local.dependents || [])].map(item => [item.id, item.title])
@@ -1071,11 +1130,13 @@ function StoryHistory({ storyId, local, saving }) {
   );
 }
 
-function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory }) {
+function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory }) {
   const [story, setStory] = useState(null);
-  const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | error
+  const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | deleted | error
   const [loadError, setLoadError] = useState(null);
-  const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
+  // Counts the copies of the story taken from the change feed, so the history is read again with each.
+  const [refreshCount, setRefreshCount] = useState(0);
+  const { local, saving, patch, flush, discard, merge } = useStoryEditor(story, onUpdate);
   // Saves a pending edit first, so coming back to this page loads the story as it was left.
   const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
   const openStory = (id) => { flush().finally(() => onOpenStory(id)); };
@@ -1096,6 +1157,51 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
   }, [storyId]);
 
   useEffect(() => { load(); }, [load]);
+
+  /* Live updates: App's change feed (its one EventSource) counts every change; the story is read again with each. */
+  const latestRefresh = useRef(0);
+  // An update held back for a field with the focus: taken when the field loses it.
+  const heldBack = useRef(false);
+  const refresh = async () => {
+    const current = ++latestRefresh.current;
+    try {
+      const fresh = await api.getWorkItem(storyId);
+      if (current !== latestRefresh.current) return;
+      heldBack.current = merge(fresh).length > 0;
+      setRefreshCount(n => n + 1);
+    } catch (e) {
+      if (current !== latestRefresh.current) return;
+      // Deleted elsewhere while open here: an edit not yet saved has nothing left to go to.
+      if (e.status === 404) { discard(); setLoadState("deleted"); }
+    }
+  };
+  const firstChangeSeq = useRef(changeSeq);
+  useEffect(() => {
+    if (changeSeq === firstChangeSeq.current || loadState !== "ready") return;
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changeSeq]);
+  // Leaving a field takes what arrived for it while it had the focus (after the focus has moved, so it is not held).
+  const onFieldBlur = () => {
+    if (heldBack.current) setTimeout(() => { void refresh(); }, 0);
+  };
+
+  if (loadState === "deleted") {
+    return (
+      <section className="story-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">Story deleted</div>
+            <h2>This story was deleted</h2>
+          </div>
+          <p>It was deleted elsewhere while it was open here.</p>
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={() => leave(null, null)}>Back to board</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
 
   if (loadState === "notFound" || loadState === "error") {
     const notFound = loadState === "notFound";
@@ -1128,7 +1234,7 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
   const epic = storyEpics.find(e => e.id === local.epicId) || ownEpic;
   const epicOptions = epic && !storyEpics.includes(epic) ? [...storyEpics, epic] : storyEpics;
   return (
-    <section className="story-page">
+    <section className="story-page" onBlur={onFieldBlur}>
       <nav className="story-crumbs" aria-label="Breadcrumb">
         <a href={`/?project=${local.projectId}`}
            onClick={e => { e.preventDefault(); leave(local.projectId, null); }}>
@@ -1149,6 +1255,7 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
           <div style={{flex:1}}>
             <div className="sheet-eyebrow">{shortKey(project?.key, local.id)} {saving && "· saving…"}</div>
             <input
+              data-field="title"
               className="sheet-title"
               style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
               value={local.title}
@@ -1162,8 +1269,8 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
             <StoryRelations local={local} onOpenStory={openStory}/>
           </div>
           <div>
-            <StoryNotes key={local.id} storyId={local.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
-            <StoryHistory storyId={local.id} local={local} saving={saving}/>
+            <StoryNotes key={local.id} storyId={local.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}/>
+            <StoryHistory storyId={local.id} local={local} saving={saving} refreshCount={refreshCount}/>
           </div>
         </div>
       </div>
@@ -2204,6 +2311,8 @@ function App() {
   const [currentView, setCurrentView] = useState(() => viewFromUrl());
   // Set while the story page is showing; the URL is then /stories/{id} and the board's query is left out.
   const [currentStoryId, setCurrentStoryId] = useState(() => storyIdFromUrl());
+  // Counts the changes signalled by the change feed (/api/changes).
+  const [changeSeq, setChangeSeq] = useState(0);
   // Only shows the Admin entry point; the API refuses every admin call of anyone who is not an admin.
   const [isAdmin, setIsAdmin] = useState(false);
 
@@ -2421,12 +2530,15 @@ function App() {
     let eventSource = null;
     let reconnectTimer = null;
     let refreshTimer = null;
+    let reconnecting = false;
 
     const scheduleRefresh = () => {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         if (!disposed) {
           void refreshLiveView();
+          // The story page reads its story again on this; it has no EventSource of its own.
+          setChangeSeq(seq => seq + 1);
         }
       }, 150);
     };
@@ -2436,11 +2548,14 @@ function App() {
 
       eventSource = new window.EventSource("/api/changes");
       eventSource.addEventListener("changed", scheduleRefresh);
+      // Changes made while the stream was down were never signalled: a reconnect refreshes once.
+      if (reconnecting) eventSource.onopen = scheduleRefresh;
       eventSource.onerror = () => {
         eventSource?.close();
         eventSource = null;
 
         if (!disposed) {
+          reconnecting = true;
           reconnectTimer = window.setTimeout(connect, 2000);
         }
       };
@@ -2491,18 +2606,22 @@ function App() {
     }
   };
 
-  const updateStory = async (next) => {
+  // Writes the given fields of the story (every field without a list): a field left out keeps its value on the server.
+  const updateStory = async (next, fields) => {
+    const payload = {
+      epicId: next.epicId || null,
+      title: next.title,
+      description: next.description || null,
+      type: next.type,
+      status: next.status,
+      priority: next.priority,
+      estimate: next.estimate ?? null,
+      labels: next.labels || null,
+    };
     try {
-      const saved = await api.updateWorkItem(next.id, {
-        epicId: next.epicId || null,
-        title: next.title,
-        description: next.description || null,
-        type: next.type,
-        status: next.status,
-        priority: next.priority,
-        estimate: next.estimate ?? null,
-        labels: next.labels || null,
-      });
+      const saved = await api.updateWorkItem(next.id, fields
+        ? Object.fromEntries(Object.entries(payload).filter(([field]) => fields.includes(field)))
+        : payload);
       setItems(cur => cur.map(s => s.id === saved.id ? saved : s));
       // The sheet as it is now, not as it was when the request started: it may show another story by then.
       setSelectedStory(current => current?.id === saved.id ? saved : current);
@@ -2748,6 +2867,7 @@ function App() {
             storyId={currentStoryId}
             projects={projects}
             epics={epics}
+            changeSeq={changeSeq}
             onLoaded={onStoryLoaded}
             onUpdate={updateStory}
             onAddComment={addComment}
