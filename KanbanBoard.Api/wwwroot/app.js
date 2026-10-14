@@ -1015,6 +1015,20 @@ function formatTokenDate(iso) {
   return iso ? formatDateTime(iso) : "Never";
 }
 
+/* The value of a datetime-local input for a date, in local time, rounded up to the next whole minute. */
+function toDateTimeLocal(date) {
+  const d = new Date(Math.ceil(date.getTime() / 60000) * 60000);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* The expiry a rotate starts from: the old token's lifetime, carried forward from now; none when it had none. */
+function rotatedExpiryLocal(token) {
+  if (!token.expiresAtUtc) return "";
+  const lifetime = new Date(token.expiresAtUtc).getTime() - new Date(token.createdAtUtc).getTime();
+  return lifetime > 0 ? toDateTimeLocal(new Date(Date.now() + lifetime)) : "";
+}
+
 /* Name, optional expiry and scope; shows the plaintext of the token it created once, with a copy action.
    onCreate({ name, expiresAtUtc, scope }) returns the created token, or null when it failed. */
 function TokenCreateForm({ eyebrow, title, placeholder, scopeId, onCreate }) {
@@ -1133,6 +1147,9 @@ function TokenRow({ token, children }) {
         <span>Created <b>{formatTokenDate(token.createdAtUtc)}</b></span>
         <span>Last used <b>{formatTokenDate(token.lastUsedAtUtc)}</b></span>
         <span>Expires <b>{token.expiresAtUtc ? formatTokenDate(token.expiresAtUtc) : "Never"}</b></span>
+        {/* Only the admin list carries who issued and revoked a token. */}
+        {"issuedBy" in token && <span>Issued by <b>{token.issuedBy?.name || "\u2014"}</b></span>}
+        {"revokedBy" in token && token.revokedAtUtc && <span>Revoked by <b>{token.revokedBy?.name || "\u2014"}</b></span>}
       </div>
       <div className="token-actions">{children}</div>
     </article>
@@ -1378,7 +1395,7 @@ function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
                   <button
                     className="btn small ghost"
                     type="button"
-                    onClick={() => { setRotatingId(token.id); setRotateExpiresLocal(""); }}
+                    onClick={() => { setRotatingId(token.id); setRotateExpiresLocal(rotatedExpiryLocal(token)); }}
                     disabled={identity.disabled || state === "Revoked" || busyId === token.id || rotatingId === token.id}
                   >
                     Rotate
@@ -1401,10 +1418,15 @@ function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
                         type="datetime-local"
                         value={rotateExpiresLocal}
                         onChange={e => setRotateExpiresLocal(e.target.value)}
-                        title="Optional; the replacement does not expire when left empty"
                         style={{minWidth:0}}
                       />
                     </div>
+                    {!rotateExpiresLocal && (
+                      <div className="sheet-row" style={{gridTemplateColumns:"110px minmax(0, 1fr)"}}>
+                        <span />
+                        <span className="rotate-no-expiry" role="note">Replacement will never expire</span>
+                      </div>
+                    )}
                     <div className="settings-actions">
                       <button className="btn small ghost" type="button" onClick={() => setRotatingId(null)}>Cancel</button>
                       <button className="btn small primary" type="submit" disabled={busyId === token.id}>
