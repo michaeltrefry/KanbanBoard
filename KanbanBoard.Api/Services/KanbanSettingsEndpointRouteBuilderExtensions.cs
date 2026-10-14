@@ -15,13 +15,14 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             .WithTags("User Settings");
 
         group.MapGet("", async (
+            HttpContext httpContext,
             ICurrentUserService currentUserService,
             CancellationToken cancellationToken) =>
         {
             var user = await GetCurrentUserOrNullAsync(currentUserService, cancellationToken);
             return user is null
                 ? Results.Unauthorized()
-                : Results.Ok(ToCurrentUserDto(user));
+                : Results.Ok(ToCurrentUserDto(user, KanbanAdminEndpointRouteBuilderExtensions.IsAdmin(httpContext)));
         })
         .WithName("GetCurrentUser");
 
@@ -124,16 +125,17 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
         }
     }
 
-    private static CurrentUserDto ToCurrentUserDto(AppUser user) =>
+    private static CurrentUserDto ToCurrentUserDto(AppUser user, bool isAdmin) =>
         new(
             user.Id,
             user.Issuer,
             user.Subject,
             user.DisplayName,
             user.Email,
-            user.LastSeenAtUtc);
+            user.LastSeenAtUtc,
+            isAdmin);
 
-    private static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token)
+    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token)
     {
         var now = DateTimeOffset.UtcNow;
         return new PersonalAccessTokenMetadataDto(
@@ -148,12 +150,12 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             token.Scope);
     }
 
-    private static string NormalizeScope(string? scope) =>
+    internal static string NormalizeScope(string? scope) =>
         string.IsNullOrWhiteSpace(scope)
             ? PersonalAccessTokenScopes.Full
             : scope.Trim().ToLowerInvariant();
 
-    private static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request)
+    internal static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
         {

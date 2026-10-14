@@ -173,6 +173,11 @@ const api = {
     fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
   revokePersonalAccessToken: (id) =>
     fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
+
+  listServiceIdentities: () =>
+    fetchJson(`/api/admin/service-identities`),
+  issueServiceIdentityToken: (identityId, payload) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
 };
 
 /* ============ Feedback hook ============ */
@@ -253,7 +258,8 @@ function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showA
 }
 
 /* ============ Topbar ============ */
-function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenBoard }) {
+function Topbar({ project, epic, view, isAdmin, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenAdmin, onOpenBoard }) {
+  const onPage = view === "settings" || view === "admin";
   return (
     <header className="topbar">
       <div className="crumbs">
@@ -262,17 +268,22 @@ function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, o
             <span className="crumb-key">USER</span>
             <span className="crumb-title">Settings</span>
           </>
+        ) : view === "admin" ? (
+          <>
+            <span className="crumb-key">ADMIN</span>
+            <span className="crumb-title">Service identities</span>
+          </>
         ) : project && <>
           <span className="crumb-key">{project.key}</span>
           <span className="crumb-title">{project.name}</span>
         </>}
-        {view !== "settings" && epic && <>
+        {!onPage && epic && <>
           <span className="sep">/</span>
           <span className="crumb-title" style={{fontSize:16, color:"var(--ink-2)"}}>{epic.name}</span>
         </>}
       </div>
       <div className="top-actions">
-        {view === "settings" ? (
+        {onPage ? (
           <button className="btn ghost" onClick={onOpenBoard} disabled={!project}>Board</button>
         ) : (
           <>
@@ -282,6 +293,9 @@ function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, o
             </button>
             <button className="btn" onClick={onNewItem} disabled={!project}>+ Add story</button>
           </>
+        )}
+        {isAdmin && (
+          <button className={clsx("btn ghost", view === "admin" && "active")} onClick={onOpenAdmin}>Admin</button>
         )}
         <button className={clsx("btn ghost", view === "settings" && "active")} onClick={onOpenSettings}>Settings</button>
         <button className="btn ghost" onClick={onOpenTweaks} title="Tweaks">⚙</button>
@@ -987,17 +1001,110 @@ function formatTokenDate(iso) {
   return iso ? formatDateTime(iso) : "Never";
 }
 
-function UserSettingsView({ show }) {
-  const [user, setUser] = useState(null);
-  const [tokens, setTokens] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(null);
+/* Name, optional expiry and scope; shows the plaintext of the token it created once, with a copy action.
+   onCreate({ name, expiresAtUtc, scope }) returns the created token, or null when it failed. */
+function TokenCreateForm({ eyebrow, title, placeholder, scopeId, onCreate }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [expiresAtLocal, setExpiresAtLocal] = useState("");
   const [scope, setScope] = useState("full");
   const [createdToken, setCreatedToken] = useState(null);
   const [copyState, setCopyState] = useState("");
+
+  const createToken = async (e) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    setCreating(true);
+    try {
+      const expiresAtUtc = expiresAtLocal
+        ? new Date(expiresAtLocal).toISOString()
+        : null;
+      const created = await onCreate({ name: trimmed, expiresAtUtc, scope });
+      if (!created) return;
+      setCreatedToken(created);
+      setName("");
+      setExpiresAtLocal("");
+      setScope("full");
+      setCopyState("");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const copyToken = async () => {
+    if (!createdToken?.plaintextToken) return;
+    try {
+      await navigator.clipboard.writeText(createdToken.plaintextToken);
+      setCopyState("Copied");
+    } catch {
+      setCopyState("Select and copy");
+    }
+  };
+
+  return (
+    <form className="settings-panel" onSubmit={createToken}>
+      <div className="settings-panel-head">
+        <div>
+          <div className="sheet-eyebrow">{eyebrow}</div>
+          <h2>{title}</h2>
+        </div>
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label>Name</label>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder={placeholder}
+          maxLength={160}
+        />
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label>Expires</label>
+        <input
+          type="datetime-local"
+          value={expiresAtLocal}
+          onChange={e => setExpiresAtLocal(e.target.value)}
+        />
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label htmlFor={scopeId}>Scope</label>
+        <select id={scopeId} value={scope} onChange={e => setScope(e.target.value)}>
+          <option value="full">Full access (read and write)</option>
+          <option value="read">Read only</option>
+        </select>
+      </div>
+      <div className="settings-actions">
+        <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
+          {creating ? "Creating..." : "Create token"}
+        </button>
+      </div>
+
+      {createdToken && (
+        <div className="token-reveal" role="status">
+          <div>
+            <div className="sheet-eyebrow">Shown once</div>
+            <p>This token will not be visible after you leave or refresh this page.</p>
+          </div>
+          <div className="token-secret-row">
+            <code>{createdToken.plaintextToken}</code>
+            <button className="btn small" type="button" onClick={copyToken}>{copyState || "Copy"}</button>
+          </div>
+        </div>
+      )}
+    </form>
+  );
+}
+
+function UserSettingsView({ show }) {
+  const [user, setUser] = useState(null);
+  const [tokens, setTokens] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  // The form is remounted, which hides the plaintext it shows, when that token is revoked.
+  const [shownTokenId, setShownTokenId] = useState(null);
+  const [formKey, setFormKey] = useState(0);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -1019,38 +1126,16 @@ function UserSettingsView({ show }) {
 
   useEffect(() => { loadSettings(); }, [loadSettings]);
 
-  const createToken = async (e) => {
-    e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    setCreating(true);
+  const createToken = async (payload) => {
     try {
-      const expiresAtUtc = expiresAtLocal
-        ? new Date(expiresAtLocal).toISOString()
-        : null;
-      const created = await api.createPersonalAccessToken({ name: trimmed, expiresAtUtc, scope });
-      setCreatedToken(created);
+      const created = await api.createPersonalAccessToken(payload);
+      setShownTokenId(created.token.id);
       setTokens(cur => [created.token, ...cur.filter(token => token.id !== created.token.id)]);
-      setName("");
-      setExpiresAtLocal("");
-      setScope("full");
-      setCopyState("");
       show("Personal access token created", "success");
+      return created;
     } catch (e) {
       show(`Token create failed: ${e.message}`);
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const copyToken = async () => {
-    if (!createdToken?.plaintextToken) return;
-    try {
-      await navigator.clipboard.writeText(createdToken.plaintextToken);
-      setCopyState("Copied");
-    } catch {
-      setCopyState("Select and copy");
+      return null;
     }
   };
 
@@ -1059,7 +1144,10 @@ function UserSettingsView({ show }) {
     try {
       await api.revokePersonalAccessToken(token.id);
       await loadSettings();
-      if (createdToken?.token?.id === token.id) setCreatedToken(null);
+      if (shownTokenId === token.id) {
+        setShownTokenId(null);
+        setFormKey(key => key + 1);
+      }
       show("Personal access token revoked", "success");
     } catch (e) {
       show(`Revoke failed: ${e.message}`);
@@ -1116,56 +1204,14 @@ function UserSettingsView({ show }) {
       </div>
 
       <div className="settings-layout">
-        <form className="settings-panel" onSubmit={createToken}>
-          <div className="settings-panel-head">
-            <div>
-              <div className="sheet-eyebrow">New token</div>
-              <h2>Personal access token</h2>
-            </div>
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label>Name</label>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="MCP desktop client"
-              maxLength={160}
-            />
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label>Expires</label>
-            <input
-              type="datetime-local"
-              value={expiresAtLocal}
-              onChange={e => setExpiresAtLocal(e.target.value)}
-            />
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label htmlFor="pat-scope">Scope</label>
-            <select id="pat-scope" value={scope} onChange={e => setScope(e.target.value)}>
-              <option value="full">Full access (read and write)</option>
-              <option value="read">Read only</option>
-            </select>
-          </div>
-          <div className="settings-actions">
-            <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
-              {creating ? "Creating..." : "Create token"}
-            </button>
-          </div>
-
-          {createdToken && (
-            <div className="token-reveal" role="status">
-              <div>
-                <div className="sheet-eyebrow">Shown once</div>
-                <p>This token will not be visible after you leave or refresh this page.</p>
-              </div>
-              <div className="token-secret-row">
-                <code>{createdToken.plaintextToken}</code>
-                <button className="btn small" type="button" onClick={copyToken}>{copyState || "Copy"}</button>
-              </div>
-            </div>
-          )}
-        </form>
+        <TokenCreateForm
+          key={formKey}
+          eyebrow="New token"
+          title="Personal access token"
+          placeholder="MCP desktop client"
+          scopeId="pat-scope"
+          onCreate={createToken}
+        />
 
         <div className="settings-panel">
           <div className="settings-panel-head">
@@ -1210,6 +1256,132 @@ function UserSettingsView({ show }) {
                   </article>
                 );
               })}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ============ Admin: service identities ============ */
+function AdminView({ show }) {
+  const [identities, setIdentities] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
+
+  const loadIdentities = useCallback(async () => {
+    setLoadError(null);
+    try {
+      setIdentities(await api.listServiceIdentities() || []);
+    } catch (e) {
+      setLoadError(e.message || "Service identities unavailable");
+      show(`Couldn't load service identities: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [show]);
+
+  useEffect(() => { loadIdentities(); }, [loadIdentities]);
+
+  const selected = identities.find(identity => identity.id === selectedId) || null;
+
+  const issueToken = async (payload) => {
+    if (!selected) return null;
+    try {
+      const created = await api.issueServiceIdentityToken(selected.id, payload);
+      show(`Token issued for ${selected.name}`, "success");
+      loadIdentities();
+      return created;
+    } catch (e) {
+      show(`Token issue failed: ${e.message}`);
+      return null;
+    }
+  };
+
+  if (loading) {
+    return <div className="settings-page"><div className="app-loading">Loading service identities...</div></div>;
+  }
+
+  if (loadError) {
+    return (
+      <section className="settings-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">Admin unavailable</div>
+            <h2>Service identities could not be loaded</h2>
+          </div>
+          <p>{loadError}</p>
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={loadIdentities}>Retry</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-page">
+      <div className="settings-layout">
+        {selected ? (
+          <TokenCreateForm
+            key={selected.id}
+            eyebrow={`Issue token for ${selected.name}`}
+            title="Service identity token"
+            placeholder={`${selected.name} orchestrator`}
+            scopeId="service-token-scope"
+            onCreate={issueToken}
+          />
+        ) : (
+          <div className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <div className="sheet-eyebrow">Issue token</div>
+                <h2>Service identity token</h2>
+              </div>
+            </div>
+            <div className="settings-empty">Choose a service identity to issue a token for it.</div>
+          </div>
+        )}
+
+        <div className="settings-panel">
+          <div className="settings-panel-head">
+            <div>
+              <div className="sheet-eyebrow">Non-human callers</div>
+              <h2>Service identities</h2>
+            </div>
+            <button className="btn small ghost" type="button" onClick={loadIdentities}>Refresh</button>
+          </div>
+
+          {identities.length === 0 ? (
+            <div className="settings-empty">No service identities yet.</div>
+          ) : (
+            <div className="token-list">
+              {identities.map(identity => (
+                <article key={identity.id} className={clsx("token-row", identity.id === selectedId && "selected")}>
+                  <div className="token-main">
+                    <div className="token-name-row">
+                      <span className="token-name">{identity.name}</span>
+                    </div>
+                  </div>
+                  <div className="token-meta">
+                    <span>Created <b>{formatTokenDate(identity.createdAtUtc)}</b></span>
+                    <span>Active tokens <b>{identity.activeTokenCount}</b></span>
+                    <span>Last used <b>{formatTokenDate(identity.lastUsedAtUtc)}</b></span>
+                  </div>
+                  <div className="token-actions">
+                    <button
+                      className="btn small ghost"
+                      type="button"
+                      onClick={() => setSelectedId(identity.id)}
+                      disabled={identity.id === selectedId}
+                    >
+                      Issue token
+                    </button>
+                  </div>
+                </article>
+              ))}
             </div>
           )}
         </div>
@@ -1377,6 +1549,11 @@ function EpicModal({ open, epic, onClose, onSave }) {
 }
 
 /* ============ Main App ============ */
+function viewFromUrl() {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return view === "settings" || view === "admin" ? view : "board";
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -1391,10 +1568,9 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get("epic") || null;
   });
-  const [currentView, setCurrentView] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("view") === "settings" ? "settings" : "board";
-  });
+  const [currentView, setCurrentView] = useState(() => viewFromUrl());
+  // Only shows the Admin entry point; the API refuses every admin call of anyone who is not an admin.
+  const [isAdmin, setIsAdmin] = useState(false);
 
   /* URL <-> state routing plumbing */
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
@@ -1438,9 +1614,9 @@ function App() {
       return;
     }
     const params = new URLSearchParams();
-    if (currentView === "settings") params.set("view", "settings");
+    if (currentView !== "board") params.set("view", currentView);
     if (currentProjectId) params.set("project", currentProjectId);
-    if (currentView !== "settings" && currentEpicId) params.set("epic", currentEpicId);
+    if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
     const qs = params.toString();
     const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
@@ -1463,7 +1639,7 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
-      const nextView = params.get("view") === "settings" ? "settings" : "board";
+      const nextView = viewFromUrl();
       skipUrlPush.current = true;
       setCurrentProjectId(prev => {
         // Only suppress the project-change effect's epic reset if we'd
@@ -1528,7 +1704,12 @@ function App() {
 
   useEffect(() => {
     (async () => {
-      await loadProjects();
+      const [, admin] = await Promise.all([
+        loadProjects(),
+        api.getCurrentUser().then(user => !!user?.isAdmin, () => false),
+      ]);
+      setIsAdmin(admin);
+      if (!admin) setCurrentView(view => (view === "admin" ? "board" : view));
       setBootstrapped(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1824,7 +2005,7 @@ function App() {
     return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  if (projects.length === 0 && currentView !== "settings") {
+  if (projects.length === 0 && currentView === "board") {
     return (
       <div className="app-empty">
         <div>
@@ -1851,6 +2032,12 @@ function App() {
     setPaletteOpen(false);
     setCurrentView("settings");
   };
+  const openAdmin = () => {
+    setSelectedStory(null);
+    setActiveDoc(null);
+    setPaletteOpen(false);
+    setCurrentView("admin");
+  };
   const openBoard = () => setCurrentView("board");
 
   return (
@@ -1870,15 +2057,19 @@ function App() {
         <Topbar
           project={currentProject}
           epic={currentEpic}
-          view={currentView}
+          view={currentView === "admin" && !isAdmin ? "board" : currentView}
+          isAdmin={isAdmin}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenTweaks={() => setTweaksOpen(v => !v)}
           onNewItem={() => setPaletteOpen(true)}
           onOpenSettings={openSettings}
+          onOpenAdmin={openAdmin}
           onOpenBoard={openBoard}
         />
         {currentView === "settings" ? (
           <UserSettingsView show={show} />
+        ) : currentView === "admin" && isAdmin ? (
+          <AdminView show={show} />
         ) : (
           <>
             <EpicStrip
