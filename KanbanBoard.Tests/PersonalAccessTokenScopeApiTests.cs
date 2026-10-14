@@ -239,6 +239,8 @@ public sealed class PersonalAccessTokenScopeApiTests
             new CreatePersonalAccessTokenRequest("Bad", null, "admin"));
 
         Assert.Equal(HttpStatusCode.Created, readResponse.StatusCode);
+        // The plaintext is a one-time secret: no cache may keep it.
+        Assert.True(readResponse.Headers.CacheControl?.NoStore);
         Assert.Equal("read", (await readResponse.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>())!.Token.Scope);
         Assert.Equal(HttpStatusCode.Created, defaultResponse.StatusCode);
         Assert.Equal("full", (await defaultResponse.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>())!.Token.Scope);

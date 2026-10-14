@@ -25,6 +25,7 @@ public sealed class AdminServiceIdentityApiTests
     private const string AdminSubject = "admin-sub";
     private const string OidcIssuer = "https://idp.example/realms/test";
     private const string SubjectHeader = "X-Test-Subject";
+    private const string NameIdentifierHeader = "X-Test-Subject-As-Name-Identifier";
 
     [Fact]
     public async Task An_admin_sees_the_service_identities_with_their_active_token_count_and_most_recent_use()
@@ -138,6 +139,8 @@ public sealed class AdminServiceIdentityApiTests
 
         Assert.Equal(HttpStatusCode.Created, readResponse.StatusCode);
         Assert.Equal(HttpStatusCode.Created, fullResponse.StatusCode);
+        // The plaintext is a one-time secret: no cache may keep it.
+        Assert.True(readResponse.Headers.CacheControl?.NoStore);
         var read = (await readResponse.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
         var full = (await fullResponse.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
         Assert.Equal(("Reader", PersonalAccessTokenScopes.Read, true), (read.Token.Name, read.Token.Scope, read.Token.IsActive));
@@ -214,6 +217,211 @@ public sealed class AdminServiceIdentityApiTests
         await api.AssertNoTokenAsync();
     }
 
+    [Fact]
+    public async Task An_admin_whose_session_carries_the_subject_as_a_name_identifier_is_an_admin()
+    {
+        // The real OIDC cookie maps inbound claims: the subject arrives as ClaimTypes.NameIdentifier, not "sub".
+        using var api = new AdminApi();
+        using var client = api.CreateSessionClient(AdminSubject, subjectAsNameIdentifier: true);
+
+        var me = await client.GetFromJsonAsync<CurrentUserDto>("/api/me", ProgramDependencyWiringTests.Json);
+        using var list = await client.GetAsync("/api/admin/service-identities");
+
+        Assert.True(me!.IsAdmin);
+        Assert.Equal(HttpStatusCode.OK, list.StatusCode);
+    }
+
+    [Fact]
+    public async Task An_admin_creates_a_service_identity_by_name_and_a_name_that_exists_in_any_case_is_refused()
+    {
+        using var api = new AdminApi();
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        using var createdResponse = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities", new { name = " Dark Factory " }, withCsrfToken: true);
+
+        Assert.Equal(HttpStatusCode.Created, createdResponse.StatusCode);
+        var created = (await createdResponse.Content.ReadFromJsonAsync<ServiceIdentitySummaryDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.Equal(("Dark Factory", 0, (DateTimeOffset?)null, false), (created.Name, created.ActiveTokenCount, created.LastUsedAtUtc, created.Disabled));
+        var stored = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync());
+        Assert.Equal((created.Id, ServiceIdentityProvisioner.Issuer, "dark factory", "Dark Factory", (DateTimeOffset?)null),
+            (stored.Id, stored.Issuer, stored.Subject, stored.DisplayName, stored.DisabledAtUtc));
+
+        // The name rules of the create-service-identity command: trimmed, 1 to 120 characters; one identity per name in any case.
+        Assert.Equal(
+            [
+                (HttpStatusCode.Conflict, KanbanAdminErrorCodes.IdentityExists),
+                (HttpStatusCode.Conflict, KanbanAdminErrorCodes.IdentityExists),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument),
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument)
+            ],
+            new[]
+            {
+                await AnswerAsync(admin, "/api/admin/service-identities", new { name = "Dark Factory" }),
+                await AnswerAsync(admin, "/api/admin/service-identities", new { name = "DARK FACTORY  " }),
+                await AnswerAsync(admin, "/api/admin/service-identities", new { name = "   " }),
+                await AnswerAsync(admin, "/api/admin/service-identities", new { name = new string('n', ServiceIdentityProvisioner.MaxNameLength + 1) }),
+                await AnswerAsync(admin, "/api/admin/service-identities", new { })
+            });
+        var after = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync());
+        Assert.Equal((stored.DisplayName, stored.UpdatedAtUtc), (after.DisplayName, after.UpdatedAtUtc));
+
+        using var longest = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities",
+            new { name = new string('n', ServiceIdentityProvisioner.MaxNameLength) }, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.Created, longest.StatusCode);
+        // The command finds the identity the page created rather than making a second one.
+        Assert.False((await api.ProvisionAsync("dark factory")).Created);
+    }
+
+    [Fact]
+    public async Task Concurrent_creates_of_one_name_create_it_once_and_refuse_the_rest_with_the_typed_code()
+    {
+        using var api = new AdminApi();
+        using var admin = api.CreateSessionClient(AdminSubject);
+        var csrf = (await admin.GetFromJsonAsync<AntiforgeryToken>("/api/auth/antiforgery"))!.Token;
+
+        var answers = await Task.WhenAll(Enumerable.Range(0, 12).Select(async index =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/api/admin/service-identities")
+            {
+                Content = JsonContent.Create(new { name = index % 2 == 0 ? "Factory" : "FACTORY" })
+            };
+            request.Headers.Add("X-CSRF-TOKEN", csrf);
+            using var response = await admin.SendAsync(request);
+            return response.StatusCode == HttpStatusCode.Created
+                ? "created"
+                : $"{response.StatusCode}:{(await response.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code}";
+        }));
+
+        Assert.Equal(1, answers.Count(answer => answer == "created"));
+        Assert.All(answers.Where(answer => answer != "created"), answer => Assert.Equal($"{HttpStatusCode.Conflict}:{KanbanAdminErrorCodes.IdentityExists}", answer));
+        Assert.Equal(1, await api.ReadAsync(dbContext => dbContext.AppUsers.CountAsync()));
+    }
+
+    [Fact]
+    public async Task Disabling_revokes_every_token_and_refuses_issuing_and_enabling_allows_issuing_while_the_old_tokens_stay_revoked()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var other = Identity("Other", DateTimeOffset.UtcNow);
+        var revokedEarlier = DateTimeOffset.UtcNow.AddDays(-1);
+        var alreadyRevoked = Token(identity, revoked: revokedEarlier);
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.AddRange(identity, other);
+            dbContext.PersonalAccessTokens.Add(alreadyRevoked);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+        mcp.DefaultRequestHeaders.Add(KanbanInternalAuth.SecretHeaderName, ProgramDependencyWiringTests.ApiApplication.InternalSecret);
+        var full = await IssueAsync(admin, identity.Id, "Writer", "full");
+        var read = await IssueAsync(admin, identity.Id, "Reader", "read");
+        var others = await IssueAsync(admin, other.Id, "Other", "full");
+        // As the MCP server holds them in its cache: validated before the disable.
+        var validatedFull = await ValidateAsync(mcp, full.PlaintextToken);
+        var validatedRead = await ValidateAsync(mcp, read.PlaintextToken);
+
+        using var disableResponse = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/disable", null, withCsrfToken: true);
+
+        Assert.Equal(HttpStatusCode.OK, disableResponse.StatusCode);
+        var disabled = (await disableResponse.Content.ReadFromJsonAsync<ServiceIdentitySummaryDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.Equal((identity.Id, true, 0), (disabled.Id, disabled.Disabled, disabled.ActiveTokenCount));
+        // Each token is refused through MCP: at the next forwarded call and when it is validated again.
+        using (var fullForward = await ForwardAsync(mcp, validatedFull, HttpMethod.Get, "/api/projects", null))
+        using (var readForward = await ForwardAsync(mcp, validatedRead, HttpMethod.Get, "/api/projects", null))
+        {
+            Assert.Equal((HttpStatusCode.Forbidden, HttpStatusCode.Forbidden), (fullForward.StatusCode, readForward.StatusCode));
+            Assert.Equal(KanbanErrorCodes.ScopeDenied, (await fullForward.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code);
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, full.PlaintextToken));
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, read.PlaintextToken));
+        var tokens = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        Assert.All(tokens.Where(token => token.AppUserId == identity.Id), token => Assert.NotNull(token.RevokedAtUtc));
+        Assert.Equal(revokedEarlier.ToUnixTimeMilliseconds(), tokens.Single(token => token.Id == alreadyRevoked.Id).RevokedAtUtc!.Value.ToUnixTimeMilliseconds());
+        // Another identity's token is untouched.
+        Assert.Null(tokens.Single(token => token.Id == others.Token.Id).RevokedAtUtc);
+
+        // Issuing is refused and writes nothing; a second disable changes nothing.
+        Assert.Equal(
+            (HttpStatusCode.Conflict, KanbanAdminErrorCodes.IdentityDisabled),
+            await AnswerAsync(admin, $"/api/admin/service-identities/{identity.Id}/tokens", new { name = "After disable" }));
+        using var disableAgain = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/disable", null, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.OK, disableAgain.StatusCode);
+        Assert.Equal(disabled.DisabledAtUtc, (await disableAgain.Content.ReadFromJsonAsync<ServiceIdentitySummaryDto>(ProgramDependencyWiringTests.Json))!.DisabledAtUtc);
+        Assert.Equal(4, await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.CountAsync()));
+        var listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
+        Assert.Equal([("Factory", true), ("Other", false)], listed!.Select(summary => (summary.Name, summary.Disabled)).ToList());
+        using (var raw = await admin.GetAsync("/api/admin/service-identities"))
+        {
+            Assert.Contains("\"disabled\":true", await raw.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        using var enableResponse = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/enable", null, withCsrfToken: true);
+
+        Assert.Equal(HttpStatusCode.OK, enableResponse.StatusCode);
+        var enabled = (await enableResponse.Content.ReadFromJsonAsync<ServiceIdentitySummaryDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.Equal((false, (DateTimeOffset?)null, 0), (enabled.Disabled, enabled.DisabledAtUtc, enabled.ActiveTokenCount));
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, full.PlaintextToken));
+        using (var oldForward = await ForwardAsync(mcp, validatedFull, HttpMethod.Get, "/api/projects", null))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, oldForward.StatusCode);
+        }
+
+        var issuedAfter = await IssueAsync(admin, identity.Id, "After enable", "full");
+        var validatedAfter = await ValidateAsync(mcp, issuedAfter.PlaintextToken);
+        using var afterForward = await ForwardAsync(mcp, validatedAfter, HttpMethod.Post, "/api/projects", new { name = "Project", key = "AFTER" });
+        Assert.Equal(HttpStatusCode.Created, afterForward.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_token_whose_owner_is_disabled_is_refused_even_when_it_was_not_revoked()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+        mcp.DefaultRequestHeaders.Add(KanbanInternalAuth.SecretHeaderName, ProgramDependencyWiringTests.ApiApplication.InternalSecret);
+        var issued = await IssueAsync(admin, identity.Id, "Writer", "full");
+        var validated = await ValidateAsync(mcp, issued.PlaintextToken);
+
+        // As if the token was stored while the disable was committed: the identity is disabled, the token not revoked.
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.Attach(identity);
+            identity.DisabledAtUtc = DateTimeOffset.UtcNow;
+        });
+
+        using var forward = await ForwardAsync(mcp, validated, HttpMethod.Get, "/api/projects", null);
+        Assert.Equal(HttpStatusCode.Forbidden, forward.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, issued.PlaintextToken));
+    }
+
+    [Fact]
+    public async Task Disable_and_enable_answer_not_found_for_a_person_or_an_unknown_id_and_need_a_csrf_token()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var person = new AppUser { Issuer = OidcIssuer, Subject = AdminSubject, DisplayName = "The admin", CreatedAtUtc = DateTimeOffset.UtcNow };
+        await api.SeedAsync(dbContext => dbContext.AppUsers.AddRange(identity, person));
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        foreach (var action in new[] { "disable", "enable" })
+        {
+            Assert.Equal((HttpStatusCode.NotFound, KanbanErrorCodes.NotFound), await AnswerAsync(admin, $"/api/admin/service-identities/{person.Id}/{action}", new { }));
+            Assert.Equal((HttpStatusCode.NotFound, KanbanErrorCodes.NotFound), await AnswerAsync(admin, $"/api/admin/service-identities/{Guid.NewGuid()}/{action}", new { }));
+            using var withoutCsrf = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/{action}", null, withCsrfToken: false);
+            Assert.Equal(HttpStatusCode.BadRequest, withoutCsrf.StatusCode);
+        }
+
+        using var createWithoutCsrf = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities", new { name = "No CSRF" }, withCsrfToken: false);
+        Assert.Equal(HttpStatusCode.BadRequest, createWithoutCsrf.StatusCode);
+        var users = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().ToListAsync());
+        Assert.Equal(2, users.Count);
+        Assert.All(users, user => Assert.Null(user.DisabledAtUtc));
+    }
+
     // The SQLite tests never see the SQL of MySql.EntityFrameworkCore, which cannot translate every query.
     [Fact]
     public void The_tokens_of_the_service_identities_are_read_by_a_query_mysql_can_translate()
@@ -236,7 +444,10 @@ public sealed class AdminServiceIdentityApiTests
             await SendAsync(client, HttpMethod.Get, "/api/admin/service-identities", null, withCsrfToken),
             await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens", new { name = "Token", scope = "full" }, withCsrfToken),
             // Refused before the body is read.
-            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens", new { name = 1 }, withCsrfToken)
+            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens", new { name = 1 }, withCsrfToken),
+            await SendAsync(client, HttpMethod.Post, "/api/admin/service-identities", new { name = "Intruder" }, withCsrfToken),
+            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/disable", null, withCsrfToken),
+            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/enable", null, withCsrfToken)
         ];
 
         foreach (var response in responses)
@@ -266,6 +477,19 @@ public sealed class AdminServiceIdentityApiTests
         }
 
         return await client.SendAsync(request);
+    }
+
+    private static async Task<CreatedPersonalAccessTokenDto> IssueAsync(HttpClient admin, Guid identityId, string name, string scope)
+    {
+        using var response = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens", new { name, scope }, withCsrfToken: true);
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<CreatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+    }
+
+    private static async Task<HttpStatusCode> ValidationStatusAsync(HttpClient mcp, string plaintext)
+    {
+        using var response = await mcp.PostAsJsonAsync("/api/internal/personal-access-tokens/validate", new ValidatePersonalAccessTokenRequest(plaintext));
+        return response.StatusCode;
     }
 
     private static async Task<ValidatedPersonalAccessTokenDto> ValidateAsync(HttpClient mcp, string plaintext)
@@ -337,12 +561,38 @@ public sealed class AdminServiceIdentityApiTests
             });
         }
 
-        /// <summary>A browser session signed in as <paramref name="subject"/>, over https so the antiforgery cookie is sent.</summary>
-        public HttpClient CreateSessionClient(string subject)
+        /// <summary>
+        /// A browser session signed in as <paramref name="subject"/>, over https so the antiforgery cookie is sent.
+        /// With <paramref name="subjectAsNameIdentifier"/> the subject is carried as the real OIDC cookie carries it.
+        /// </summary>
+        public HttpClient CreateSessionClient(string subject, bool subjectAsNameIdentifier = false)
         {
             var client = CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
             client.DefaultRequestHeaders.Add(SubjectHeader, subject);
+            if (subjectAsNameIdentifier)
+            {
+                client.DefaultRequestHeaders.Add(NameIdentifierHeader, "true");
+            }
+
             return client;
+        }
+
+        public async Task<T> ReadAsync<T>(Func<KanbanDbContext, Task<T>> read)
+        {
+            await using var dbContext = inner.OpenDatabase();
+            return await read(dbContext);
+        }
+
+        /// <summary>Runs the create-service-identity command's provisioning against the application's database.</summary>
+        public async Task<ProvisionedServiceIdentity> ProvisionAsync(string name)
+        {
+            using var scope = factory.Services.CreateScope();
+            return await ServiceIdentityProvisioner.ProvisionAsync(
+                scope.ServiceProvider.GetRequiredService<KanbanDbContext>(),
+                scope.ServiceProvider.GetRequiredService<IPersonalAccessTokenService>(),
+                name,
+                rotate: false,
+                CancellationToken.None);
         }
 
         public HttpClient CreateClient(WebApplicationFactoryClientOptions options) => factory.CreateClient(options);
@@ -397,9 +647,10 @@ public sealed class AdminServiceIdentityApiTests
                 return Task.FromResult(AuthenticateResult.NoResult());
             }
 
+            var subjectClaimType = Request.Headers.ContainsKey(NameIdentifierHeader) ? ClaimTypes.NameIdentifier : "sub";
             var identity = new ClaimsIdentity(
                 [
-                    new Claim("sub", subject!, ClaimValueTypes.String, OidcIssuer),
+                    new Claim(subjectClaimType, subject!, ClaimValueTypes.String, OidcIssuer),
                     new Claim("name", $"User {subject}", ClaimValueTypes.String, OidcIssuer)
                 ],
                 SchemeName);

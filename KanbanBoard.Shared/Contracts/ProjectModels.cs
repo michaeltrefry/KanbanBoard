@@ -249,12 +249,20 @@ public sealed record CurrentUserDto(
 
 /// <param name="ActiveTokenCount">Tokens that are neither revoked nor expired.</param>
 /// <param name="LastUsedAtUtc">The most recent use of any of its tokens; null when none was ever used.</param>
+/// <param name="DisabledAtUtc">When the identity was disabled; null while it is enabled.</param>
 public sealed record ServiceIdentitySummaryDto(
     Guid Id,
     string Name,
     DateTimeOffset CreatedAtUtc,
     int ActiveTokenCount,
-    DateTimeOffset? LastUsedAtUtc);
+    DateTimeOffset? LastUsedAtUtc,
+    DateTimeOffset? DisabledAtUtc = null)
+{
+    /// <summary>A disabled identity gets no new token and none of its tokens is accepted.</summary>
+    public bool Disabled => DisabledAtUtc is not null;
+}
+
+public sealed record CreateServiceIdentityRequest(string? Name);
 
 public sealed record PersonalAccessTokenMetadataDto(
     Guid Id,
