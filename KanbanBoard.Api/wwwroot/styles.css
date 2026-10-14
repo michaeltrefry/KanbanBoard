@@ -814,6 +814,32 @@ body::before {
   font-family: var(--font-mono);
 }
 
+/* The comment a #comment-{id} link names: an outline as well as the tint, so it does not rely on colour alone. */
+.comment-item { scroll-margin: 24px; }
+.comment-item.is-target {
+  border-color: var(--accent);
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+}
+
+.comment-meta-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-copy-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+.comment-copy-link:hover { color: var(--accent); text-decoration: underline; }
+.comment-copy-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 2px; color: var(--accent); }
+
 .comment-body {
   margin: 0;
   color: var(--ink-2);

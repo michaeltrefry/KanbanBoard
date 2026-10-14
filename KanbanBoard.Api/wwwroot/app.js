@@ -229,6 +229,23 @@ function storyPageUrl(id) {
   return `${window.location.origin}/stories/${id}`;
 }
 
+// The absolute address of one comment on its story's page.
+function commentPageUrl(storyId, commentId) {
+  return `${storyPageUrl(storyId)}#${commentAnchorId(commentId)}`;
+}
+
+// The element id of a comment on the story page, which a #comment-{id} fragment names.
+function commentAnchorId(commentId) {
+  return `comment-${commentId}`;
+}
+
+// The comment id a #comment-{id} fragment names, or null.
+function commentIdFromHash() {
+  const match = window.location.hash.match(/^#comment-(.+)$/);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
 // Puts text on the clipboard. The Clipboard API needs a secure context (https or localhost), so elsewhere, or when it
 // refuses, a hidden textarea and execCommand("copy") are tried. Rejects when neither works.
 async function copyToClipboard(text) {
@@ -905,7 +922,9 @@ function StoryFields({ local, epics, patch }) {
 }
 
 // Description, comments and the comment composer. Key it by story id so another story starts with an empty draft.
-function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
+// `anchored` (the story page only, so an id is never on the page twice when a slideout opens over it) gives each
+// comment its #comment-{id} anchor and scrolls to and highlights the comment the URL's fragment names.
+function StoryNotes({ storyId, local, merge, patch, onAddComment, onCopyCommentLink, anchored = false }) {
   const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem("kanban-comment-author") || "");
   const [commentBody, setCommentBody] = useState("");
   const [commenting, setCommenting] = useState(false);
@@ -914,6 +933,27 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
     [...(local?.comments || [])]
       .sort((a, b) => new Date(a.createdAtUtc).getTime() - new Date(b.createdAtUtc).getTime())
   ), [local?.comments]);
+
+  /* #comment-{id}: the comment the URL names is scrolled to and highlighted once, when it is first rendered for that
+     fragment (on load, or when the fragment changes in place). A re-render from a live update neither scrolls again
+     nor drops the highlight; an id with no comment leaves the page where it is. `target` is a new object for each
+     fragment navigation, so it is acted on once per navigation. */
+  const [target, setTarget] = useState(() => ({ id: anchored ? commentIdFromHash() : null }));
+  const [highlightedId, setHighlightedId] = useState(null);
+  const handledTarget = useRef(null);
+  useEffect(() => {
+    if (!anchored) return;
+    const onHash = () => setTarget({ id: commentIdFromHash() });
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [anchored]);
+  useEffect(() => {
+    if (!anchored || handledTarget.current === target) return;
+    handledTarget.current = target;
+    if (!target.id || !comments.some(c => c.id === target.id)) { setHighlightedId(null); return; }
+    setHighlightedId(target.id);
+    document.getElementById(commentAnchorId(target.id))?.scrollIntoView({ block: "center" });
+  }, [anchored, target, comments]);
 
   const submitComment = async () => {
     const author = commentAuthor.trim();
@@ -950,10 +990,19 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
           <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
         )}
         {comments.map(comment => (
-          <article key={comment.id} className="comment-item">
+          <article
+            key={comment.id}
+            id={anchored ? commentAnchorId(comment.id) : undefined}
+            className={`comment-item${highlightedId === comment.id ? " is-target" : ""}`}
+            aria-current={highlightedId === comment.id ? "location" : undefined}
+          >
             <div className="comment-meta">
               <span className="comment-author">{comment.author}</span>
-              <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
+              <span className="comment-meta-end">
+                <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
+                <button type="button" className="comment-copy-link" onClick={() => onCopyCommentLink(storyId, comment.id)}
+                        title="Copy a link to this comment">Copy link</button>
+              </span>
             </div>
             <p className="comment-body">{comment.body}</p>
           </article>
@@ -989,7 +1038,7 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
 }
 
 /* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage, onCopyLink }) {
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage, onCopyLink, onCopyCommentLink }) {
   const { local, saving, patch, flush, merge } = useStoryEditor(story, onUpdate);
 
   // Saves a pending edit first, so the page loads the story as it was left here.
@@ -1031,7 +1080,8 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
         </header>
         <div className="sheet-body">
           <StoryFields local={local} epics={epics} patch={patch}/>
-          <StoryNotes key={story.id} storyId={story.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}/>
+          <StoryNotes key={story.id} storyId={story.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
+                      onCopyCommentLink={onCopyCommentLink}/>
         </div>
       </aside>
     </>
@@ -1164,7 +1214,7 @@ function StoryHistory({ storyId, local, saving, refreshCount }) {
   );
 }
 
-function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory }) {
+function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory, onCopyCommentLink }) {
   const [story, setStory] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | deleted | error
   const [loadError, setLoadError] = useState(null);
@@ -1321,7 +1371,8 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
             <StoryRelations local={local} onOpenStory={openStory}/>
           </div>
           <div>
-            <StoryNotes key={local.id} storyId={local.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}/>
+            <StoryNotes key={local.id} storyId={local.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
+                        onCopyCommentLink={onCopyCommentLink} anchored/>
             <StoryHistory storyId={local.id} local={local} saving={saving} refreshCount={refreshCount}/>
           </div>
         </div>
@@ -2398,6 +2449,9 @@ function App() {
   const [pendingSheetId, setPendingSheetId] = useState(() => sheetStoryIdFromUrl());
   // What the URL's ?story= shows: the open slideout, else the one being looked up.
   const sheetStoryId = currentView === "board" && !currentStoryId ? (selectedStory?.id || pendingSheetId) : null;
+  // What the URL is made from, as last rendered: popstate compares the URL it lands on with it.
+  const urlStateRef = useRef(null);
+  urlStateRef.current = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
   const selectedStoryRef = useRef(null);
   selectedStoryRef.current = selectedStory;
   const pendingSheetRef = useRef(null);
@@ -2466,7 +2520,9 @@ function App() {
     const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
     if (!initialUrlSyncDone.current || replaceUrlOnce.current) {
       replaceUrlOnce.current = false;
-      window.history.replaceState(state, "", newUrl);
+      // Correcting the same story page's address keeps its #comment-{id}; pushes to another address drop the fragment.
+      const keepHash = currentStoryId && storyIdFromUrl() === currentStoryId ? window.location.hash : "";
+      window.history.replaceState(state, "", newUrl + keepHash);
       initialUrlSyncDone.current = true;
     } else if (sheetOnly && hadSheet) {
       // An entry pushed by opening the slideout stays marked so, so Close can still step back over it.
@@ -2513,7 +2569,7 @@ function App() {
         // Not a story id: never looked up; dropped from this entry as a story that does not exist would be.
         params.delete("story");
         const qs = params.toString();
-        window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? "?" + qs : ""}`);
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? "?" + qs : ""}${window.location.hash}`);
         show(STORY_NOT_FOUND);
       }
       const nextProject = params.get("project") || null;
@@ -2521,7 +2577,14 @@ function App() {
       const nextView = viewFromUrl();
       const nextStory = storyIdFromUrl();
       const nextSheet = sheetStoryIdFromUrl();
-      skipUrlPush.current = true;
+      // Only a popstate that changes what the URL is made from re-runs the URL sync, which then must not push. One that
+      // changes none of it (e.g. a same-document #comment-{id} navigation) must not set the flag: nothing would clear
+      // it, and the next real navigation would not be pushed.
+      const cur = urlStateRef.current;
+      const nextSheetShown = !nextStory && nextView === "board" ? nextSheet : null;
+      const changes = nextStory !== cur.storyId || nextSheetShown !== cur.sheetStoryId
+        || (!nextStory && (nextProject !== cur.projectId || nextEpic !== cur.epicId || nextView !== cur.view));
+      skipUrlPush.current = changes;
       setCurrentStoryId(nextStory);
       // Back from an opened slideout closes it (useStoryEditor saves a pending edit as it closes); Forward reopens it.
       if (selectedStoryRef.current?.id !== nextSheet) {
@@ -3036,12 +3099,13 @@ function App() {
     setPendingSheetId(null);
     setSelectedStory(story);
   };
-  const copyStoryLink = (id) => {
-    const url = storyPageUrl(id);
+  const copyLink = (url) => {
     copyToClipboard(url).then(
       () => show("Link copied to the clipboard", "success"),
       e => show(`Couldn't copy the link (${e.message}): ${url}`));
   };
+  const copyStoryLink = (id) => copyLink(storyPageUrl(id));
+  const copyCommentLink = (storyId, commentId) => copyLink(commentPageUrl(storyId, commentId));
 
   return (
     <div className="shell">
@@ -3082,6 +3146,7 @@ function App() {
             onAddComment={addComment}
             onOpenBoard={openBoardFromStory}
             onOpenStory={openStoryPage}
+            onCopyCommentLink={copyCommentLink}
           />
         ) : currentView === "settings" ? (
           <UserSettingsView show={show} />
@@ -3143,6 +3208,7 @@ function App() {
         onAddComment={addComment}
         onOpenPage={openStoryPage}
         onCopyLink={copyStoryLink}
+        onCopyCommentLink={copyCommentLink}
       />
       <DocSheet
         doc={activeDoc}
