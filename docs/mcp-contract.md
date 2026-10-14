@@ -14,7 +14,7 @@ The file cannot drift from the server. The [tool reference](#tool-reference) is 
 ## Calling the server
 
 - **Transport.** MCP over streamable HTTP at `/mcp` (production: `https://kanban-mcp.trefry.net/mcp`).
-- **Authentication.** Every request carries `Authorization: Bearer <personal access token>`. Without a token, or with one that is unknown, revoked or expired, the HTTP request is answered `401` and no tool runs.
+- **Authentication.** Every request carries `Authorization: Bearer <personal access token>`. Without a token, or with one that is unknown, revoked or expired or belongs to a disabled service identity, the HTTP request is answered `401` and no tool runs.
 - **Scopes.** A token is `full` or `read`. A `read` token can call every read tool. Every write tool refuses it with `scope_denied`, before the arguments are looked at and before the API is called: the answer is `scope_denied` also when an argument is missing, misspelt or of the wrong type.
 - **Identity.** The identity of a call is the owner of its token and nothing else. No argument names a claimant, an author or an actor (the `author` argument of the comment tools is ignored when the call carries a token). A program uses a *service identity* (`create-service-identity`, see [deployment](deployment.md#factory-service-identity)), which has a name and an id like a person's.
 - **Results.** A call that succeeds returns a tool result whose single text block is one JSON document: the shape named under each tool below. A call that is refused returns a tool result with `isError: true` and the [error envelope](#errors).
@@ -763,7 +763,7 @@ A refused call returns a tool result with `isError: true` whose `structuredConte
 
 | Code | When | Retry? |
 | --- | --- | --- |
-| `scope_denied` | A write tool was called with a `read` token; or the token was revoked or has expired (any tool, read or write); or a claim tool was called on a server that does not require tokens, without one. | No. Use a `full` token that is valid. |
+| `scope_denied` | A write tool was called with a `read` token; or the token was revoked or has expired, or its service identity was disabled (any tool, read or write); or a claim tool was called on a server that does not require tokens, without one. | No. Use a `full` token that is valid. |
 | `not_found` | The id that addresses the call (project, epic, epic document, work item) is not known. The message names the object and the id. | No. |
 | `conflict` | The object is no longer in the state the call depends on: a stale `expected_version` on `update_work_item` or `move_work_item`; a renew or release of a claim the caller no longer holds; a project `key` another project has; an `import_epic_plan` whose epic was deleted while the call ran. | Not as it is. Read again, decide, then call again. |
 | `already_claimed` | `claim_work_item`, `renew_work_item_claim` or `release_work_item_claim` on an item with a live claim of another identity or another marker. | Later: after the claim is released or has expired. |
