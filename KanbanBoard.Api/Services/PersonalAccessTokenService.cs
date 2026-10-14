@@ -11,12 +11,14 @@ namespace KanbanBoard.Api.Services;
 
 public interface IPersonalAccessTokenService
 {
+    /// <param name="issuedBy">The admin who issues the token from the Admin page; null for any other issue.</param>
     Task<CreatedPersonalAccessToken> CreateAsync(
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
         string scope,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        ChangeActor? issuedBy = null);
 
     Task<PersonalAccessTokenValidationResult?> ValidateAsync(
         string token,
@@ -62,7 +64,8 @@ public sealed class PersonalAccessTokenService(
         string name,
         DateTimeOffset? expiresAtUtc,
         string scope,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ChangeActor? issuedBy = null)
     {
         EnsureEnabled();
 
@@ -93,7 +96,9 @@ public sealed class PersonalAccessTokenService(
             EncryptedSecret = EncryptSecret(secret),
             Scope = scope,
             CreatedAtUtc = now,
-            ExpiresAtUtc = expiresAtUtc
+            ExpiresAtUtc = expiresAtUtc,
+            IssuedByUserId = issuedBy?.Id,
+            IssuedByName = issuedBy?.Name
         };
 
         dbContext.PersonalAccessTokens.Add(token);

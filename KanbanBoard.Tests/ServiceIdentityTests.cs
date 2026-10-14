@@ -171,10 +171,10 @@ public sealed class ServiceIdentityTests
         private int creates;
 
         public Task<CreatedPersonalAccessToken> CreateAsync(
-            AppUser user, string name, DateTimeOffset? expiresAtUtc, string scope, CancellationToken cancellationToken) =>
+            AppUser user, string name, DateTimeOffset? expiresAtUtc, string scope, CancellationToken cancellationToken, ChangeActor? issuedBy = null) =>
             ++creates == 2
                 ? throw new InvalidOperationException("The second token could not be issued.")
-                : inner.CreateAsync(user, name, expiresAtUtc, scope, cancellationToken);
+                : inner.CreateAsync(user, name, expiresAtUtc, scope, cancellationToken, issuedBy);
 
         public Task<PersonalAccessTokenValidationResult?> ValidateAsync(string token, CancellationToken cancellationToken) =>
             inner.ValidateAsync(token, cancellationToken);

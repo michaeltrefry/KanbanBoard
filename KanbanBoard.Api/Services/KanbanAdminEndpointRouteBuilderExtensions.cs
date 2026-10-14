@@ -1,7 +1,9 @@
+using System.Text.Json;
 using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.AspNetCore.Http.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -73,17 +75,24 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
         var group = endpoints.MapGroup(AdminPath)
             .WithTags("Admin");
 
-        group.MapGet("/service-identities", async (KanbanDbContext dbContext, CancellationToken cancellationToken) =>
-            Results.Ok(await SummariesAsync(dbContext, null, cancellationToken)))
+        group.MapGet("/service-identities", async (KanbanDbContext dbContext, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+            Results.Ok(await SummariesAsync(dbContext, null, timeProvider.GetUtcNow(), cancellationToken)))
         .WithName("ListServiceIdentities");
 
         group.MapPost("/service-identities", async (
-            CreateServiceIdentityRequest request,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
+            var (request, bodyRefusal) = await ReadBodyAsync<CreateServiceIdentityRequest>(httpContext, cancellationToken);
+            if (bodyRefusal is not null)
+            {
+                return bodyRefusal;
+            }
+
             // The name rules of the create-service-identity command.
-            var name = ServiceIdentityProvisioner.NormalizeName(request.Name);
+            var name = ServiceIdentityProvisioner.NormalizeName(request?.Name);
             if (name is null)
             {
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, ServiceIdentityProvisioner.InvalidNameMessage);
@@ -103,35 +112,39 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             }
 
             var created = result.User!;
-            return Results.Json((await SummariesAsync(dbContext, created.Id, cancellationToken)).Single(), statusCode: StatusCodes.Status201Created);
+            return Results.Json((await SummariesAsync(dbContext, created.Id, timeProvider.GetUtcNow(), cancellationToken)).Single(), statusCode: StatusCodes.Status201Created);
         })
+        .Accepts<CreateServiceIdentityRequest>("application/json")
         .WithName("CreateServiceIdentity");
 
         group.MapPost("/service-identities/{identityId:guid}/disable", async (
             Guid identityId,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            await ServiceIdentityProvisioner.DisableAsync(dbContext, identityId, cancellationToken)
-                ? Results.Ok((await SummariesAsync(dbContext, identityId, cancellationToken)).Single())
+            await ServiceIdentityProvisioner.DisableAsync(dbContext, identityId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), cancellationToken)
+                ? Results.Ok((await SummariesAsync(dbContext, identityId, timeProvider.GetUtcNow(), cancellationToken)).Single())
                 : IdentityNotFound(identityId))
         .WithName("DisableServiceIdentity");
 
         group.MapPost("/service-identities/{identityId:guid}/enable", async (
             Guid identityId,
             KanbanDbContext dbContext,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
             await ServiceIdentityProvisioner.EnableAsync(dbContext, identityId, cancellationToken)
-                ? Results.Ok((await SummariesAsync(dbContext, identityId, cancellationToken)).Single())
+                ? Results.Ok((await SummariesAsync(dbContext, identityId, timeProvider.GetUtcNow(), cancellationToken)).Single())
                 : IdentityNotFound(identityId))
         .WithName("EnableServiceIdentity");
 
         group.MapPost("/service-identities/{identityId:guid}/tokens", async (
             Guid identityId,
-            CreatePersonalAccessTokenRequest request,
             HttpContext httpContext,
             KanbanDbContext dbContext,
             IPersonalAccessTokenService personalAccessTokenService,
             IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
             if (!personalAccessTokenOptions.Value.Enabled)
@@ -139,7 +152,16 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return TokensDisabled();
             }
 
-            var validationError = KanbanSettingsEndpointRouteBuilderExtensions.ValidateCreatePersonalAccessTokenRequest(request);
+            var (request, bodyRefusal) = await ReadBodyAsync<CreatePersonalAccessTokenRequest>(httpContext, cancellationToken);
+            if (bodyRefusal is not null)
+            {
+                return bodyRefusal;
+            }
+
+            var now = timeProvider.GetUtcNow();
+            var validationError = request is null
+                ? "Field 'name' is required."
+                : KanbanSettingsEndpointRouteBuilderExtensions.ValidateCreatePersonalAccessTokenRequest(request, now);
             if (validationError is not null)
             {
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
@@ -149,9 +171,10 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 dbContext,
                 personalAccessTokenService,
                 identityId,
-                request.Name,
+                request!.Name,
                 request.ExpiresAtUtc,
                 KanbanSettingsEndpointRouteBuilderExtensions.NormalizeScope(request.Scope),
+                await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken),
                 cancellationToken);
             if (result.Outcome != ServiceIdentityTokenOutcome.Issued)
             {
@@ -162,10 +185,11 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Json(
                 new CreatedPersonalAccessTokenDto(
-                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token),
+                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token, now),
                     result.Token.PlaintextToken),
                 statusCode: StatusCodes.Status201Created);
         })
+        .Accepts<CreatePersonalAccessTokenRequest>("application/json")
         .WithName("IssueServiceIdentityToken");
 
         group.MapGet("/service-identities/{identityId:guid}/tokens", async (
@@ -199,7 +223,9 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                     // The rule of the Settings page: revoked before expired before active.
                     token.RevokedAtUtc is not null ? PersonalAccessTokenStates.Revoked
                         : token.ExpiresAtUtc <= now ? PersonalAccessTokenStates.Expired
-                        : PersonalAccessTokenStates.Active))
+                        : PersonalAccessTokenStates.Active,
+                    AdminOf(token.IssuedByUserId, token.IssuedByName),
+                    AdminOf(token.RevokedByUserId, token.RevokedByName)))
                 .ToList());
         })
         .WithName("ListServiceIdentityTokens");
@@ -208,9 +234,11 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
         group.MapDelete("/service-identities/{identityId:guid}/tokens/{tokenId:guid}", async (
             Guid identityId,
             Guid tokenId,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             CancellationToken cancellationToken) =>
-            await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, identityId, tokenId, cancellationToken)
+            await ServiceIdentityProvisioner.RevokeTokenAsync(
+                dbContext, identityId, tokenId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), cancellationToken)
                 ? Results.NoContent()
                 : TokenNotFound(identityId, tokenId))
         .WithName("RevokeServiceIdentityToken");
@@ -218,11 +246,11 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
         group.MapPost("/service-identities/{identityId:guid}/tokens/{tokenId:guid}/rotate", async (
             Guid identityId,
             Guid tokenId,
-            RotatePersonalAccessTokenRequest? request,
             HttpContext httpContext,
             KanbanDbContext dbContext,
             IPersonalAccessTokenService personalAccessTokenService,
             IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
         {
             if (!personalAccessTokenOptions.Value.Enabled)
@@ -230,14 +258,23 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return TokensDisabled();
             }
 
+            // No body, or a body without an expiry: the replacement does not expire.
+            var (request, bodyRefusal) = await ReadBodyAsync<RotatePersonalAccessTokenRequest>(httpContext, cancellationToken);
+            if (bodyRefusal is not null)
+            {
+                return bodyRefusal;
+            }
+
+            var now = timeProvider.GetUtcNow();
             var expiresAtUtc = request?.ExpiresAtUtc;
-            if (expiresAtUtc <= DateTimeOffset.UtcNow)
+            if (expiresAtUtc <= now)
             {
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "Field 'expiresAtUtc' must be in the future.");
             }
 
             var result = await ServiceIdentityProvisioner.RotateTokenAsync(
-                dbContext, personalAccessTokenService, identityId, tokenId, expiresAtUtc, cancellationToken);
+                dbContext, personalAccessTokenService, identityId, tokenId, expiresAtUtc,
+                await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), cancellationToken);
             if (result.Outcome != ServiceIdentityTokenOutcome.Issued)
             {
                 return TokenRefusal(result, identityId, tokenId);
@@ -247,11 +284,12 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Json(
                 new RotatedPersonalAccessTokenDto(
-                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token),
+                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token, now),
                     result.Token.PlaintextToken,
                     tokenId),
                 statusCode: StatusCodes.Status201Created);
         })
+        .Accepts<RotatePersonalAccessTokenRequest>("application/json")
         .WithName("RotateServiceIdentityToken");
 
         return endpoints;
@@ -267,11 +305,13 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             .Where(token => token.AppUser!.Issuer == ServiceIdentityProvisioner.Issuer);
 
     /// <summary>
-    /// The summary of every service identity, or of the one with <paramref name="identityId"/>, ordered by name.
+    /// The summary of every service identity, or of the one with <paramref name="identityId"/>, ordered by name; a
+    /// token is active when it is neither revoked nor expired at <paramref name="now"/>.
     /// </summary>
     public static async Task<List<ServiceIdentitySummaryDto>> SummariesAsync(
         KanbanDbContext dbContext,
         Guid? identityId,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         var identityQuery = dbContext.AppUsers
@@ -289,7 +329,6 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             .Select(token => new { token.AppUserId, token.ExpiresAtUtc, token.RevokedAtUtc, token.LastUsedAtUtc })
             .ToListAsync(cancellationToken);
         var tokensByIdentity = tokens.ToLookup(token => token.AppUserId);
-        var now = DateTimeOffset.UtcNow;
 
         return identities
             .Select(user => new ServiceIdentitySummaryDto(
@@ -305,6 +344,36 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 user.DisabledAtUtc))
             .OrderBy(identity => identity.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static PersonalAccessTokenAdminDto? AdminOf(Guid? id, string? name) =>
+        id is null && name is null ? null : new PersonalAccessTokenAdminDto(id, name);
+
+    /// <summary>
+    /// The JSON body of an admin request, read here rather than bound: a body that is not JSON of the request's shape
+    /// is refused with 400 <c>invalid_argument</c> and a message, where binding answers a bare 400. An empty body, or
+    /// JSON <c>null</c>, reads as null.
+    /// </summary>
+    private static async Task<(T? Body, IResult? Refusal)> ReadBodyAsync<T>(HttpContext httpContext, CancellationToken cancellationToken)
+        where T : class
+    {
+        using var reader = new StreamReader(httpContext.Request.Body);
+        var text = await reader.ReadToEndAsync(cancellationToken);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            var options = httpContext.RequestServices.GetRequiredService<IOptions<JsonOptions>>().Value.SerializerOptions;
+            return (JsonSerializer.Deserialize<T>(text, options), null);
+        }
+        catch (JsonException exception)
+        {
+            return (null, Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument,
+                $"The request body is not valid JSON of the expected shape: {exception.Message}"));
+        }
     }
 
     private static IResult TokensDisabled() =>

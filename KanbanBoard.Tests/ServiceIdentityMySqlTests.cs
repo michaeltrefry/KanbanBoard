@@ -1,7 +1,9 @@
 using System.Data;
 using System.Data.Common;
 using KanbanBoard.Api.Configuration;
+using KanbanBoard.Api.Data.Migrations;
 using KanbanBoard.Api.Services;
+using Microsoft.EntityFrameworkCore.Migrations.Operations;
 using MySql.Data.MySqlClient;
 using static KanbanBoard.Tests.StartupMigrationTests;
 
@@ -58,7 +60,7 @@ public sealed class ServiceIdentityMySqlTests
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
         await ServiceIdentityProvisioner.IssueTokenAsync(dbContext, new PersonalAccessTokenService(dbContext, TestDb.PatOptions()),
-            IdentityId, "Token", null, "full", CancellationToken.None);
+            IdentityId, "Token", null, "full", null, CancellationToken.None);
 
         AssertHoldsTheIdentityByIdBeforeReadingIt(database);
     }
@@ -70,7 +72,7 @@ public sealed class ServiceIdentityMySqlTests
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
         await ServiceIdentityProvisioner.RotateTokenAsync(dbContext, new PersonalAccessTokenService(dbContext, TestDb.PatOptions()),
-            IdentityId, Guid.NewGuid(), null, CancellationToken.None);
+            IdentityId, Guid.NewGuid(), null, null, CancellationToken.None);
 
         AssertHoldsTheIdentityByIdBeforeReadingIt(database);
     }
@@ -81,7 +83,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), CancellationToken.None));
+        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), null, CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.True(texts.Count == 2, string.Join("\n---\n", texts));
@@ -140,7 +142,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.True(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, CancellationToken.None));
+        Assert.True(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, new ChangeActor(Guid.NewGuid(), "Ada"), CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
@@ -150,11 +152,14 @@ public sealed class ServiceIdentityMySqlTests
                 "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = `a`.`DisabledAtUtc`\n" +
                 "WHERE (`a`.`Id` = @identityId) AND (`a`.`Issuer` = 'kanban:service-identity')",
                 "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = @p,\n    `UpdatedAtUtc` = @p2\n" +
-                "WHERE (`a`.`Id` = @identityId) AND `a`.`DisabledAtUtc` IS NULL",
-                "UPDATE `PersonalAccessTokens` AS `p`\nSET `RevokedAtUtc` = @p\n" +
-                "WHERE (`p`.`AppUserId` = @identityId) AND `p`.`RevokedAtUtc` IS NULL"
+                "WHERE (`a`.`Id` = @identityId) AND `a`.`DisabledAtUtc` IS NULL"
             ],
-            texts);
+            texts[..2]);
+        // The admin is recorded only on the tokens this disable revokes: one revoked before keeps its revoker.
+        Assert.Matches(
+            @"^UPDATE `PersonalAccessTokens` AS `p`\nSET `RevokedAtUtc` = @\w+,\n    `RevokedByUserId` = @\w+,\n    `RevokedByName` = @\w+\n" +
+            @"WHERE \(`p`\.`AppUserId` = @identityId\) AND `p`\.`RevokedAtUtc` IS NULL$",
+            texts[2]);
         Assert.Equal(["COMMIT"], database.Locks);
     }
 
@@ -164,7 +169,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 0 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.False(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, CancellationToken.None));
+        Assert.False(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, null, CancellationToken.None));
 
         Assert.Single(database.Commands);
         Assert.Empty(database.Locks);
@@ -181,6 +186,31 @@ public sealed class ServiceIdentityMySqlTests
         var text = Normalize(Assert.Single(database.Commands).Text);
         Assert.Contains("`a`.`DisabledAtUtc`", text, StringComparison.Ordinal);
         Assert.Contains("INNER JOIN `AppUsers` AS `a`", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Migration_and_deploy_script_add_the_same_nullable_admin_columns_and_nothing_else()
+    {
+        var migration = new AddPersonalAccessTokenAdmins();
+        var columns = migration.UpOperations.OfType<AddColumnOperation>().ToList();
+        var script = File.ReadAllText(FindRepoFile("deploy/sql/012_personal_access_token_admins.sql")).ReplaceLineEndings("\n");
+
+        // Existing tokens keep their rows: every new column is nullable and nothing is altered, dropped or keyed.
+        Assert.Equal(4, migration.UpOperations.Count);
+        Assert.Equal(
+            [("IssuedByName", "varchar(320)"), ("IssuedByUserId", "varchar(36)"), ("RevokedByName", "varchar(320)"), ("RevokedByUserId", "varchar(36)")],
+            columns.Select(column => (column.Name, column.ColumnType!)).ToArray());
+        var positions = columns.Select(column =>
+        {
+            Assert.Equal(("PersonalAccessTokens", true), (column.Table, column.IsNullable));
+            var line = $"ALTER TABLE `PersonalAccessTokens` ADD COLUMN IF NOT EXISTS `{column.Name}` {column.ColumnType} NULL;";
+            Assert.Contains(line, script, StringComparison.Ordinal);
+            return script.IndexOf(line, StringComparison.Ordinal);
+        }).ToList();
+        // The same order as the migration, so both give the same table.
+        Assert.Equal(positions.Order(), positions);
+        Assert.Contains($"VALUES ('{typeof(AddPersonalAccessTokenAdmins).GetCustomAttributes(typeof(Microsoft.EntityFrameworkCore.Migrations.MigrationAttribute), false)
+            .Cast<Microsoft.EntityFrameworkCore.Migrations.MigrationAttribute>().Single().Id}', '10.0.6');", script, StringComparison.Ordinal);
     }
 
     private static string Normalize(string sql) => sql.ReplaceLineEndings("\n").TrimEnd();

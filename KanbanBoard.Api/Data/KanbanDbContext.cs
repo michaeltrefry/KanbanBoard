@@ -228,6 +228,10 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(token => token.ExpiresAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(token => token.LastUsedAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             entity.Property(token => token.RevokedAtUtc).HasConversion(NullableDateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
+            entity.Property(token => token.IssuedByUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
+            entity.Property(token => token.IssuedByName).HasMaxLength(WorkItemClaimLimits.MaxClaimantNameLength);
+            entity.Property(token => token.RevokedByUserId).HasConversion(NullableGuidToStringConverter).HasMaxLength(36);
+            entity.Property(token => token.RevokedByName).HasMaxLength(WorkItemClaimLimits.MaxClaimantNameLength);
             entity.HasIndex(token => token.AppUserId);
             entity.HasIndex(token => token.TokenPrefix);
             entity.HasIndex(token => token.TokenHash).IsUnique();

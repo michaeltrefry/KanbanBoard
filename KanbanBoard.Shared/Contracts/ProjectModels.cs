@@ -289,6 +289,8 @@ public static class PersonalAccessTokenStates
 
 /// <summary>A token of a service identity as the admin page lists it: never its plaintext or secret.</summary>
 /// <param name="State">One of <see cref="PersonalAccessTokenStates"/>.</param>
+/// <param name="IssuedBy">The admin who issued it from the admin page (by an issue or a rotate), or null.</param>
+/// <param name="RevokedBy">The admin who revoked it from the admin page (by a revoke, a rotate or a disable), or null.</param>
 public sealed record ServiceIdentityTokenDto(
     Guid Id,
     string Name,
@@ -298,7 +300,16 @@ public sealed record ServiceIdentityTokenDto(
     DateTimeOffset? ExpiresAtUtc,
     DateTimeOffset? LastUsedAtUtc,
     DateTimeOffset? RevokedAtUtc,
-    string State);
+    string State,
+    PersonalAccessTokenAdminDto? IssuedBy = null,
+    PersonalAccessTokenAdminDto? RevokedBy = null);
+
+/// <summary>
+/// The admin who issued or revoked a token from the admin page, as the token recorded them then. Null for a token
+/// issued or revoked otherwise: by its owner on the Settings page, by create-service-identity, or before this was kept.
+/// </summary>
+/// <param name="Id">The admin's user id; null when the admin had no user row yet.</param>
+public sealed record PersonalAccessTokenAdminDto(Guid? Id, string? Name);
 
 /// <param name="ExpiresAtUtc">The replacement's expiry; null for none, whatever the rotated token's was.</param>
 public sealed record RotatePersonalAccessTokenRequest(DateTimeOffset? ExpiresAtUtc = null);

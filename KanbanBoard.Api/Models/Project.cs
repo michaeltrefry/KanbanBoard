@@ -182,4 +182,12 @@ public sealed class PersonalAccessToken
     public DateTimeOffset? ExpiresAtUtc { get; set; }
     public DateTimeOffset? LastUsedAtUtc { get; set; }
     public DateTimeOffset? RevokedAtUtc { get; set; }
+    // The admin who issued the token from the Admin page (by an issue or a rotate), and the admin who revoked it there
+    // (by a revoke, a rotate or a disable of its identity): the user's id and name at that moment, as a work item
+    // change keeps its actor. No foreign key, so the record outlives a change of the user. All null for a token
+    // issued or revoked otherwise: by its owner on the Settings page, by create-service-identity, or before 012.
+    public Guid? IssuedByUserId { get; set; }
+    public string? IssuedByName { get; set; }
+    public Guid? RevokedByUserId { get; set; }
+    public string? RevokedByName { get; set; }
 }

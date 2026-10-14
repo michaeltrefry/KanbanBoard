@@ -65,7 +65,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            var validationError = ValidateCreatePersonalAccessTokenRequest(request);
+            var validationError = ValidateCreatePersonalAccessTokenRequest(request, DateTimeOffset.UtcNow);
             if (validationError is not null)
             {
                 return Results.BadRequest(new { message = validationError });
@@ -138,9 +138,12 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             user.LastSeenAtUtc,
             isAdmin);
 
-    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token)
+    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token) =>
+        ToPersonalAccessTokenMetadataDto(token, DateTimeOffset.UtcNow);
+
+    /// <param name="now">The time the token's activity is judged at.</param>
+    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token, DateTimeOffset now)
     {
-        var now = DateTimeOffset.UtcNow;
         return new PersonalAccessTokenMetadataDto(
             token.Id,
             token.Name,
@@ -158,7 +161,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             ? PersonalAccessTokenScopes.Full
             : scope.Trim().ToLowerInvariant();
 
-    internal static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request)
+    internal static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
         {
@@ -175,7 +178,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             return $"Field 'scope' must be '{PersonalAccessTokenScopes.Read}' or '{PersonalAccessTokenScopes.Full}'.";
         }
 
-        if (request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        if (request.ExpiresAtUtc <= now)
         {
             return "Field 'expiresAtUtc' must be in the future.";
         }
