@@ -98,7 +98,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, ServiceIdentityProvisioner.InvalidNameMessage);
             }
 
-            var result = await ServiceIdentityProvisioner.CreateAsync(dbContext, name, cancellationToken);
+            var result = await ServiceIdentityProvisioner.CreateAsync(dbContext, name, timeProvider.GetUtcNow(), cancellationToken);
             switch (result.Outcome)
             {
                 case ServiceIdentityCreateOutcome.Busy:
@@ -134,7 +134,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            await ServiceIdentityProvisioner.EnableAsync(dbContext, identityId, cancellationToken)
+            await ServiceIdentityProvisioner.EnableAsync(dbContext, identityId, timeProvider.GetUtcNow(), cancellationToken)
                 ? Results.Ok((await SummariesAsync(dbContext, identityId, timeProvider.GetUtcNow(), cancellationToken)).Single())
                 : IdentityNotFound(identityId))
         .WithName("EnableServiceIdentity");

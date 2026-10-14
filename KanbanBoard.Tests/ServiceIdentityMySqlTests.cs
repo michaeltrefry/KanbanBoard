@@ -29,7 +29,7 @@ public sealed class ServiceIdentityMySqlTests
         };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        var created = await ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", CancellationToken.None);
+        var created = await ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.Equal(ServiceIdentityCreateOutcome.Exists, created.Outcome);
     }
@@ -40,7 +40,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1, NamedLockGranted) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        await Record.ExceptionAsync(() => ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", CancellationToken.None));
+        await Record.ExceptionAsync(() => ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", DateTimeOffset.UtcNow, CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.True(texts.Count >= 4, string.Join("\n---\n", texts));
@@ -77,6 +77,80 @@ public sealed class ServiceIdentityMySqlTests
         AssertHoldsTheIdentityByIdBeforeReadingIt(database);
     }
 
+    // The replacement is stored before the old token is revoked, in the one transaction, so a failed issue leaves the
+    // old token usable.
+    [Fact]
+    public async Task A_rotate_inserts_the_replacement_before_it_revokes_the_old_token()
+    {
+        var tokenId = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var database = new FakeDatabase(lockResult: 1, RotateRows(tokenId)) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        var rotated = await ServiceIdentityProvisioner.RotateTokenAsync(dbContext, new PersonalAccessTokenService(dbContext, TestDb.PatOptions()),
+            IdentityId, tokenId, null, null, CancellationToken.None);
+
+        Assert.Equal(ServiceIdentityTokenOutcome.Issued, rotated.Outcome);
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var insert = texts.FindIndex(text => text.Contains("INSERT INTO `PersonalAccessTokens`", StringComparison.Ordinal));
+        var revoke = texts.FindIndex(text =>
+            text.StartsWith("UPDATE `PersonalAccessTokens`", StringComparison.Ordinal) && text.Contains("`RevokedAtUtc` = @", StringComparison.Ordinal));
+        Assert.True(insert > 0 && revoke > insert, string.Join("\n---\n", texts));
+        // The rotate's transaction is begun before its first statement. (With this fake the save of the insert begins
+        // one of its own as well; on a real server it joins the rotate's.)
+        Assert.Equal(0, database.TransactionStarts[0]);
+    }
+
+    // The identity, enabled, and its token, not revoked, as the rotate reads them; every other query finds no rows.
+    private static Func<DbCommand, DataTable?> RotateRows(Guid tokenId) => command =>
+    {
+        var text = command.CommandText;
+        if (text.Contains("ROW_COUNT()", StringComparison.Ordinal))
+        {
+            return Table("ROW_COUNT()", 1);
+        }
+
+        var created = new DateTime(2026, 10, 1, 8, 0, 0, DateTimeKind.Utc);
+        Dictionary<string, object>? values =
+            !text.StartsWith("SELECT", StringComparison.Ordinal) ? null
+            : text.Contains("FROM `AppUsers`", StringComparison.Ordinal) ? new()
+            {
+                ["Id"] = IdentityId.ToString(),
+                ["Issuer"] = ServiceIdentityProvisioner.Issuer,
+                ["Subject"] = "factory",
+                ["DisplayName"] = "Factory",
+                ["CreatedAtUtc"] = created,
+                ["UpdatedAtUtc"] = created
+            }
+            : text.Contains("FROM `PersonalAccessTokens`", StringComparison.Ordinal) ? new()
+            {
+                ["Id"] = tokenId.ToString(),
+                ["AppUserId"] = IdentityId.ToString(),
+                ["Name"] = "Writer",
+                ["TokenPrefix"] = "prefix",
+                ["TokenHash"] = "hash",
+                ["EncryptedSecret"] = "secret",
+                ["Scope"] = "full",
+                ["CreatedAtUtc"] = created
+            }
+            : null;
+        if (values is null)
+        {
+            return null;
+        }
+
+        var table = new DataTable();
+        var columns = text["SELECT ".Length..text.IndexOf('\n', StringComparison.Ordinal)].Split(", ");
+        foreach (var column in columns)
+        {
+            table.Columns.Add(column, typeof(object));
+        }
+
+        table.Rows.Add(columns
+            .Select(column => values.GetValueOrDefault(column[(column.IndexOf('.', StringComparison.Ordinal) + 1)..].Trim('`'), DBNull.Value))
+            .ToArray());
+        return table;
+    };
+
     [Fact]
     public async Task A_revoke_holds_the_identity_first_so_it_runs_after_or_before_a_rotate_of_the_token()
     {
@@ -103,7 +177,7 @@ public sealed class ServiceIdentityMySqlTests
 
         // Whatever the fake answers to the inserts that follow; only the first statements matter here.
         await Record.ExceptionAsync(() => ServiceIdentityProvisioner.ProvisionAsync(dbContext,
-            new PersonalAccessTokenService(dbContext, TestDb.PatOptions()), "Factory", rotate: true, CancellationToken.None));
+            new PersonalAccessTokenService(dbContext, TestDb.PatOptions()), "Factory", rotate: true, DateTimeOffset.UtcNow, CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         var begin = database.TransactionStarts[0];
