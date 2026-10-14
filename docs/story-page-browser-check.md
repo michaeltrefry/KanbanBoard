@@ -91,3 +91,18 @@ Open the board at `/?project={demoId}` in a fresh tab. Story page and a second D
 | 47 | Open `/styles.css`, then `/?project={demoId}` in the same tab (so the board is the tab's first app entry). Open a card and **double-click Close** (or click Close and then the overlay at once). | The slideout closes and the tab stays on `/?project={demoId}`; it does not step back to `/styles.css`. |
 | 48 | Open a card, reload, type into the slideout's title and **immediately** press Close (and, again, the overlay). | `GET /api/items/{storyId}` returns the new title: the edit is saved before the slideout steps back. |
 | 49 | Open `/styles.css`, then `/?project={demoId}`; open a card and delete that story elsewhere (`DELETE /api/items/{id}`). After the slideout closes, press Back. | Back goes to `/styles.css` (the slideout's entry was stepped back over, not left as an identical duplicate). |
+
+### Comment permalinks (sc-26160)
+
+Extra setup: give Story page enough comments (about a dozen, several lines each) that the last ones are below the
+fold. Note a comment's id from `GET /api/items/{storyId}` (`comments[].id`), say `{cid}` for one near the bottom.
+
+| # | Step | Expected |
+|---|------|----------|
+| 50 | Open `/stories/{storyId}#comment-{cid}` in a new tab. | Once the story loads, that comment is scrolled into view and highlighted (accent outline and tint); the address bar still ends in `#comment-{cid}`. |
+| 51 | Scroll to the top, then add a comment elsewhere (`POST /api/items/{storyId}/comments`). | The new comment appears without a reload; the page does not scroll back to `{cid}` and its highlight stays. |
+| 52 | Open `/stories/{storyId}#comment-00000000-0000-0000-0000-000000000009` (no such comment). | The page loads at the top with no comment highlighted and no message or console error. |
+| 53 | On the story page click a comment's **Copy link**. | The feedback bar says "Link copied to the clipboard"; pasting gives `{origin}/stories/{storyId}#comment-{thatId}`. |
+| 54 | Paste that link into the same tab's address bar and press Enter (or set `location.hash` to another `#comment-{id}`). | The page does not reload; it scrolls to that comment and the highlight moves to it. |
+| 55 | Right after step 54, click **Board** in the top bar; then press Back, then Forward. | The URL becomes `/?project={demoId}` with the board (the fragment navigation did not swallow this push). Back shows the story page at `/stories/{storyId}#comment-{id}` with that comment highlighted; Forward returns to the board. |
+| 56 | On the board open Story page's card; in the slideout click a comment's **Copy link**. | The feedback bar says "Link copied to the clipboard"; pasting gives `{origin}/stories/{storyId}#comment-{thatId}`. The slideout's comments carry no `id` (no `comment-…` id is ever on the page twice). |
