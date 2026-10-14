@@ -392,6 +392,7 @@ body::before {
 }
 [data-theme="paper"] .epic-title { font-weight: 500; font-size: 32px; }
 .epic-summary { color: var(--muted); font-size: 13.5px; line-height: 1.5; margin: 0; max-width: 640px; }
+.epic-summary a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
 .epic-headline-stats {
   display: flex; gap: 16px;
   padding-top: 4px;
