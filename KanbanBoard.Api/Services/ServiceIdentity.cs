@@ -93,8 +93,10 @@ public static class ServiceIdentityProvisioner
     /// one with that name exists as the unique index compares names (any case; on MariaDB any accent as well), writes
     /// nothing and reports that identity. Creates run one at a time, as do those of the create-service-identity command,
     /// so on MariaDB a name is looked up before the insert that would fail on it and no failed insert is logged.
+    /// The identity records <paramref name="now"/> as the time it was created.
     /// </summary>
-    public static Task<ServiceIdentityCreateResult> CreateAsync(KanbanDbContext dbContext, string displayName, CancellationToken cancellationToken)
+    public static Task<ServiceIdentityCreateResult> CreateAsync(
+        KanbanDbContext dbContext, string displayName, DateTimeOffset now, CancellationToken cancellationToken)
     {
         var subject = SubjectOf(displayName);
         return MariaDbNamedLock.RunAsync(dbContext, CreateLockName, CreateLockTimeoutSeconds, new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Busy), async () =>
@@ -104,7 +106,6 @@ public static class ServiceIdentityProvisioner
                 return new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Exists, existing);
             }
 
-            var now = DateTimeOffset.UtcNow;
             var user = new AppUser { Issuer = Issuer, Subject = subject, DisplayName = displayName, CreatedAtUtc = now, UpdatedAtUtc = now };
             dbContext.AppUsers.Add(user);
             try
@@ -310,11 +311,10 @@ public static class ServiceIdentityProvisioner
 
     /// <summary>
     /// Enables the service identity so that tokens can be issued for it again. The tokens revoked when it was disabled
-    /// stay revoked. False when there is no such identity.
+    /// stay revoked. False when there is no such identity. <paramref name="now"/> is recorded as the time it was updated.
     /// </summary>
-    public static async Task<bool> EnableAsync(KanbanDbContext dbContext, Guid identityId, CancellationToken cancellationToken)
+    public static async Task<bool> EnableAsync(KanbanDbContext dbContext, Guid identityId, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var now = DateTimeOffset.UtcNow;
         var matched = await dbContext.AppUsers
             .Where(user => user.Id == identityId && user.Issuer == Issuer)
             .ExecuteUpdateAsync(setters => setters
@@ -328,6 +328,7 @@ public static class ServiceIdentityProvisioner
         IPersonalAccessTokenService personalAccessTokenService,
         string name,
         bool rotate,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         var displayName = NormalizeName(name) ?? throw new ArgumentException(InvalidNameMessage, nameof(name));
@@ -338,13 +339,13 @@ public static class ServiceIdentityProvisioner
         var relational = dbContext.Database.IsRelational();
         if (!relational)
         {
-            return await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, cancellationToken);
+            return await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, now, cancellationToken);
         }
 
         // Under the lock of every create, so that a create of the name from the admin page or another run of the
         // command waits instead of failing on the unique index.
         return await MariaDbNamedLock.RunAsync<ProvisionedServiceIdentity?>(dbContext, CreateLockName, CreateLockTimeoutSeconds, null,
-                async () => await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, cancellationToken),
+                async () => await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, now, cancellationToken),
                 cancellationToken) ??
             throw new InvalidOperationException(
                 $"Other service identity creates were in progress for {CreateLockTimeoutSeconds} s. Nothing was written; try again.");
@@ -356,6 +357,7 @@ public static class ServiceIdentityProvisioner
         string displayName,
         bool rotate,
         bool relational,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         // One transaction on a real database: a failure part-way leaves no identity, no unprinted token, no revocation.
@@ -364,7 +366,6 @@ public static class ServiceIdentityProvisioner
             : null;
 
         var subject = SubjectOf(displayName);
-        var now = DateTimeOffset.UtcNow;
         if (relational)
         {
             // The identity's row is held first, as an issue from the admin page holds it, so that a disable of it
@@ -385,11 +386,11 @@ public static class ServiceIdentityProvisioner
         var created = user is null;
         if (user is null)
         {
-            user = new AppUser { Issuer = Issuer, Subject = subject, CreatedAtUtc = now };
+            // A reused identity keeps its display name, which may differ in case from the name given here.
+            user = new AppUser { Issuer = Issuer, Subject = subject, DisplayName = displayName, CreatedAtUtc = now };
             dbContext.AppUsers.Add(user);
         }
 
-        user.DisplayName = displayName;
         user.UpdatedAtUtc = now;
 
         await dbContext.SaveChangesAsync(cancellationToken);
@@ -436,7 +437,8 @@ public static class ServiceIdentityCommand
 
     public const string Usage =
         "Usage: dotnet KanbanBoard.Api.dll " + CommandName + " --name NAME [--rotate]\n" +
-        "  --name NAME  Display name of the service identity. Re-using a name adds tokens to that identity.\n" +
+        "  --name NAME  Display name of the service identity. Re-using a name adds tokens to that identity\n" +
+        "               and keeps its display name.\n" +
         "               A disabled identity is refused; enable it on the admin page first.\n" +
         "  --rotate     Revoke the identity's existing tokens once the new pair is issued.";
 
@@ -483,6 +485,7 @@ public static class ServiceIdentityCommand
                 services.GetRequiredService<IPersonalAccessTokenService>(),
                 name,
                 rotate,
+                services.GetRequiredService<TimeProvider>().GetUtcNow(),
                 cancellationToken);
         }
         catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)

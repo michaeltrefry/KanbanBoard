@@ -277,6 +277,8 @@ public sealed class AdminServiceIdentityApiTests
         Assert.Equal(HttpStatusCode.Created, longest.StatusCode);
         // The command finds the identity the page created rather than making a second one.
         Assert.False((await api.ProvisionAsync("dark factory")).Created);
+        // And keeps the name the page gave it.
+        Assert.Equal("Dark Factory", (await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync(user => user.Id == stored.Id))).DisplayName);
     }
 
     [Fact]
@@ -906,6 +908,45 @@ public sealed class AdminServiceIdentityApiTests
         Assert.All(stored.Where(token => token.ExpiresAtUtc is not null), token => Assert.True(token.ExpiresAtUtc > token.CreatedAtUtc));
     }
 
+    // A create, an enable and the command's run record the application's clock too: here a day behind the real one.
+    [Fact]
+    public async Task Create_enable_and_the_command_store_the_applications_clock()
+    {
+        var clock = new WorkItemClaimApiTests.MutableClock();
+        clock.Advance(DateTimeOffset.UtcNow.AddDays(-1) - clock.Now);
+        using var api = new AdminApi(clock: clock);
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        var createdAt = clock.Now;
+        using (var create = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities", new { name = "Factory" }, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.Created, create.StatusCode);
+        }
+
+        var id = (await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync())).Id;
+        clock.Advance(TimeSpan.FromHours(1));
+        using (var disable = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{id}/disable", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+        }
+
+        clock.Advance(TimeSpan.FromHours(1));
+        var enabledAt = clock.Now;
+        using (var enable = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{id}/enable", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.OK, enable.StatusCode);
+        }
+
+        var stored = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync());
+        Assert.Equal((createdAt, enabledAt), (stored.CreatedAtUtc, stored.UpdatedAtUtc));
+
+        clock.Advance(TimeSpan.FromHours(1));
+        var provisionedAt = clock.Now;
+        var provisioned = await api.ProvisionAsync("Command");
+        stored = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync(user => user.Id == provisioned.User.Id));
+        Assert.Equal((provisionedAt, provisionedAt), (stored.CreatedAtUtc, stored.UpdatedAtUtc));
+    }
+
     // In Production, as the server runs: no developer exception page answers for the endpoint.
     [Fact]
     public async Task A_malformed_wrong_typed_or_empty_body_is_refused_with_a_typed_code_writes_nothing_and_logs_no_error()
@@ -1184,6 +1225,7 @@ public sealed class AdminServiceIdentityApiTests
                 scope.ServiceProvider.GetRequiredService<IPersonalAccessTokenService>(),
                 name,
                 rotate,
+                scope.ServiceProvider.GetRequiredService<TimeProvider>().GetUtcNow(),
                 CancellationToken.None);
         }
 
