@@ -133,6 +133,8 @@ app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
 app.UseStaticFiles();
+// The story page: the app routes /stories/{storyId} itself. Only that path, so /api/* and missing files still 404.
+app.MapFallbackToFile("/stories/{storyId:guid}", "index.html");
 
 app.MapGet("/api/changes", async (HttpContext httpContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {
