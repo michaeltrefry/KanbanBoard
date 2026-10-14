@@ -235,6 +235,12 @@ jobs:
             exit 1
           fi
 
+          # Mirrors AppOptions.Validate: an absolute http(s) URL with a host and no query or fragment.
+          if [[ ! "${KANBAN_PUBLIC_BASE_URL}" =~ ^[Hh][Tt][Tt][Pp][Ss]?://[^/?#[:space:]][^?#[:space:]]*$ ]]; then
+            echo "::error::KANBAN_PUBLIC_BASE_URL must be an absolute http(s) URL without query/fragment; got '${KANBAN_PUBLIC_BASE_URL}'."
+            exit 1
+          fi
+
           : > deploy/.env.release
           write_env KANBAN_API_IMAGE "${KANBAN_API_IMAGE}"
           write_env KANBAN_MCP_IMAGE "${KANBAN_MCP_IMAGE}"

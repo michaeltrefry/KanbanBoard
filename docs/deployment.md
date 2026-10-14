@@ -288,6 +288,7 @@ Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
 - `KANBAN_ADMIN_SUBJECTS`: the admins of the Admin page (service identities and their tokens), written to `Auth__AdminSubjects`. Variable or secret. See [Admins](#admins). Unset or empty: nobody is an admin and the page is not shown.
+- `KANBAN_PUBLIC_BASE_URL`: the public address of the board, written to `App__PublicBaseUrl`; story `url` = `{this}/stories/{id}`. Variable. Defaults to `https://kanban.trefry.net` when unset or empty. Must be an absolute `http`/`https` URL without a query or fragment; the deploy fails before touching the server otherwise.
 - `KANBAN_DB_MIGRATE_ON_STARTUP`: `false` stops the API from applying EF Core migrations on startup. Defaults to `true` if omitted. Only the lowercase values `true` and `false` are accepted; the deploy fails before touching the server on any other value. Variable.
 - `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.
