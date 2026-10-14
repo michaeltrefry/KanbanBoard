@@ -352,7 +352,7 @@ Two kinds of call are refused `invalid_argument` before the tool runs, so nothin
 - **An argument the tool does not have.** Argument names are compared exactly, in the spelling `tools/list` gives them (`itemId`, `includeArchived`, `expected_version`, `idempotency_key`). A call that passes any other name (`expected_versoin`, `itemid`, `document` for `documents`) is refused, and the message lists the arguments the tool has. Such an argument used to be dropped without a word, which turned a guarded `update_work_item` into an unguarded one and imported a plan without its documents. A client that sends arguments a tool does not declare must stop sending them.
 - **An argument that cannot be read as the tool's parameter**: a required argument that is missing, or a value of another JSON type or shape.
 
-A token that was revoked or has expired is refused by the API on its next call, read or write, with `scope_denied`: the MCP server's validation cache (30 s by default) does not keep it working. Other failures (an unreachable API, an answer of the API that cannot be read, a fault of the server while or after the tool ran) are reported as a plain MCP error without a code; such a call may have written, so read before repeating it without an `idempotency_key`.
+A token that was revoked or has expired, or whose service identity was disabled, is refused by the API on its next call, read or write, with `scope_denied`: the MCP server's validation cache (30 s by default) does not keep it working. Other failures (an unreachable API, an answer of the API that cannot be read, a fault of the server while or after the tool ran) are reported as a plain MCP error without a code; such a call may have written, so read before repeating it without an `idempotency_key`.
 
 ### Service identities
 
@@ -363,6 +363,8 @@ dotnet KanbanBoard.Api.dll create-service-identity --name factory [--rotate]
 ```
 
 The name is the identity's display name and the `claimant` on the items it claims. Running the command again with the same name adds a new token pair to the same identity; `--rotate` also revokes its existing tokens once the new pair is issued. See [docs/deployment.md](docs/deployment.md#factory-service-identity) for the production steps.
+
+An admin (`Auth__AdminSubjects`, see [docs/deployment.md](docs/deployment.md#admins)) can also list the service identities and issue a token for one from the **Admin** page of the web UI.
 
 ### Available tool names
 

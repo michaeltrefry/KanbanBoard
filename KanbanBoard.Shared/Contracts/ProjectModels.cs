@@ -244,7 +244,25 @@ public sealed record CurrentUserDto(
     string Subject,
     string? DisplayName,
     string? Email,
-    DateTimeOffset? LastSeenAtUtc);
+    DateTimeOffset? LastSeenAtUtc,
+    bool IsAdmin = false);
+
+/// <param name="ActiveTokenCount">Tokens that are neither revoked nor expired.</param>
+/// <param name="LastUsedAtUtc">The most recent use of any of its tokens; null when none was ever used.</param>
+/// <param name="DisabledAtUtc">When the identity was disabled; null while it is enabled.</param>
+public sealed record ServiceIdentitySummaryDto(
+    Guid Id,
+    string Name,
+    DateTimeOffset CreatedAtUtc,
+    int ActiveTokenCount,
+    DateTimeOffset? LastUsedAtUtc,
+    DateTimeOffset? DisabledAtUtc = null)
+{
+    /// <summary>A disabled identity gets no new token and none of its tokens is accepted.</summary>
+    public bool Disabled => DisabledAtUtc is not null;
+}
+
+public sealed record CreateServiceIdentityRequest(string? Name);
 
 public sealed record PersonalAccessTokenMetadataDto(
     Guid Id,
@@ -260,6 +278,47 @@ public sealed record PersonalAccessTokenMetadataDto(
 public sealed record CreatedPersonalAccessTokenDto(
     PersonalAccessTokenMetadataDto Token,
     string PlaintextToken);
+
+/// <summary>The states of a token in an admin's list, by precedence: a revoked token is revoked even once it expired.</summary>
+public static class PersonalAccessTokenStates
+{
+    public const string Active = "active";
+    public const string Expired = "expired";
+    public const string Revoked = "revoked";
+}
+
+/// <summary>A token of a service identity as the admin page lists it: never its plaintext or secret.</summary>
+/// <param name="State">One of <see cref="PersonalAccessTokenStates"/>.</param>
+/// <param name="IssuedBy">The admin who issued it from the admin page (by an issue or a rotate), or null.</param>
+/// <param name="RevokedBy">The admin who revoked it from the admin page (by a revoke, a rotate or a disable), or null.</param>
+public sealed record ServiceIdentityTokenDto(
+    Guid Id,
+    string Name,
+    string Scope,
+    string TokenPrefix,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? ExpiresAtUtc,
+    DateTimeOffset? LastUsedAtUtc,
+    DateTimeOffset? RevokedAtUtc,
+    string State,
+    PersonalAccessTokenAdminDto? IssuedBy = null,
+    PersonalAccessTokenAdminDto? RevokedBy = null);
+
+/// <summary>
+/// The admin who issued or revoked a token from the admin page, as the token recorded them then. Null for a token
+/// issued or revoked otherwise: by its owner on the Settings page, by create-service-identity, or before this was kept.
+/// </summary>
+/// <param name="Id">The admin's user id; null when the admin had no user row yet.</param>
+public sealed record PersonalAccessTokenAdminDto(Guid? Id, string? Name);
+
+/// <param name="ExpiresAtUtc">The replacement's expiry; null for none, whatever the rotated token's was.</param>
+public sealed record RotatePersonalAccessTokenRequest(DateTimeOffset? ExpiresAtUtc = null);
+
+/// <summary>The replacement of a rotated token, shown once, and the id of the token it replaced, now revoked.</summary>
+public sealed record RotatedPersonalAccessTokenDto(
+    PersonalAccessTokenMetadataDto Token,
+    string PlaintextToken,
+    Guid RevokedTokenId);
 
 /// <param name="IdempotencyKey">Makes the create safe to repeat: a key the caller already used returns that project.</param>
 public sealed record CreateProjectRequest(

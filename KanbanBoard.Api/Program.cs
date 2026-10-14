@@ -104,17 +104,21 @@ if (authOptions.Enabled)
     app.UseKanbanInternalApiAuthentication(internalApiOptions);
     app.UseAuthorization();
     app.UseKanbanAuthenticationGate(authOptions);
+    app.UseKanbanAdminGate();
     app.UseKanbanAntiforgeryProtection(authOptions);
     app.MapKanbanAuthenticationEndpoints();
 }
 else
 {
     app.UseKanbanInternalApiAuthentication(internalApiOptions);
+    // Refuses every admin request: without authentication there is no signed-in user to be an admin.
+    app.UseKanbanAdminGate();
 }
 
 app.UseKanbanBusyRefusal();
 app.MapKanbanAntiforgeryEndpoints();
 app.MapKanbanSettingsEndpoints();
+app.MapKanbanAdminEndpoints();
 app.MapKanbanInternalApiEndpoints();
 app.MapKanbanProjectEndpoints();
 app.MapKanbanEpicPlanEndpoints();

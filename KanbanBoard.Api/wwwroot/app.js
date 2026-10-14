@@ -174,6 +174,23 @@ const api = {
     fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
   revokePersonalAccessToken: (id) =>
     fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
+
+  listServiceIdentities: () =>
+    fetchJson(`/api/admin/service-identities`),
+  createServiceIdentity: (name) =>
+    fetchJson(`/api/admin/service-identities`, { method: "POST", body: JSON.stringify({ name }) }),
+  disableServiceIdentity: (identityId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/disable`, { method: "POST" }),
+  enableServiceIdentity: (identityId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/enable`, { method: "POST" }),
+  issueServiceIdentityToken: (identityId, payload) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
+  listServiceIdentityTokens: (identityId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/tokens`),
+  revokeServiceIdentityToken: (identityId, tokenId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}`, { method: "DELETE" }),
+  rotateServiceIdentityToken: (identityId, tokenId, payload) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
 };
 
 /* ============ Feedback hook ============ */
@@ -254,7 +271,8 @@ function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showA
 }
 
 /* ============ Topbar ============ */
-function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenBoard }) {
+function Topbar({ project, epic, view, isAdmin, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenAdmin, onOpenBoard }) {
+  const onPage = view === "settings" || view === "admin";
   return (
     <header className="topbar">
       <div className="crumbs">
@@ -263,17 +281,22 @@ function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, o
             <span className="crumb-key">USER</span>
             <span className="crumb-title">Settings</span>
           </>
+        ) : view === "admin" ? (
+          <>
+            <span className="crumb-key">ADMIN</span>
+            <span className="crumb-title">Service identities</span>
+          </>
         ) : project && <>
           <span className="crumb-key">{project.key}</span>
           <span className="crumb-title">{project.name}</span>
         </>}
-        {view !== "settings" && epic && <>
+        {!onPage && epic && <>
           <span className="sep">/</span>
           <span className="crumb-title" style={{fontSize:16, color:"var(--ink-2)"}}>{epic.name}</span>
         </>}
       </div>
       <div className="top-actions">
-        {view === "settings" ? (
+        {onPage ? (
           <button className="btn ghost" onClick={onOpenBoard} disabled={!project}>Board</button>
         ) : (
           <>
@@ -283,6 +306,9 @@ function Topbar({ project, epic, view, onOpenPalette, onOpenTweaks, onNewItem, o
             </button>
             <button className="btn" onClick={onNewItem} disabled={!project}>+ Add story</button>
           </>
+        )}
+        {isAdmin && (
+          <button className={clsx("btn ghost", view === "admin" && "active")} onClick={onOpenAdmin}>Admin</button>
         )}
         <button className={clsx("btn ghost", view === "settings" && "active")} onClick={onOpenSettings}>Settings</button>
         <button className="btn ghost" onClick={onOpenTweaks} title="Tweaks">⚙</button>
@@ -988,6 +1014,8 @@ function TweaksPanel({ tweaks, setTweaks, open, onClose }) {
 
 /* ============ User settings ============ */
 function tokenState(token) {
+  // The admin list carries the state the server computed; the Settings list does not.
+  if (token.state) return token.state.charAt(0).toUpperCase() + token.state.slice(1);
   if (token.revokedAtUtc) return "Revoked";
   if (token.expiresAtUtc && new Date(token.expiresAtUtc).getTime() <= Date.now()) return "Expired";
   return token.isActive ? "Active" : "Inactive";
@@ -1001,17 +1029,155 @@ function formatTokenDate(iso) {
   return iso ? formatDateTime(iso) : "Never";
 }
 
-function UserSettingsView({ show }) {
-  const [user, setUser] = useState(null);
-  const [tokens, setTokens] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState(null);
+/* The value of a datetime-local input for a date, in local time, rounded up to the next whole minute. */
+function toDateTimeLocal(date) {
+  const d = new Date(Math.ceil(date.getTime() / 60000) * 60000);
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/* The expiry a rotate starts from: the old token's lifetime, carried forward from now; none when it had none. */
+function rotatedExpiryLocal(token) {
+  if (!token.expiresAtUtc) return "";
+  const lifetime = new Date(token.expiresAtUtc).getTime() - new Date(token.createdAtUtc).getTime();
+  return lifetime > 0 ? toDateTimeLocal(new Date(Date.now() + lifetime)) : "";
+}
+
+/* Name, optional expiry and scope; shows the plaintext of the token it created once, with a copy action.
+   onCreate({ name, expiresAtUtc, scope }) returns the created token, or null when it failed. */
+function TokenCreateForm({ eyebrow, title, placeholder, scopeId, onCreate }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [expiresAtLocal, setExpiresAtLocal] = useState("");
   const [scope, setScope] = useState("full");
   const [createdToken, setCreatedToken] = useState(null);
+
+  const createToken = async (e) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    setCreating(true);
+    try {
+      const expiresAtUtc = expiresAtLocal
+        ? new Date(expiresAtLocal).toISOString()
+        : null;
+      const created = await onCreate({ name: trimmed, expiresAtUtc, scope });
+      if (!created) return;
+      setCreatedToken(created);
+      setName("");
+      setExpiresAtLocal("");
+      setScope("full");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  return (
+    <form className="settings-panel" onSubmit={createToken}>
+      <div className="settings-panel-head">
+        <div>
+          <div className="sheet-eyebrow">{eyebrow}</div>
+          <h2>{title}</h2>
+        </div>
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label>Name</label>
+        <input
+          value={name}
+          onChange={e => setName(e.target.value)}
+          placeholder={placeholder}
+          maxLength={160}
+        />
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label>Expires</label>
+        <input
+          type="datetime-local"
+          value={expiresAtLocal}
+          onChange={e => setExpiresAtLocal(e.target.value)}
+        />
+      </div>
+      <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
+        <label htmlFor={scopeId}>Scope</label>
+        <select id={scopeId} value={scope} onChange={e => setScope(e.target.value)}>
+          <option value="full">Full access (read and write)</option>
+          <option value="read">Read only</option>
+        </select>
+      </div>
+      <div className="settings-actions">
+        <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
+          {creating ? "Creating..." : "Create token"}
+        </button>
+      </div>
+
+      {createdToken && <TokenReveal plaintextToken={createdToken.plaintextToken} />}
+    </form>
+  );
+}
+
+/* The plaintext of a token just created, shown once, with a copy action. */
+function TokenReveal({ plaintextToken, note }) {
   const [copyState, setCopyState] = useState("");
+  useEffect(() => { setCopyState(""); }, [plaintextToken]);
+
+  const copyToken = async () => {
+    try {
+      await navigator.clipboard.writeText(plaintextToken);
+      setCopyState("Copied");
+    } catch {
+      setCopyState("Select and copy");
+    }
+  };
+
+  return (
+    <div className="token-reveal" role="status">
+      <div>
+        <div className="sheet-eyebrow">Shown once</div>
+        <p>{note ? `${note} ` : ""}This token will not be visible after you leave or refresh this page.</p>
+      </div>
+      <div className="token-secret-row">
+        <code>{plaintextToken}</code>
+        <button className="btn small" type="button" onClick={copyToken}>{copyState || "Copy"}</button>
+      </div>
+    </div>
+  );
+}
+
+/* One token: name, state, scope, prefix, created, last used and expiry; children are its actions. */
+function TokenRow({ token, children }) {
+  const state = tokenState(token);
+  return (
+    <article className={clsx("token-row", state !== "Active" && "inactive")}>
+      <div className="token-main">
+        <div className="token-name-row">
+          <span className="token-name">{token.name}</span>
+          <span className={clsx("token-state", state.toLowerCase())}>{state}</span>
+          <span className="token-state">{tokenScopeLabel(token)}</span>
+        </div>
+        <div className="token-prefix">{token.tokenPrefix}</div>
+      </div>
+      <div className="token-meta">
+        <span>Created <b>{formatTokenDate(token.createdAtUtc)}</b></span>
+        <span>Last used <b>{formatTokenDate(token.lastUsedAtUtc)}</b></span>
+        <span>Expires <b>{token.expiresAtUtc ? formatTokenDate(token.expiresAtUtc) : "Never"}</b></span>
+        {/* Only the admin list carries who issued and revoked a token. */}
+        {"issuedBy" in token && <span>Issued by <b>{token.issuedBy?.name || "\u2014"}</b></span>}
+        {"revokedBy" in token && token.revokedAtUtc && <span>Revoked by <b>{token.revokedBy?.name || "\u2014"}</b></span>}
+      </div>
+      <div className="token-actions">{children}</div>
+    </article>
+  );
+}
+
+function UserSettingsView({ show }) {
+  const [user, setUser] = useState(null);
+  const [tokens, setTokens] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  // The form is remounted, which hides the plaintext it shows, when that token is revoked.
+  const [shownTokenId, setShownTokenId] = useState(null);
+  const [formKey, setFormKey] = useState(0);
 
   const loadSettings = useCallback(async () => {
     setLoading(true);
@@ -1033,38 +1199,16 @@ function UserSettingsView({ show }) {
 
   useEffect(() => { loadSettings(); }, [loadSettings]);
 
-  const createToken = async (e) => {
-    e.preventDefault();
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    setCreating(true);
+  const createToken = async (payload) => {
     try {
-      const expiresAtUtc = expiresAtLocal
-        ? new Date(expiresAtLocal).toISOString()
-        : null;
-      const created = await api.createPersonalAccessToken({ name: trimmed, expiresAtUtc, scope });
-      setCreatedToken(created);
+      const created = await api.createPersonalAccessToken(payload);
+      setShownTokenId(created.token.id);
       setTokens(cur => [created.token, ...cur.filter(token => token.id !== created.token.id)]);
-      setName("");
-      setExpiresAtLocal("");
-      setScope("full");
-      setCopyState("");
       show("Personal access token created", "success");
+      return created;
     } catch (e) {
       show(`Token create failed: ${e.message}`);
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const copyToken = async () => {
-    if (!createdToken?.plaintextToken) return;
-    try {
-      await navigator.clipboard.writeText(createdToken.plaintextToken);
-      setCopyState("Copied");
-    } catch {
-      setCopyState("Select and copy");
+      return null;
     }
   };
 
@@ -1073,7 +1217,10 @@ function UserSettingsView({ show }) {
     try {
       await api.revokePersonalAccessToken(token.id);
       await loadSettings();
-      if (createdToken?.token?.id === token.id) setCreatedToken(null);
+      if (shownTokenId === token.id) {
+        setShownTokenId(null);
+        setFormKey(key => key + 1);
+      }
       show("Personal access token revoked", "success");
     } catch (e) {
       show(`Revoke failed: ${e.message}`);
@@ -1130,56 +1277,14 @@ function UserSettingsView({ show }) {
       </div>
 
       <div className="settings-layout">
-        <form className="settings-panel" onSubmit={createToken}>
-          <div className="settings-panel-head">
-            <div>
-              <div className="sheet-eyebrow">New token</div>
-              <h2>Personal access token</h2>
-            </div>
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label>Name</label>
-            <input
-              value={name}
-              onChange={e => setName(e.target.value)}
-              placeholder="MCP desktop client"
-              maxLength={160}
-            />
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label>Expires</label>
-            <input
-              type="datetime-local"
-              value={expiresAtLocal}
-              onChange={e => setExpiresAtLocal(e.target.value)}
-            />
-          </div>
-          <div className="sheet-row" style={{gridTemplateColumns:"110px 1fr"}}>
-            <label htmlFor="pat-scope">Scope</label>
-            <select id="pat-scope" value={scope} onChange={e => setScope(e.target.value)}>
-              <option value="full">Full access (read and write)</option>
-              <option value="read">Read only</option>
-            </select>
-          </div>
-          <div className="settings-actions">
-            <button className="btn primary" type="submit" disabled={creating || !name.trim()}>
-              {creating ? "Creating..." : "Create token"}
-            </button>
-          </div>
-
-          {createdToken && (
-            <div className="token-reveal" role="status">
-              <div>
-                <div className="sheet-eyebrow">Shown once</div>
-                <p>This token will not be visible after you leave or refresh this page.</p>
-              </div>
-              <div className="token-secret-row">
-                <code>{createdToken.plaintextToken}</code>
-                <button className="btn small" type="button" onClick={copyToken}>{copyState || "Copy"}</button>
-              </div>
-            </div>
-          )}
-        </form>
+        <TokenCreateForm
+          key={formKey}
+          eyebrow="New token"
+          title="Personal access token"
+          placeholder="MCP desktop client"
+          scopeId="pat-scope"
+          onCreate={createToken}
+        />
 
         <div className="settings-panel">
           <div className="settings-panel-head">
@@ -1194,38 +1299,408 @@ function UserSettingsView({ show }) {
             <div className="settings-empty">No personal access tokens yet.</div>
           ) : (
             <div className="token-list">
-              {tokens.map(token => {
-                const state = tokenState(token);
-                return (
-                  <article key={token.id} className={clsx("token-row", state !== "Active" && "inactive")}>
-                    <div className="token-main">
-                      <div className="token-name-row">
-                        <span className="token-name">{token.name}</span>
-                        <span className={clsx("token-state", state.toLowerCase())}>{state}</span>
-                        <span className="token-state">{tokenScopeLabel(token)}</span>
+              {tokens.map(token => (
+                <TokenRow key={token.id} token={token}>
+                  <button
+                    className="btn small ghost"
+                    type="button"
+                    onClick={() => revokeToken(token)}
+                    disabled={tokenState(token) !== "Active"}
+                  >
+                    Revoke
+                  </button>
+                </TokenRow>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ============ Admin: service identities ============ */
+/* The tokens of one service identity. Revoke asks first; rotate takes an optional new expiry and shows the
+   replacement once. refreshKey changes when a token was issued for the identity elsewhere on the page. */
+function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
+  const [tokens, setTokens] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState(null);
+  const [rotatingId, setRotatingId] = useState(null);
+  const [rotateExpiresLocal, setRotateExpiresLocal] = useState("");
+  const [replacement, setReplacement] = useState(null);
+  const panelRef = useRef(null);
+
+  // The panel sits above the identity list, which may be long: bring it into view when an identity is chosen.
+  useEffect(() => { panelRef.current?.scrollIntoView?.({ block: "nearest" }); }, []);
+
+  const loadTokens = useCallback(async () => {
+    try {
+      setTokens(await api.listServiceIdentityTokens(identity.id) || []);
+    } catch (e) {
+      show(`Couldn't load the tokens of ${identity.name}: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [identity.id, identity.name, show]);
+
+  useEffect(() => { loadTokens(); }, [loadTokens, refreshKey]);
+
+  // Disabling the identity revokes the replacement as well: its plaintext is no longer worth showing.
+  useEffect(() => { if (identity.disabled) setReplacement(null); }, [identity.disabled]);
+
+  const revokeToken = async (token) => {
+    if (!confirm(`Revoke "${token.name}" of ${identity.name}? Clients using this token will stop working.`)) return;
+    setBusyId(token.id);
+    try {
+      await api.revokeServiceIdentityToken(identity.id, token.id);
+      if (replacement?.id === token.id) setReplacement(null);
+      show(`${token.name} revoked`, "success");
+      await loadTokens();
+      onChanged(token.id);
+    } catch (e) {
+      show(`Revoke failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const rotateToken = async (e, token) => {
+    e.preventDefault();
+    setBusyId(token.id);
+    try {
+      const expiresAtUtc = rotateExpiresLocal ? new Date(rotateExpiresLocal).toISOString() : null;
+      const rotated = await api.rotateServiceIdentityToken(identity.id, token.id, { expiresAtUtc });
+      setReplacement({ id: rotated.token.id, name: rotated.token.name, plaintextToken: rotated.plaintextToken });
+      setRotatingId(null);
+      setRotateExpiresLocal("");
+      show(`${token.name} rotated; the old token is revoked`, "success");
+      await loadTokens();
+      onChanged(token.id);
+    } catch (e) {
+      show(`Rotate failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div className="settings-panel" ref={panelRef}>
+      <div className="settings-panel-head">
+        <div>
+          <div className="sheet-eyebrow">Tokens of {identity.name}</div>
+          <h2>Service identity tokens</h2>
+        </div>
+        <button className="btn small ghost" type="button" onClick={loadTokens}>Refresh</button>
+      </div>
+
+      {replacement && (
+        <TokenReveal plaintextToken={replacement.plaintextToken} note={`Replacement for "${replacement.name}"; the old token is revoked.`} />
+      )}
+
+      {loading ? (
+        <div className="settings-empty">Loading tokens...</div>
+      ) : tokens.length === 0 ? (
+        <div className="settings-empty">No tokens yet.</div>
+      ) : (
+        <div className="token-list">
+          {tokens.map(token => {
+            const state = tokenState(token);
+            return (
+              <React.Fragment key={token.id}>
+                <TokenRow token={token}>
+                  <button
+                    className="btn small ghost"
+                    type="button"
+                    onClick={() => { setRotatingId(token.id); setRotateExpiresLocal(rotatedExpiryLocal(token)); }}
+                    disabled={identity.disabled || state === "Revoked" || busyId === token.id || rotatingId === token.id}
+                  >
+                    Rotate
+                  </button>
+                  <button
+                    className="btn small ghost"
+                    type="button"
+                    onClick={() => revokeToken(token)}
+                    disabled={state !== "Active" || busyId === token.id}
+                  >
+                    Revoke
+                  </button>
+                </TokenRow>
+                {rotatingId === token.id && (
+                  <form style={{display:"grid", gap:8, minWidth:0}} onSubmit={e => rotateToken(e, token)}>
+                    <div className="sheet-row" style={{gridTemplateColumns:"110px minmax(0, 1fr)"}}>
+                      <label htmlFor={`rotate-expires-${token.id}`}>New expiry</label>
+                      <input
+                        id={`rotate-expires-${token.id}`}
+                        type="datetime-local"
+                        value={rotateExpiresLocal}
+                        onChange={e => setRotateExpiresLocal(e.target.value)}
+                        style={{minWidth:0}}
+                      />
+                    </div>
+                    {!rotateExpiresLocal && (
+                      <div className="sheet-row" style={{gridTemplateColumns:"110px minmax(0, 1fr)"}}>
+                        <span />
+                        <span className="rotate-no-expiry" role="note">Replacement will never expire</span>
                       </div>
-                      <div className="token-prefix">{token.tokenPrefix}</div>
+                    )}
+                    <div className="settings-actions">
+                      <button className="btn small ghost" type="button" onClick={() => setRotatingId(null)}>Cancel</button>
+                      <button className="btn small primary" type="submit" disabled={busyId === token.id}>
+                        {busyId === token.id ? "Rotating..." : `Rotate "${token.name}"`}
+                      </button>
                     </div>
-                    <div className="token-meta">
-                      <span>Created <b>{formatTokenDate(token.createdAtUtc)}</b></span>
-                      <span>Last used <b>{formatTokenDate(token.lastUsedAtUtc)}</b></span>
-                      <span>Expires <b>{token.expiresAtUtc ? formatTokenDate(token.expiresAtUtc) : "Never"}</b></span>
+                  </form>
+                )}
+              </React.Fragment>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminView({ show }) {
+  const [identities, setIdentities] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [selectedId, setSelectedId] = useState(null);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+  const [tokensRefreshKey, setTokensRefreshKey] = useState(0);
+  const [issuedTokenId, setIssuedTokenId] = useState(null);
+  const [issueFormKey, setIssueFormKey] = useState(0);
+
+  const loadIdentities = useCallback(async () => {
+    setLoadError(null);
+    try {
+      setIdentities(await api.listServiceIdentities() || []);
+    } catch (e) {
+      setLoadError(e.message || "Service identities unavailable");
+      show(`Couldn't load service identities: ${e.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [show]);
+
+  useEffect(() => { loadIdentities(); }, [loadIdentities]);
+
+  // The selected identity's tokens are listed; a disabled identity gets no token, so the issue form is not offered for it.
+  const selected = identities.find(identity => identity.id === selectedId) || null;
+
+  const replaceIdentity = (updated) =>
+    setIdentities(cur => cur.map(identity => identity.id === updated.id ? updated : identity));
+
+  const createIdentity = async (e) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      const created = await api.createServiceIdentity(name);
+      setNewName("");
+      setSelectedId(created.id);
+      show(`Service identity ${created.name} created`, "success");
+      await loadIdentities();
+    } catch (e) {
+      show(`Create failed: ${e.message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const disableIdentity = async (identity) => {
+    if (!confirm(`Disable "${identity.name}"? All of its tokens are revoked and stop working, and no token can be issued for it until it is enabled again. Enabling it later does not bring the revoked tokens back.`)) return;
+    setBusyId(identity.id);
+    try {
+      replaceIdentity(await api.disableServiceIdentity(identity.id));
+      setTokensRefreshKey(key => key + 1);
+      show(`${identity.name} disabled; its tokens are revoked`, "success");
+    } catch (e) {
+      show(`Disable failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const enableIdentity = async (identity) => {
+    setBusyId(identity.id);
+    try {
+      replaceIdentity(await api.enableServiceIdentity(identity.id));
+      show(`${identity.name} enabled; issue it a new token`, "success");
+    } catch (e) {
+      show(`Enable failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const issueToken = async (payload) => {
+    if (!selected) return null;
+    try {
+      const created = await api.issueServiceIdentityToken(selected.id, payload);
+      setIssuedTokenId(created.token.id);
+      show(`Token issued for ${selected.name}`, "success");
+      loadIdentities();
+      setTokensRefreshKey(key => key + 1);
+      return created;
+    } catch (e) {
+      show(`Token issue failed: ${e.message}`);
+      return null;
+    }
+  };
+
+  // A revoke or rotate of the token just issued takes its plaintext off the issue form, as on the Settings page.
+  const tokenChanged = (tokenId) => {
+    if (tokenId === issuedTokenId) {
+      setIssuedTokenId(null);
+      setIssueFormKey(key => key + 1);
+    }
+    loadIdentities();
+  };
+
+  if (loading) {
+    return <div className="settings-page"><div className="app-loading">Loading service identities...</div></div>;
+  }
+
+  if (loadError) {
+    return (
+      <section className="settings-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">Admin unavailable</div>
+            <h2>Service identities could not be loaded</h2>
+          </div>
+          <p>{loadError}</p>
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={loadIdentities}>Retry</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="settings-page">
+      <div className="settings-layout">
+        {selected && !selected.disabled ? (
+          <TokenCreateForm
+            key={`${selected.id}:${issueFormKey}`}
+            eyebrow={`Issue token for ${selected.name}`}
+            title="Service identity token"
+            placeholder={`${selected.name} orchestrator`}
+            scopeId="service-token-scope"
+            onCreate={issueToken}
+          />
+        ) : (
+          <div className="settings-panel">
+            <div className="settings-panel-head">
+              <div>
+                <div className="sheet-eyebrow">Issue token</div>
+                <h2>Service identity token</h2>
+              </div>
+            </div>
+            <div className="settings-empty">
+              {selected ? `${selected.name} is disabled; enable it to issue a token for it.` : "Choose an enabled service identity to issue a token for it."}
+            </div>
+          </div>
+        )}
+
+        <div style={{display:"grid", gap:18, minWidth:0}}>
+        {selected && (
+          <ServiceIdentityTokens
+            key={selected.id}
+            identity={selected}
+            show={show}
+            refreshKey={tokensRefreshKey}
+            onChanged={tokenChanged}
+          />
+        )}
+
+        <div className="settings-panel">
+          <div className="settings-panel-head">
+            <div>
+              <div className="sheet-eyebrow">Non-human callers</div>
+              <h2>Service identities</h2>
+            </div>
+            <button className="btn small ghost" type="button" onClick={loadIdentities}>Refresh</button>
+          </div>
+
+          <form className="sheet-row" style={{gridTemplateColumns:"110px 1fr auto"}} onSubmit={createIdentity}>
+            <label htmlFor="service-identity-name">New identity</label>
+            <input
+              id="service-identity-name"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Dark Factory"
+              maxLength={120}
+            />
+            <button className="btn small primary" type="submit" disabled={creating || !newName.trim()}>
+              {creating ? "Creating..." : "Create identity"}
+            </button>
+          </form>
+
+          {identities.length === 0 ? (
+            <div className="settings-empty">No service identities yet.</div>
+          ) : (
+            <div className="token-list">
+              {identities.map(identity => (
+                <article
+                  key={identity.id}
+                  className={clsx("token-row", identity.disabled && "inactive", identity.id === selected?.id && "selected")}
+                >
+                  <div className="token-main">
+                    <div className="token-name-row">
+                      <span className="token-name">{identity.name}</span>
+                      {identity.disabled && (
+                        <span className="token-state disabled" title={`Disabled ${formatTokenDate(identity.disabledAtUtc)}`}>Disabled</span>
+                      )}
                     </div>
-                    <div className="token-actions">
+                  </div>
+                  <div className="token-meta">
+                    <span>Created <b>{formatTokenDate(identity.createdAtUtc)}</b></span>
+                    <span>Active tokens <b>{identity.activeTokenCount}</b></span>
+                    <span>Last used <b>{formatTokenDate(identity.lastUsedAtUtc)}</b></span>
+                  </div>
+                  <div className="token-actions">
+                    <button
+                      className="btn small ghost"
+                      type="button"
+                      onClick={() => setSelectedId(identity.id)}
+                      disabled={identity.id === selected?.id}
+                    >
+                      Tokens
+                    </button>
+                    {identity.disabled ? (
                       <button
                         className="btn small ghost"
                         type="button"
-                        onClick={() => revokeToken(token)}
-                        disabled={state !== "Active"}
+                        onClick={() => enableIdentity(identity)}
+                        disabled={busyId === identity.id}
                       >
-                        Revoke
+                        Enable
                       </button>
-                    </div>
-                  </article>
-                );
-              })}
+                    ) : (
+                      <>
+                        <button
+                          className="btn small ghost"
+                          type="button"
+                          onClick={() => disableIdentity(identity)}
+                          disabled={busyId === identity.id}
+                        >
+                          Disable
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </article>
+              ))}
             </div>
           )}
+        </div>
+
         </div>
       </div>
     </section>
@@ -1405,6 +1880,11 @@ function EpicModal({ open, epic, onClose, onSave }) {
 }
 
 /* ============ Main App ============ */
+function viewFromUrl() {
+  const view = new URLSearchParams(window.location.search).get("view");
+  return view === "settings" || view === "admin" ? view : "board";
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -1419,10 +1899,9 @@ function App() {
     const params = new URLSearchParams(window.location.search);
     return params.get("epic") || null;
   });
-  const [currentView, setCurrentView] = useState(() => {
-    const params = new URLSearchParams(window.location.search);
-    return params.get("view") === "settings" ? "settings" : "board";
-  });
+  const [currentView, setCurrentView] = useState(() => viewFromUrl());
+  // Only shows the Admin entry point; the API refuses every admin call of anyone who is not an admin.
+  const [isAdmin, setIsAdmin] = useState(false);
 
   /* URL <-> state routing plumbing */
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
@@ -1466,9 +1945,9 @@ function App() {
       return;
     }
     const params = new URLSearchParams();
-    if (currentView === "settings") params.set("view", "settings");
+    if (currentView !== "board") params.set("view", currentView);
     if (currentProjectId) params.set("project", currentProjectId);
-    if (currentView !== "settings" && currentEpicId) params.set("epic", currentEpicId);
+    if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
     const qs = params.toString();
     const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
@@ -1491,7 +1970,7 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
-      const nextView = params.get("view") === "settings" ? "settings" : "board";
+      const nextView = viewFromUrl();
       skipUrlPush.current = true;
       setCurrentProjectId(prev => {
         // Only suppress the project-change effect's epic reset if we'd
@@ -1556,7 +2035,12 @@ function App() {
 
   useEffect(() => {
     (async () => {
-      await loadProjects();
+      const [, admin] = await Promise.all([
+        loadProjects(),
+        api.getCurrentUser().then(user => !!user?.isAdmin, () => false),
+      ]);
+      setIsAdmin(admin);
+      if (!admin) setCurrentView(view => (view === "admin" ? "board" : view));
       setBootstrapped(true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1852,7 +2336,7 @@ function App() {
     return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  if (projects.length === 0 && currentView !== "settings") {
+  if (projects.length === 0 && currentView === "board") {
     return (
       <div className="app-empty">
         <div>
@@ -1879,6 +2363,12 @@ function App() {
     setPaletteOpen(false);
     setCurrentView("settings");
   };
+  const openAdmin = () => {
+    setSelectedStory(null);
+    setActiveDoc(null);
+    setPaletteOpen(false);
+    setCurrentView("admin");
+  };
   const openBoard = () => setCurrentView("board");
 
   return (
@@ -1898,15 +2388,19 @@ function App() {
         <Topbar
           project={currentProject}
           epic={currentEpic}
-          view={currentView}
+          view={currentView === "admin" && !isAdmin ? "board" : currentView}
+          isAdmin={isAdmin}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenTweaks={() => setTweaksOpen(v => !v)}
           onNewItem={() => setPaletteOpen(true)}
           onOpenSettings={openSettings}
+          onOpenAdmin={openAdmin}
           onOpenBoard={openBoard}
         />
         {currentView === "settings" ? (
           <UserSettingsView show={show} />
+        ) : currentView === "admin" && isAdmin ? (
+          <AdminView show={show} />
         ) : (
           <>
             <EpicStrip

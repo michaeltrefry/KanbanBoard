@@ -43,16 +43,17 @@ public sealed class ServiceIdentityTests
         var dbContext = services.GetRequiredService<KanbanDbContext>();
         var patService = services.GetRequiredService<IPersonalAccessTokenService>();
 
-        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: false, CancellationToken.None);
-        var second = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, " Factory ", rotate: false, CancellationToken.None);
+        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: false, DateTimeOffset.UtcNow, CancellationToken.None);
+        var second = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, " Factory ", rotate: false, DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.True(first.Created);
         Assert.False(second.Created);
         Assert.Equal(first.User.Id, second.User.Id);
-        Assert.Equal("Factory", (await dbContext.AppUsers.SingleAsync()).DisplayName);
+        // The name it was created with: a later run with the name in another case does not rename it.
+        Assert.Equal("factory", (await dbContext.AppUsers.SingleAsync()).DisplayName);
         Assert.NotNull(await patService.ValidateAsync(first.FullToken.PlaintextToken, CancellationToken.None));
 
-        var rotated = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: true, CancellationToken.None);
+        var rotated = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: true, DateTimeOffset.UtcNow, CancellationToken.None);
 
         Assert.Equal(4, rotated.RevokedTokens);
         Assert.Null(await patService.ValidateAsync(first.FullToken.PlaintextToken, CancellationToken.None));
@@ -114,6 +115,35 @@ public sealed class ServiceIdentityTests
         Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
     }
 
+    // A disabled identity is enabled again only from the admin page; the command never issues a token for it.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Command_refuses_a_disabled_identity_and_writes_nothing(bool relational, bool rotate)
+    {
+        await using var services = CreateServices(relational: relational);
+        var dbContext = services.GetRequiredService<KanbanDbContext>();
+        var patService = services.GetRequiredService<IPersonalAccessTokenService>();
+        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "Factory", rotate: false, DateTimeOffset.UtcNow, CancellationToken.None);
+        first.User.DisabledAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        var error = new StringWriter();
+        var output = new StringWriter();
+
+        var exitCode = await ServiceIdentityCommand.RunAsync(
+            [ServiceIdentityCommand.CommandName, "--name", "FACTORY", .. rotate ? new[] { "--rotate" } : []], services, output, error, CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(ServiceIdentityProvisioner.DisabledMessage("Factory") + Environment.NewLine, error.ToString());
+        Assert.Empty(output.ToString());
+        var tokens = await dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync();
+        Assert.Equal(2, tokens.Count);
+        Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
+        Assert.Equal("Factory", (await dbContext.AppUsers.AsNoTracking().SingleAsync()).DisplayName);
+    }
+
     // The in-memory provider has no transactions, so there the order of the writes alone must protect the old tokens.
     [Theory]
     [InlineData(false)]
@@ -123,10 +153,10 @@ public sealed class ServiceIdentityTests
         await using var services = CreateServices(relational: relational);
         var dbContext = services.GetRequiredService<KanbanDbContext>();
         var patService = services.GetRequiredService<IPersonalAccessTokenService>();
-        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: false, CancellationToken.None);
+        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "factory", rotate: false, DateTimeOffset.UtcNow, CancellationToken.None);
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => ServiceIdentityProvisioner.ProvisionAsync(
-            dbContext, new FailingOnSecondCreate(patService), "factory", rotate: true, CancellationToken.None));
+            dbContext, new FailingOnSecondCreate(patService), "factory", rotate: true, DateTimeOffset.UtcNow, CancellationToken.None));
 
         Assert.NotNull(await patService.ValidateAsync(first.FullToken.PlaintextToken, CancellationToken.None));
         Assert.NotNull(await patService.ValidateAsync(first.ReadToken.PlaintextToken, CancellationToken.None));
@@ -142,10 +172,10 @@ public sealed class ServiceIdentityTests
         private int creates;
 
         public Task<CreatedPersonalAccessToken> CreateAsync(
-            AppUser user, string name, DateTimeOffset? expiresAtUtc, string scope, CancellationToken cancellationToken) =>
+            AppUser user, string name, DateTimeOffset? expiresAtUtc, string scope, CancellationToken cancellationToken, ChangeActor? issuedBy = null) =>
             ++creates == 2
                 ? throw new InvalidOperationException("The second token could not be issued.")
-                : inner.CreateAsync(user, name, expiresAtUtc, scope, cancellationToken);
+                : inner.CreateAsync(user, name, expiresAtUtc, scope, cancellationToken, issuedBy);
 
         public Task<PersonalAccessTokenValidationResult?> ValidateAsync(string token, CancellationToken cancellationToken) =>
             inner.ValidateAsync(token, cancellationToken);
@@ -194,6 +224,7 @@ public sealed class ServiceIdentityTests
         }
 
         services.AddSingleton(patOptions);
+        services.AddSingleton(TimeProvider.System);
         services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
         var provider = services.BuildServiceProvider();
         if (relational)

@@ -29,6 +29,9 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<DateTime?>("DisabledAtUtc")
+                        .HasColumnType("datetime(6)");
+
                     b.Property<string>("DisplayName")
                         .HasMaxLength(200)
                         .HasColumnType("varchar(200)");
@@ -196,6 +199,14 @@ namespace KanbanBoard.Api.Data.Migrations
                     b.Property<DateTime?>("ExpiresAtUtc")
                         .HasColumnType("datetime(6)");
 
+                    b.Property<string>("IssuedByName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("IssuedByUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
+
                     b.Property<DateTime?>("LastUsedAtUtc")
                         .HasColumnType("datetime(6)");
 
@@ -206,6 +217,14 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.Property<DateTime?>("RevokedAtUtc")
                         .HasColumnType("datetime(6)");
+
+                    b.Property<string>("RevokedByName")
+                        .HasMaxLength(320)
+                        .HasColumnType("varchar(320)");
+
+                    b.Property<string>("RevokedByUserId")
+                        .HasMaxLength(36)
+                        .HasColumnType("varchar(36)");
 
                     b.Property<string>("Scope")
                         .IsRequired()

@@ -89,6 +89,7 @@ Auth__Authority=https://identity.trefry.net/realms/YOUR_REALM
 Auth__ClientId=kanban-board
 Auth__ClientSecret=KEYCLOAK_CLIENT_SECRET
 Auth__RequireHttpsMetadata=true
+Auth__AdminSubjects=KEYCLOAK_USER_ID_OF_EACH_ADMIN
 
 PersonalAccessTokens__Enabled=true
 PersonalAccessTokens__EncryptionKey=32_BYTE_BASE64_OR_64_HEX_KEY
@@ -156,6 +157,8 @@ For the change feed (sc-25866) the API creates the `WorkItemChanges` table on it
 
 For the plan import and the idempotent creates (sc-25867) the API alters the schema on its first start (`20261013132811_AddCreateIdempotencyKeysAndEpicPlanImports`): `WorkItems`, `Epics` and `EpicDocuments` each get a nullable `IdempotencyKeyHash` column with a unique index, and the `EpicPlanImports` table is created. Existing rows keep `NULL` and are not rewritten. Building the unique index on `WorkItems` reads every work item once. `deploy/sql/010_create_idempotency_keys_and_epic_plan_imports.sql` is the manual equivalent. The acceptance script `tools/KanbanBoard.FactoryAcceptance` creates its own scratch projects, runs the eight acceptance tests of the epic and prints one PASS, FAIL or SKIP line for each; every project it creates is left archived. See [Acceptance run](#acceptance-run) for its variables.
 
+For disabling service identities (sc-26038) the API adds a nullable `DisabledAtUtc` column to `AppUsers` on its first start (`20261014110144_AddAppUserDisabledAt`). Every existing user, person or service identity, keeps `NULL` (enabled); no row is rewritten. `deploy/sql/011_app_user_disabled_at.sql` is the manual equivalent.
+
 ### Factory service identity
 
 The factory orchestrator signs in to MCP as its own identity, not as a person. Create that identity on the server, after the release that contains sc-25859 is deployed, with the API's own command. It runs in the API container, so it uses the same database and PAT encryption key as the running API, and it needs no browser or OIDC login:
@@ -184,6 +187,28 @@ Give the orchestrator the full-scope token (and the read-scope token where it on
 - Running it again with the same name (case-insensitive) adds a new token pair to the same identity and leaves the old tokens valid.
 - Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so the MCP server can still accept a revoked token for that long; the API does not: it looks the forwarded token up on every call and refuses a revoked or expired one `scope_denied`, read or write.
 - `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
+- A disabled identity (see [Admins](#admins)) is refused: the command prints `Service identity 'NAME' is disabled: it gets no new token until an admin enables it.`, exits with code 1 and changes nothing (no token, and with `--rotate` no revocation). It has no flag to enable an identity; enable it on the Admin page.
+
+### Admins
+
+An admin sees an **Admin** button in the web UI, next to **Settings**. The Admin page lists the service identities (name, created, active tokens, last used, disabled), creates one by name, disables and enables one, and issues a token for an enabled one (name, scope `read` or `full`, optional expiry); the plaintext is shown once (`Cache-Control: no-store`). People keep managing their own tokens on the Settings page; the Admin page never issues a token for a person.
+
+- A name follows the rules of `create-service-identity`: trimmed, 1 to 120 characters, one identity per name whatever its case (on MariaDB whatever its accents too). A name that exists is refused with 409 `{"code":"identity_exists"}`, whose message names the existing identity and its id, and nothing changes; `create-service-identity --name` with that name then adds tokens to the identity the page created.
+- **Disable** revokes every token of the identity and marks it disabled, in one transaction. The API refuses its tokens on their next call (`scope_denied`); the MCP server's own validation cache can still let a token in for up to `McpAuthentication__ValidationCacheSeconds` (30 s), but every tool call it makes is refused by the API. No token is issued for a disabled identity (409 `{"code":"identity_disabled"}`, from the page and from the command), and a token of a disabled identity is refused even if it was not revoked. Disabling a disabled identity changes nothing.
+- **Enable** lets tokens be issued again. The tokens revoked by the disable stay revoked: issue new ones.
+- **Tokens** of an identity lists each token's name, scope, created, expires, last used and state (`revoked`, else `expired`, else `active`), never its secret (`GET /api/admin/service-identities/{id}/tokens`). It also shows **Issued by** and **Revoked by**: the admin who issued the token on this page (by an issue or a rotate) and the admin who revoked it here (by a revoke, a rotate or a disable), as `issuedBy` / `revokedBy` `{id, name}` with the admin's name at that moment, or `null` (shown as a dash). A token issued or revoked otherwise (by `create-service-identity`, including `--rotate`, by its owner on the Settings page) or before this was recorded names no admin. The Settings page's own token list is unchanged.
+- **Revoke** asks for confirmation, then revokes the token (`DELETE .../tokens/{tokenId}`, 204; revoking a revoked token succeeds and keeps its first revocation time). It is refused through MCP as a disabled identity's tokens are (above).
+- **Rotate** issues a replacement with the same name and scope and an optional new expiry (none when left empty; the page starts the field at the old token's lifetime carried forward from now, and says "Replacement will never expire" when it is empty), shows its plaintext once, and revokes the old token only once the replacement is stored, in one transaction (`POST .../tokens/{tokenId}/rotate` `{"expiresAtUtc":null}`, 201 `{token, plaintextToken, revokedTokenId}`). An expired token can be rotated; a revoked one is refused with 409 `{"code":"token_revoked"}`. A refused or failed rotate (`tokens_disabled`, `invalid_argument`, `identity_disabled`, `not_found`) writes nothing and the old token keeps working. Of concurrent rotates of one token, one succeeds and the rest get `token_revoked`. A token id that is not the identity's is `not_found`.
+- A body that is not JSON of the request's shape (malformed, a wrong type) is refused with 400 `{"code":"invalid_argument"}` and nothing is written; disable and enable read no body.
+- An identity is never deleted: comments, claims and change-feed entries refer to it by id.
+
+Admins are set with `Auth__AdminSubjects` (on the hosted instance, the GitHub Actions variable or secret `KANBAN_ADMIN_SUBJECTS`, which the deploy writes into `.env.release`): the OIDC subject (`sub`) of each admin, separated by commas, semicolons or spaces. In Keycloak the subject is the user's **ID** (Users -> the user -> Details), a UUID; a signed-in user also sees their own subject on the Settings page. The match is exact and case-sensitive. The subject is matched rather than the email, which a user may be able to change or leave unverified at the provider.
+
+- Unset or empty: nobody is an admin, the Admin button is not shown, and every `/api/admin` endpoint answers 403 `{"code":"admin_required"}`.
+- Only a signed-in browser session counts. A request of the MCP server (internal secret, with or without a forwarded token) and a request carrying an `Authorization` header are refused with the same 403, whoever they are for.
+- With `Auth__Enabled=false` there is no signed-in user, so nobody is an admin.
+- Issuing needs `PersonalAccessTokens__Enabled=true`; otherwise it is refused with 503 `{"code":"tokens_disabled"}`.
+- A change to the list takes effect when the API restarts (on the hosted instance: the next deploy).
 
 ### Acceptance run
 
@@ -258,6 +283,7 @@ Required:
 Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
+- `KANBAN_ADMIN_SUBJECTS`: the admins of the Admin page (service identities and their tokens), written to `Auth__AdminSubjects`. Variable or secret. See [Admins](#admins). Unset or empty: nobody is an admin and the page is not shown.
 - `KANBAN_DB_MIGRATE_ON_STARTUP`: `false` stops the API from applying EF Core migrations on startup. Defaults to `true` if omitted. Only the lowercase values `true` and `false` are accepted; the deploy fails before touching the server on any other value. Variable.
 - `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.

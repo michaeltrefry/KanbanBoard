@@ -1026,6 +1026,10 @@ body::before {
   background: var(--panel-2);
 }
 .token-row.inactive { opacity: .68; }
+.token-row.selected {
+  border-color: var(--status-progress-ink);
+  box-shadow: inset 0 0 0 1px var(--status-progress-ink);
+}
 .token-main {
   min-width: 0;
   display: grid;
@@ -1069,7 +1073,8 @@ body::before {
   border-color: var(--status-done-ink);
 }
 .token-state.revoked,
-.token-state.expired {
+.token-state.expired,
+.token-state.disabled {
   background: var(--status-blocked-bg);
   color: var(--status-blocked-ink);
   border-color: var(--status-blocked-ink);
@@ -1080,8 +1085,14 @@ body::before {
   gap: 8px;
   min-width: 0;
 }
+.rotate-no-expiry {
+  color: var(--status-blocked-ink);
+  font-size: 12px;
+  font-weight: 600;
+}
 .token-actions {
   display: flex;
+  gap: 6px;
   justify-content: flex-end;
 }
 @media (max-width: 1180px) {

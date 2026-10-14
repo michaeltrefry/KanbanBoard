@@ -11,12 +11,14 @@ namespace KanbanBoard.Api.Services;
 
 public interface IPersonalAccessTokenService
 {
+    /// <param name="issuedBy">The admin who issues the token from the Admin page; null for any other issue.</param>
     Task<CreatedPersonalAccessToken> CreateAsync(
         AppUser user,
         string name,
         DateTimeOffset? expiresAtUtc,
         string scope,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        ChangeActor? issuedBy = null);
 
     Task<PersonalAccessTokenValidationResult?> ValidateAsync(
         string token,
@@ -27,7 +29,10 @@ public interface IPersonalAccessTokenService
         Guid tokenId,
         CancellationToken cancellationToken);
 
-    /// <summary>Returns the stored scope of a token, or null when no such token exists or it is revoked or expired.</summary>
+    /// <summary>
+    /// Returns the stored scope of a token, or null when no such token exists, it is revoked or expired, or its owner
+    /// is a disabled service identity.
+    /// </summary>
     Task<string?> GetScopeAsync(Guid tokenId, CancellationToken cancellationToken);
 
     /// <summary>Throws <see cref="InvalidOperationException"/> when personal access tokens are disabled.</summary>
@@ -44,7 +49,8 @@ public sealed record PersonalAccessTokenValidationResult(
 
 public sealed class PersonalAccessTokenService(
     KanbanDbContext dbContext,
-    IOptions<PersonalAccessTokenOptions> options) : IPersonalAccessTokenService
+    IOptions<PersonalAccessTokenOptions> options,
+    TimeProvider? timeProvider = null) : IPersonalAccessTokenService
 {
     private const int SecretByteLength = 32;
     private const int DisplayPrefixByteLength = 8;
@@ -59,7 +65,8 @@ public sealed class PersonalAccessTokenService(
         string name,
         DateTimeOffset? expiresAtUtc,
         string scope,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ChangeActor? issuedBy = null)
     {
         EnsureEnabled();
 
@@ -79,7 +86,7 @@ public sealed class PersonalAccessTokenService(
         var tokenPrefix = Base64UrlEncode(RandomNumberGenerator.GetBytes(DisplayPrefixByteLength));
         var secret = Base64UrlEncode(RandomNumberGenerator.GetBytes(SecretByteLength));
         var plaintextToken = $"{options.TokenPrefix}_{tokenPrefix}_{secret}";
-        var now = DateTimeOffset.UtcNow;
+        var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
 
         var token = new PersonalAccessToken
         {
@@ -90,7 +97,9 @@ public sealed class PersonalAccessTokenService(
             EncryptedSecret = EncryptSecret(secret),
             Scope = scope,
             CreatedAtUtc = now,
-            ExpiresAtUtc = expiresAtUtc
+            ExpiresAtUtc = expiresAtUtc,
+            IssuedByUserId = issuedBy?.Id,
+            IssuedByName = issuedBy?.Name
         };
 
         dbContext.PersonalAccessTokens.Add(token);
@@ -115,7 +124,10 @@ public sealed class PersonalAccessTokenService(
             .Include(candidate => candidate.AppUser)
             .FirstOrDefaultAsync(candidate => candidate.TokenHash == tokenHash, cancellationToken);
 
+        // A token of a disabled service identity is refused even when it was not revoked, for example one that was
+        // issued while the disable was being committed.
         if (storedToken?.AppUser is null ||
+            storedToken.AppUser.DisabledAtUtc is not null ||
             storedToken.RevokedAtUtc is not null ||
             storedToken.ExpiresAtUtc <= DateTimeOffset.UtcNow)
         {
@@ -160,9 +172,10 @@ public sealed class PersonalAccessTokenService(
         var token = await dbContext.PersonalAccessTokens
             .AsNoTracking()
             .Where(candidate => candidate.Id == tokenId)
-            .Select(candidate => new { candidate.Scope, candidate.RevokedAtUtc, candidate.ExpiresAtUtc })
+            .Select(candidate => new { candidate.Scope, candidate.RevokedAtUtc, candidate.ExpiresAtUtc, candidate.AppUser!.DisabledAtUtc })
             .FirstOrDefaultAsync(cancellationToken);
-        return token is null || token.RevokedAtUtc is not null || token.ExpiresAtUtc <= DateTimeOffset.UtcNow
+        return token is null || token.RevokedAtUtc is not null || token.ExpiresAtUtc <= DateTimeOffset.UtcNow ||
+            token.DisabledAtUtc is not null
             ? null
             : token.Scope;
     }

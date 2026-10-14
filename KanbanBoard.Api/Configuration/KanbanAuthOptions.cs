@@ -15,6 +15,18 @@ public sealed class KanbanAuthOptions
     public bool RequireHttpsMetadata { get; set; } = true;
     public string[] Scopes { get; set; } = ["openid", "profile", "email"];
 
+    /// <summary>
+    /// The OIDC subjects (<c>sub</c>) of the signed-in users who are admins, separated by commas, semicolons or
+    /// whitespace. Empty: nobody is an admin. Only a browser session counts, and only while authentication is enabled.
+    /// </summary>
+    public string? AdminSubjects { get; set; }
+
+    public bool IsAdminSubject(string? subject) =>
+        !string.IsNullOrWhiteSpace(subject) &&
+        (AdminSubjects ?? string.Empty)
+            .Split([',', ';', ' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+            .Contains(subject.Trim(), StringComparer.Ordinal);
+
     public IReadOnlyList<string> Validate()
     {
         if (!Enabled)

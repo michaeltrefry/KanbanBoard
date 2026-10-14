@@ -21,6 +21,7 @@ services:
       Auth__RequireHttpsMetadata: ${Auth__RequireHttpsMetadata:-false}
       Auth__CallbackPath: ${Auth__CallbackPath:-/signin-oidc}
       Auth__SignedOutCallbackPath: ${Auth__SignedOutCallbackPath:-/signout-callback-oidc}
+      Auth__AdminSubjects: ${Auth__AdminSubjects:-}
       PersonalAccessTokens__Enabled: ${PersonalAccessTokens__Enabled:-false}
       PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
       PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}

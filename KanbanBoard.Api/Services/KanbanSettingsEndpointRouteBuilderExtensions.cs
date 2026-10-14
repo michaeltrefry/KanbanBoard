@@ -15,13 +15,14 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             .WithTags("User Settings");
 
         group.MapGet("", async (
+            HttpContext httpContext,
             ICurrentUserService currentUserService,
             CancellationToken cancellationToken) =>
         {
             var user = await GetCurrentUserOrNullAsync(currentUserService, cancellationToken);
             return user is null
                 ? Results.Unauthorized()
-                : Results.Ok(ToCurrentUserDto(user));
+                : Results.Ok(ToCurrentUserDto(user, KanbanAdminEndpointRouteBuilderExtensions.IsAdmin(httpContext)));
         })
         .WithName("GetCurrentUser");
 
@@ -51,6 +52,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
 
         group.MapPost("/personal-access-tokens", async (
             CreatePersonalAccessTokenRequest request,
+            HttpContext httpContext,
             ICurrentUserService currentUserService,
             IPersonalAccessTokenService personalAccessTokenService,
             IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
@@ -63,7 +65,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            var validationError = ValidateCreatePersonalAccessTokenRequest(request);
+            var validationError = ValidateCreatePersonalAccessTokenRequest(request, DateTimeOffset.UtcNow);
             if (validationError is not null)
             {
                 return Results.BadRequest(new { message = validationError });
@@ -82,6 +84,8 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
                 NormalizeScope(request.Scope),
                 cancellationToken);
 
+            // The plaintext is shown once and must not be kept by any cache.
+            httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Created(
                 $"/api/me/personal-access-tokens/{created.Token.Id}",
                 new CreatedPersonalAccessTokenDto(
@@ -124,18 +128,22 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
         }
     }
 
-    private static CurrentUserDto ToCurrentUserDto(AppUser user) =>
+    private static CurrentUserDto ToCurrentUserDto(AppUser user, bool isAdmin) =>
         new(
             user.Id,
             user.Issuer,
             user.Subject,
             user.DisplayName,
             user.Email,
-            user.LastSeenAtUtc);
+            user.LastSeenAtUtc,
+            isAdmin);
 
-    private static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token)
+    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token) =>
+        ToPersonalAccessTokenMetadataDto(token, DateTimeOffset.UtcNow);
+
+    /// <param name="now">The time the token's activity is judged at.</param>
+    internal static PersonalAccessTokenMetadataDto ToPersonalAccessTokenMetadataDto(PersonalAccessToken token, DateTimeOffset now)
     {
-        var now = DateTimeOffset.UtcNow;
         return new PersonalAccessTokenMetadataDto(
             token.Id,
             token.Name,
@@ -148,12 +156,12 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             token.Scope);
     }
 
-    private static string NormalizeScope(string? scope) =>
+    internal static string NormalizeScope(string? scope) =>
         string.IsNullOrWhiteSpace(scope)
             ? PersonalAccessTokenScopes.Full
             : scope.Trim().ToLowerInvariant();
 
-    private static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request)
+    internal static string? ValidateCreatePersonalAccessTokenRequest(CreatePersonalAccessTokenRequest request, DateTimeOffset now)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
         {
@@ -170,7 +178,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
             return $"Field 'scope' must be '{PersonalAccessTokenScopes.Read}' or '{PersonalAccessTokenScopes.Full}'.";
         }
 
-        if (request.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        if (request.ExpiresAtUtc <= now)
         {
             return "Field 'expiresAtUtc' must be in the future.";
         }
