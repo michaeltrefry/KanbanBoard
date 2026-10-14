@@ -139,6 +139,11 @@ app.MapOpenApi();
 app.MapScalarApiReference("/docs");
 app.UseDefaultFiles();
 app.UseStaticFiles();
+// The story page: the app routes /stories/{storyId} itself. Only that path, so /api/* and missing files still 404.
+// Only the hyphenated id form the app links to and recognises (`:guid` would also take the 32-digit and braced forms).
+app.MapFallbackToFile(
+    "/stories/{storyId:regex(^[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}}$)}",
+    "index.html");
 
 app.MapGet("/api/changes", async (HttpContext httpContext, BoardChangeNotifier changeNotifier, CancellationToken cancellationToken) =>
 {

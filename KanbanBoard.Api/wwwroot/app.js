@@ -155,6 +155,8 @@ const api = {
   updateEpicDocument: (id, payload) =>
     fetchJson(`/api/epic-documents/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
 
+  getWorkItem: (id) =>
+    fetchJson(`/api/items/${id}`),
   createWorkItem: (payload) =>
     fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
   updateWorkItem: (id, payload) =>
@@ -272,7 +274,7 @@ function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showA
 
 /* ============ Topbar ============ */
 function Topbar({ project, epic, view, isAdmin, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenAdmin, onOpenBoard }) {
-  const onPage = view === "settings" || view === "admin";
+  const onPage = view === "settings" || view === "admin" || view === "story";
   return (
     <header className="topbar">
       <div className="crumbs">
@@ -721,32 +723,101 @@ function CommandPalette({ open, onClose, items, projects, epics, currentProject,
   );
 }
 
-/* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment }) {
+/* ============ Story editor (shared by the detail sheet and the story page) ============ */
+// Local copy of the story with a 400ms debounced autosave. flush() saves a pending edit now, before navigating away.
+function useStoryEditor(story, onUpdate) {
   const [local, setLocal] = useState(story);
   const [saving, setSaving] = useState(false);
+  const saveTimer = useRef(null);
+  const pending = useRef(null);
+  const inFlight = useRef(Promise.resolve());
+
+  // Another story (or none): an edit of the previous one still waiting for its debounce is saved now, not dropped.
+  useEffect(() => {
+    if (pending.current && pending.current.id !== story?.id) {
+      clearTimeout(saveTimer.current);
+      save(pending.current);
+    }
+    setLocal(story);
+  }, [story?.id]);
+
+  const save = (next) => {
+    pending.current = null;
+    setSaving(true);
+    const request = Promise.resolve(onUpdate(next)).finally(() => setSaving(false));
+    inFlight.current = request.catch(() => {});
+    return request;
+  };
+
+  const patch = (p) => {
+    const next = { ...local, ...p };
+    setLocal(next);
+    pending.current = next;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => save(next), 400);
+  };
+
+  const flush = () => {
+    clearTimeout(saveTimer.current);
+    // A save already under way is waited for too.
+    return pending.current ? save(pending.current) : inFlight.current;
+  };
+
+  return { local, setLocal, saving, patch, flush };
+}
+
+function StoryFields({ local, epics, patch }) {
+  return (
+    <div>
+      <div className="sheet-row">
+        <label>Type</label>
+        <select value={local.type} onChange={e => patch({ type: e.target.value })}>
+          {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Status</label>
+        <select value={local.status} onChange={e => patch({ status: e.target.value })}>
+          {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Priority</label>
+        <select value={local.priority} onChange={e => patch({ priority: e.target.value })}>
+          {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Epic</label>
+        <select value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
+          <option value="">(no epic)</option>
+          {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Estimate</label>
+        <input type="number" min={0} max={100} value={local.estimate ?? 0}
+               onChange={e => patch({ estimate: Number(e.target.value) })} />
+      </div>
+      <div className="sheet-row">
+        <label>Labels</label>
+        <input value={parseLabels(local.labels).join(", ")}
+               onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
+      </div>
+    </div>
+  );
+}
+
+// Description, comments and the comment composer. Key it by story id so another story starts with an empty draft.
+function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
   const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem("kanban-comment-author") || "");
   const [commentBody, setCommentBody] = useState("");
   const [commenting, setCommenting] = useState(false);
-  const saveTimer = useRef(null);
-
-  useEffect(() => { setLocal(story); }, [story?.id]);
-  useEffect(() => { setCommentBody(""); }, [story?.id]);
 
   const comments = useMemo(() => (
     [...(local?.comments || [])]
       .sort((a, b) => new Date(a.createdAtUtc).getTime() - new Date(b.createdAtUtc).getTime())
   ), [local?.comments]);
-
-  const patch = (p) => {
-    const next = { ...local, ...p };
-    setLocal(next);
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      setSaving(true);
-      onUpdate(next).finally(() => setSaving(false));
-    }, 400);
-  };
 
   const submitComment = async () => {
     const author = commentAuthor.trim();
@@ -756,12 +827,77 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
     setCommenting(true);
     try {
       localStorage.setItem("kanban-comment-author", author);
-      const saved = await onAddComment(story.id, { author, body });
-      setLocal(saved);
+      const saved = await onAddComment(storyId, { author, body });
+      // Only while the editor still shows this story; it may have switched to another while the comment saved.
+      setLocal(current => current?.id === saved.id ? saved : current);
       setCommentBody("");
     } finally {
       setCommenting(false);
     }
+  };
+
+  return (
+    <div>
+      <div className="sheet-section-title">Description</div>
+      <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
+        <textarea
+          placeholder="Add a description…"
+          value={local.description || ""}
+          onChange={e => patch({ description: e.target.value })}
+        />
+      </div>
+      <div className="sheet-section-title" style={{marginTop: 18}}>Comments</div>
+      <div className="comments-panel">
+        {comments.length === 0 && (
+          <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
+        )}
+        {comments.map(comment => (
+          <article key={comment.id} className="comment-item">
+            <div className="comment-meta">
+              <span className="comment-author">{comment.author}</span>
+              <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
+            </div>
+            <p className="comment-body">{comment.body}</p>
+          </article>
+        ))}
+        <div className="comment-compose">
+          <div className="comment-compose-head">Add Comment</div>
+          <input
+            value={commentAuthor}
+            onChange={e => {
+              setCommentAuthor(e.target.value);
+              localStorage.setItem("kanban-comment-author", e.target.value);
+            }}
+            placeholder="Author"
+          />
+          <textarea
+            value={commentBody}
+            onChange={e => setCommentBody(e.target.value)}
+            placeholder="Add Comment"
+          />
+          <div className="comment-compose-actions">
+            <button
+              className="btn primary"
+              onClick={submitComment}
+              disabled={commenting || !commentAuthor.trim() || !commentBody.trim()}
+            >
+              {commenting ? "Adding…" : "Add Comment"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ Detail sheet ============ */
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage }) {
+  const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
+
+  // Saves a pending edit first, so the page loads the story as it was left here.
+  const openPage = () => {
+    const id = story.id;
+    flush().finally(() => onOpenPage(id));
   };
 
   if (!story || !local) return null;
@@ -780,98 +916,115 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             />
           </div>
           <div className="sheet-head-actions">
+            <button className="btn ghost sheet-open-page" onClick={openPage} title="Open as page" aria-label="Open as page">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/>
+              </svg>
+            </button>
             <button className="btn ghost" onClick={() => { if (confirm("Delete this item?")) { onDelete(story.id); onClose(); } }}>Delete</button>
             <button className="btn" onClick={onClose}>Close</button>
           </div>
         </header>
         <div className="sheet-body">
-          <div>
-            <div className="sheet-row">
-              <label>Type</label>
-              <select value={local.type} onChange={e => patch({ type: e.target.value })}>
-                {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Status</label>
-              <select value={local.status} onChange={e => patch({ status: e.target.value })}>
-                {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Priority</label>
-              <select value={local.priority} onChange={e => patch({ priority: e.target.value })}>
-                {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Epic</label>
-              <select value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
-                <option value="">(no epic)</option>
-                {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Estimate</label>
-              <input type="number" min={0} max={100} value={local.estimate ?? 0}
-                     onChange={e => patch({ estimate: Number(e.target.value) })} />
-            </div>
-            <div className="sheet-row">
-              <label>Labels</label>
-              <input value={parseLabels(local.labels).join(", ")}
-                     onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
-            </div>
-          </div>
-          <div>
-            <div className="sheet-section-title">Description</div>
-            <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
-              <textarea
-                placeholder="Add a description…"
-                value={local.description || ""}
-                onChange={e => patch({ description: e.target.value })}
-              />
-            </div>
-            <div className="sheet-section-title" style={{marginTop: 18}}>Comments</div>
-            <div className="comments-panel">
-              {comments.length === 0 && (
-                <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
-              )}
-              {comments.map(comment => (
-                <article key={comment.id} className="comment-item">
-                  <div className="comment-meta">
-                    <span className="comment-author">{comment.author}</span>
-                    <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
-                  </div>
-                  <p className="comment-body">{comment.body}</p>
-                </article>
-              ))}
-              <div className="comment-compose">
-                <div className="comment-compose-head">Add Comment</div>
-                <input
-                  value={commentAuthor}
-                  onChange={e => setCommentAuthor(e.target.value)}
-                  placeholder="Author"
-                />
-                <textarea
-                  value={commentBody}
-                  onChange={e => setCommentBody(e.target.value)}
-                  placeholder="Add Comment"
-                />
-                <div className="comment-compose-actions">
-                  <button
-                    className="btn primary"
-                    onClick={submitComment}
-                    disabled={commenting || !commentAuthor.trim() || !commentBody.trim()}
-                  >
-                    {commenting ? "Adding…" : "Add Comment"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <StoryFields local={local} epics={epics} patch={patch}/>
+          <StoryNotes key={story.id} storyId={story.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
         </div>
       </aside>
     </>
+  );
+}
+
+/* ============ Story page (/stories/{id}) ============ */
+function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment, onOpenBoard }) {
+  const [story, setStory] = useState(null);
+  const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | error
+  const [loadError, setLoadError] = useState(null);
+  const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
+  // Saves a pending edit first, so coming back to this page loads the story as it was left.
+  const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
+
+  const load = useCallback(async () => {
+    setLoadState("loading");
+    setStory(null);
+    try {
+      const loaded = await api.getWorkItem(storyId);
+      setStory(loaded);
+      setLoadState("ready");
+      onLoaded(loaded);
+    } catch (e) {
+      setLoadError(e.message);
+      setLoadState(e.status === 404 ? "notFound" : "error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storyId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  if (loadState === "notFound" || loadState === "error") {
+    const notFound = loadState === "notFound";
+    return (
+      <section className="story-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">{notFound ? "Story not found" : "Story unavailable"}</div>
+            <h2>{notFound ? "There is no story with this id" : "Couldn't load this story"}</h2>
+          </div>
+          <p>{notFound ? "It may have been deleted, or the link is wrong." : loadError}</p>
+          <div className="settings-actions">
+            {!notFound && <button className="btn" type="button" onClick={load}>Retry</button>}
+            <button className="btn" type="button" onClick={() => leave(null, null)}>Back to board</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (loadState === "loading" || !local) {
+    return <div className="story-page"><div className="app-loading">Loading story…</div></div>;
+  }
+
+  const project = projects.find(p => p.id === local.projectId) || null;
+  // App's epics are those of its selected project, which is not always the story's (until the page scopes the board,
+  // or when the story's project is archived): only the story's project's epics, and its own epic from the story.
+  const storyEpics = epics.filter(e => e.projectId === local.projectId && (!e.isArchived || e.id === local.epicId));
+  const ownEpic = local.epic?.id === local.epicId ? local.epic : null;
+  const epic = storyEpics.find(e => e.id === local.epicId) || ownEpic;
+  const epicOptions = epic && !storyEpics.includes(epic) ? [...storyEpics, epic] : storyEpics;
+  return (
+    <section className="story-page">
+      <nav className="story-crumbs" aria-label="Breadcrumb">
+        <a href={`/?project=${local.projectId}`}
+           onClick={e => { e.preventDefault(); leave(local.projectId, null); }}>
+          {project?.name || "Project"}
+        </a>
+        {epic && <>
+          <span className="sep">›</span>
+          <a href={`/?project=${local.projectId}&epic=${epic.id}`}
+             onClick={e => { e.preventDefault(); leave(local.projectId, epic.id); }}>
+            {epic.name}
+          </a>
+        </>}
+        <span className="sep">›</span>
+        <span className="story-crumb-current">{local.title}</span>
+      </nav>
+      <div className="story-page-panel">
+        <header className="sheet-head">
+          <div style={{flex:1}}>
+            <div className="sheet-eyebrow">{shortKey(project?.key, local.id)} {saving && "· saving…"}</div>
+            <input
+              className="sheet-title"
+              style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
+              value={local.title}
+              onChange={e => patch({ title: e.target.value })}
+            />
+          </div>
+        </header>
+        <div className="story-page-body">
+          <StoryFields local={local} epics={epicOptions} patch={patch}/>
+          <StoryNotes key={local.id} storyId={local.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1885,6 +2038,12 @@ function viewFromUrl() {
   return view === "settings" || view === "admin" ? view : "board";
 }
 
+// The story id of a /stories/{id} path, or null anywhere else.
+function storyIdFromUrl() {
+  const match = window.location.pathname.match(/^\/stories\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i);
+  return match ? match[1] : null;
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -1900,6 +2059,8 @@ function App() {
     return params.get("epic") || null;
   });
   const [currentView, setCurrentView] = useState(() => viewFromUrl());
+  // Set while the story page is showing; the URL is then /stories/{id} and the board's query is left out.
+  const [currentStoryId, setCurrentStoryId] = useState(() => storyIdFromUrl());
   // Only shows the Admin entry point; the API refuses every admin call of anyone who is not an admin.
   const [isAdmin, setIsAdmin] = useState(false);
 
@@ -1949,20 +2110,20 @@ function App() {
     if (currentProjectId) params.set("project", currentProjectId);
     if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
     const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
+    const newUrl = currentStoryId ? `/stories/${currentStoryId}` : `/${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
     if (newUrl === currentUrl) {
       initialUrlSyncDone.current = true;
       return;
     }
-    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView };
+    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId };
     if (!initialUrlSyncDone.current) {
       window.history.replaceState(state, "", newUrl);
       initialUrlSyncDone.current = true;
     } else {
       window.history.pushState(state, "", newUrl);
     }
-  }, [bootstrapped, currentProjectId, currentEpicId, currentView]);
+  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId]);
 
   /* Sync state <- URL on back/forward */
   useEffect(() => {
@@ -1971,7 +2132,11 @@ function App() {
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
       const nextView = viewFromUrl();
+      const nextStory = storyIdFromUrl();
       skipUrlPush.current = true;
+      setCurrentStoryId(nextStory);
+      // A story page's URL carries no board query: leave the board state alone, the page sets its project once it loads.
+      if (nextStory) return;
       setCurrentProjectId(prev => {
         // Only suppress the project-change effect's epic reset if we'd
         // otherwise clobber a valid URL-provided epic.
@@ -2053,13 +2218,17 @@ function App() {
   }, [showArchivedProjects]);
 
   /* Fetch epics + board items + all docs when project changes */
+  // The project the latest load is for: an answer for any other project arrived late and is dropped.
+  const latestDetailProjectId = useRef(null);
   const loadProjectDetail = useCallback(async (projectId) => {
+    latestDetailProjectId.current = projectId;
     if (!projectId) { setEpics([]); setItems([]); setDocs([]); return; }
     try {
       const [board, epicList] = await Promise.all([
         api.getProjectBoard(projectId, { includeArchivedEpics: true }),
         api.listProjectEpics(projectId, true),
       ]);
+      if (latestDetailProjectId.current !== projectId) return;
       setEpics(epicList);
       const nextItems = board.items || [];
       setItems(nextItems);
@@ -2071,6 +2240,7 @@ function App() {
 
       // Load docs for all epics in the project (small N — fine).
       const nextDocs = (await Promise.all(epicList.map(e => api.listEpicDocuments(e.id).catch(() => [])))).flat();
+      if (latestDetailProjectId.current !== projectId) return;
       setDocs(nextDocs);
       setActiveDoc(current => current ? nextDocs.find(doc => doc.id === current.id) || null : current);
     } catch (e) {
@@ -2191,9 +2361,12 @@ function App() {
         labels: next.labels || null,
       });
       setItems(cur => cur.map(s => s.id === saved.id ? saved : s));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
+      return saved;
     } catch (e) {
       show(`Save failed: ${e.message}`);
+      return null;
     }
   };
 
@@ -2210,7 +2383,8 @@ function App() {
     try {
       const saved = await api.addWorkItemComment(id, payload);
       setItems(cur => cur.map(item => item.id === saved.id ? saved : item));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
       return saved;
     } catch (e) {
       show(`Comment failed: ${e.message}`);
@@ -2336,7 +2510,7 @@ function App() {
     return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  if (projects.length === 0 && currentView === "board") {
+  if (projects.length === 0 && currentView === "board" && !currentStoryId) {
     return (
       <div className="app-empty">
         <div>
@@ -2361,15 +2535,42 @@ function App() {
     setSelectedStory(null);
     setActiveDoc(null);
     setPaletteOpen(false);
+    setCurrentStoryId(null);
     setCurrentView("settings");
   };
   const openAdmin = () => {
     setSelectedStory(null);
     setActiveDoc(null);
     setPaletteOpen(false);
+    setCurrentStoryId(null);
     setCurrentView("admin");
   };
-  const openBoard = () => setCurrentView("board");
+  const openBoard = () => {
+    setCurrentStoryId(null);
+    setCurrentView("board");
+  };
+
+  /* Story page */
+  // Points the board at a project and epic without the project change clearing the epic.
+  const scopeBoard = (projectId, epicId) => {
+    setCurrentProjectId(prev => {
+      if (prev !== projectId) skipEpicReset.current = true;
+      return projectId;
+    });
+    setCurrentEpicId(epicId);
+  };
+  const openStoryPage = (id) => {
+    setSelectedStory(null);
+    setActiveDoc(null);
+    setPaletteOpen(false);
+    setCurrentStoryId(id);
+  };
+  // The breadcrumb: back to the board, scoped to the story's project and epic when it has them.
+  const openBoardFromStory = (projectId, epicId) => {
+    if (projectId) scopeBoard(projectId, epicId);
+    openBoard();
+  };
+  const onStoryLoaded = (story) => scopeBoard(story.projectId, story.epicId || null);
 
   return (
     <div className="shell">
@@ -2378,6 +2579,7 @@ function App() {
         currentProjectId={currentProjectId}
         setProjectId={(id) => {
           setCurrentProjectId(id);
+          setCurrentStoryId(null);
           setCurrentView("board");
         }}
         onNewProject={() => setProjectModal({ open: true, project: null })}
@@ -2388,7 +2590,7 @@ function App() {
         <Topbar
           project={currentProject}
           epic={currentEpic}
-          view={currentView === "admin" && !isAdmin ? "board" : currentView}
+          view={currentStoryId ? "story" : currentView === "admin" && !isAdmin ? "board" : currentView}
           isAdmin={isAdmin}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenTweaks={() => setTweaksOpen(v => !v)}
@@ -2397,7 +2599,18 @@ function App() {
           onOpenAdmin={openAdmin}
           onOpenBoard={openBoard}
         />
-        {currentView === "settings" ? (
+        {currentStoryId ? (
+          <StoryPage
+            key={currentStoryId}
+            storyId={currentStoryId}
+            projects={projects}
+            epics={epics}
+            onLoaded={onStoryLoaded}
+            onUpdate={updateStory}
+            onAddComment={addComment}
+            onOpenBoard={openBoardFromStory}
+          />
+        ) : currentView === "settings" ? (
           <UserSettingsView show={show} />
         ) : currentView === "admin" && isAdmin ? (
           <AdminView show={show} />
@@ -2444,8 +2657,8 @@ function App() {
         currentProject={currentProject}
         onOpenStory={(s) => setSelectedStory(s)}
         onQuickAdd={quickAdd}
-        setProjectId={setCurrentProjectId}
-        setEpicId={setCurrentEpicId}
+        setProjectId={(id) => { setCurrentProjectId(id); openBoard(); }}
+        setEpicId={(id) => { setCurrentEpicId(id); openBoard(); }}
       />
       <DetailSheet
         story={selectedStory}
@@ -2455,6 +2668,7 @@ function App() {
         onUpdate={updateStory}
         onDelete={deleteStory}
         onAddComment={addComment}
+        onOpenPage={openStoryPage}
       />
       <DocSheet
         doc={activeDoc}
