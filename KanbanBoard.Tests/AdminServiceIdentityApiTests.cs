@@ -265,6 +265,12 @@ public sealed class AdminServiceIdentityApiTests
             });
         var after = await api.ReadAsync(dbContext => dbContext.AppUsers.AsNoTracking().SingleAsync());
         Assert.Equal((stored.DisplayName, stored.UpdatedAtUtc), (after.DisplayName, after.UpdatedAtUtc));
+        // The refusal names the identity the name clashed with, not the name asked for.
+        using (var clash = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities", new { name = "DARK factory" }, withCsrfToken: true))
+        {
+            var message = (await clash.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Message;
+            Assert.Equal($"A service identity named 'Dark Factory' ({stored.Id}) already exists; 'DARK factory' is the same name.", message);
+        }
 
         using var longest = await SendAsync(admin, HttpMethod.Post, "/api/admin/service-identities",
             new { name = new string('n', ServiceIdentityProvisioner.MaxNameLength) }, withCsrfToken: true);
@@ -426,6 +432,302 @@ public sealed class AdminServiceIdentityApiTests
         Assert.All(users, user => Assert.Null(user.DisabledAtUtc));
     }
 
+    [Fact]
+    public async Task The_token_list_of_an_identity_shows_each_tokens_name_scope_dates_and_state_and_no_secret()
+    {
+        using var api = new AdminApi();
+        var now = DateTimeOffset.UtcNow;
+        var identity = Identity("Factory", now);
+        var other = Identity("Other", now);
+        var person = new AppUser { Issuer = OidcIssuer, Subject = "person", DisplayName = "A person", CreatedAtUtc = now };
+        var active = Token(identity, lastUsed: now.AddHours(-1), expires: now.AddDays(1), name: "Active", scope: "read", created: now.AddDays(-1));
+        var expired = Token(identity, expires: now.AddMinutes(-1), name: "Expired", created: now.AddDays(-2));
+        // Revoked wins over expired.
+        var revoked = Token(identity, revoked: now.AddMinutes(-30), expires: now.AddMinutes(-1), name: "Revoked", created: now.AddDays(-3));
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.AddRange(identity, other, person);
+            dbContext.PersonalAccessTokens.AddRange(active, expired, revoked, Token(other), Token(person));
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        using var response = await admin.GetAsync($"/api/admin/service-identities/{identity.Id}/tokens");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadAsStringAsync();
+        var listed = System.Text.Json.JsonSerializer.Deserialize<List<ServiceIdentityTokenDto>>(json, ProgramDependencyWiringTests.Json)!;
+        Assert.Equal(
+            [
+                (active.Id, "Active", "read", PersonalAccessTokenStates.Active, active.LastUsedAtUtc!.Value.ToUnixTimeMilliseconds(), (long?)active.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds(), (long?)null),
+                (expired.Id, "Expired", "full", PersonalAccessTokenStates.Expired, 0L, (long?)expired.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds(), (long?)null),
+                (revoked.Id, "Revoked", "full", PersonalAccessTokenStates.Revoked, 0L, (long?)revoked.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds(), (long?)revoked.RevokedAtUtc!.Value.ToUnixTimeMilliseconds())
+            ],
+            listed.Select(token => (token.Id, token.Name, token.Scope, token.State, token.LastUsedAtUtc?.ToUnixTimeMilliseconds() ?? 0L,
+                token.ExpiresAtUtc?.ToUnixTimeMilliseconds(), token.RevokedAtUtc?.ToUnixTimeMilliseconds())).ToList());
+        Assert.Equal(active.CreatedAtUtc.ToUnixTimeMilliseconds(), listed[0].CreatedAtUtc.ToUnixTimeMilliseconds());
+        // No secret material: neither the lookup hash nor the encrypted secret.
+        Assert.DoesNotContain(active.TokenHash, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(active.EncryptedSecret, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("plaintext", json, StringComparison.OrdinalIgnoreCase);
+
+        // A person's id or an unknown one lists nothing.
+        foreach (var id in new[] { person.Id, Guid.NewGuid() })
+        {
+            using var refused = await admin.GetAsync($"/api/admin/service-identities/{id}/tokens");
+            Assert.Equal(HttpStatusCode.NotFound, refused.StatusCode);
+            Assert.Equal(KanbanErrorCodes.NotFound, (await refused.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code);
+        }
+    }
+
+    [Fact]
+    public async Task A_revoked_token_is_refused_through_the_mcp_path_and_revoking_again_changes_nothing()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var other = Identity("Other", DateTimeOffset.UtcNow);
+        var person = new AppUser { Issuer = OidcIssuer, Subject = "person", DisplayName = "A person", CreatedAtUtc = DateTimeOffset.UtcNow };
+        var personsToken = Token(person);
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.AddRange(identity, other, person);
+            dbContext.PersonalAccessTokens.Add(personsToken);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateMcpClient();
+        var issued = await IssueAsync(admin, identity.Id, "Writer", "full");
+        var others = await IssueAsync(admin, other.Id, "Other", "full");
+        // As the MCP server holds it in its cache: validated before the revoke.
+        var validated = await ValidateAsync(mcp, issued.PlaintextToken);
+        var revokePath = $"/api/admin/service-identities/{identity.Id}/tokens/{issued.Token.Id}";
+
+        using (var withoutCsrf = await SendAsync(admin, HttpMethod.Delete, revokePath, null, withCsrfToken: false))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, withoutCsrf.StatusCode);
+        }
+
+        using (var revoke = await SendAsync(admin, HttpMethod.Delete, revokePath, null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+        }
+
+        using (var forward = await ForwardAsync(mcp, validated, HttpMethod.Get, "/api/projects", null))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, forward.StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, issued.PlaintextToken));
+        var revokedAt = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().SingleAsync(token => token.Id == issued.Token.Id));
+        Assert.NotNull(revokedAt.RevokedAtUtc);
+        var listed = await admin.GetFromJsonAsync<List<ServiceIdentityTokenDto>>($"/api/admin/service-identities/{identity.Id}/tokens", ProgramDependencyWiringTests.Json);
+        Assert.Equal(PersonalAccessTokenStates.Revoked, Assert.Single(listed!).State);
+
+        // Revoking a revoked token succeeds and keeps the time it was first revoked.
+        using (var again = await SendAsync(admin, HttpMethod.Delete, revokePath, null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, again.StatusCode);
+        }
+
+        var revokedAgain = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().SingleAsync(token => token.Id == issued.Token.Id));
+        Assert.Equal(revokedAt.RevokedAtUtc, revokedAgain.RevokedAtUtc);
+
+        // Another identity's token, a person's token (under the identity or under the person) and an unknown one: 404.
+        foreach (var path in new[]
+        {
+            $"/api/admin/service-identities/{identity.Id}/tokens/{others.Token.Id}",
+            $"/api/admin/service-identities/{identity.Id}/tokens/{personsToken.Id}",
+            $"/api/admin/service-identities/{person.Id}/tokens/{personsToken.Id}",
+            $"/api/admin/service-identities/{identity.Id}/tokens/{Guid.NewGuid()}"
+        })
+        {
+            using var refused = await SendAsync(admin, HttpMethod.Delete, path, null, withCsrfToken: true);
+            Assert.Equal(HttpStatusCode.NotFound, refused.StatusCode);
+            Assert.Equal(KanbanErrorCodes.NotFound, (await refused.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code);
+        }
+
+        var untouched = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking()
+            .Where(token => token.Id == others.Token.Id || token.Id == personsToken.Id).ToListAsync());
+        Assert.Equal(2, untouched.Count);
+        Assert.All(untouched, token => Assert.Null(token.RevokedAtUtc));
+    }
+
+    [Fact]
+    public async Task Rotating_issues_a_replacement_of_the_same_name_and_scope_shown_once_and_revokes_the_old_token()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateMcpClient();
+        var old = await IssueAsync(admin, identity.Id, "Reader", "read");
+        var validatedOld = await ValidateAsync(mcp, old.PlaintextToken);
+        var expires = DateTimeOffset.UtcNow.AddDays(7);
+
+        using var response = await SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, old.Token.Id), new { expiresAtUtc = expires }, withCsrfToken: true);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.True(response.Headers.CacheControl?.NoStore);
+        var rotated = (await response.Content.ReadFromJsonAsync<RotatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.Equal((old.Token.Id, "Reader", PersonalAccessTokenScopes.Read, true), (rotated.RevokedTokenId, rotated.Token.Name, rotated.Token.Scope, rotated.Token.IsActive));
+        Assert.NotEqual(old.Token.Id, rotated.Token.Id);
+        Assert.Equal(expires.ToUnixTimeMilliseconds(), rotated.Token.ExpiresAtUtc!.Value.ToUnixTimeMilliseconds());
+        Assert.StartsWith("kbp_", rotated.PlaintextToken, StringComparison.Ordinal);
+
+        // The replacement works through MCP with its scope; the old token is refused.
+        var validatedNew = await ValidateAsync(mcp, rotated.PlaintextToken);
+        Assert.Equal((identity.Id, PersonalAccessTokenScopes.Read), (validatedNew.AppUserId, validatedNew.Scope));
+        using (var newForward = await ForwardAsync(mcp, validatedNew, HttpMethod.Get, "/api/projects", null))
+        using (var oldForward = await ForwardAsync(mcp, validatedOld, HttpMethod.Get, "/api/projects", null))
+        {
+            Assert.Equal((HttpStatusCode.OK, HttpStatusCode.Forbidden), (newForward.StatusCode, oldForward.StatusCode));
+        }
+
+        Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, old.PlaintextToken));
+        var listed = await admin.GetFromJsonAsync<List<ServiceIdentityTokenDto>>($"/api/admin/service-identities/{identity.Id}/tokens", ProgramDependencyWiringTests.Json);
+        Assert.Equal(
+            [(rotated.Token.Id, PersonalAccessTokenStates.Active), (old.Token.Id, PersonalAccessTokenStates.Revoked)],
+            listed!.OrderBy(token => token.Id == old.Token.Id).Select(token => (token.Id, token.State)).ToList());
+
+        // The old token, now revoked, is not rotated again; nothing is written.
+        Assert.Equal((HttpStatusCode.Conflict, KanbanAdminErrorCodes.TokenRevoked), await AnswerAsync(admin, RotatePath(identity.Id, old.Token.Id), new { }));
+        Assert.Equal(2, await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.CountAsync()));
+
+        // Without a body, or without an expiry, the replacement does not expire, even when the rotated token did.
+        using (var noBody = await SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, rotated.Token.Id), null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.Created, noBody.StatusCode);
+            var replacement = (await noBody.Content.ReadFromJsonAsync<RotatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+            Assert.Equal(("Reader", (DateTimeOffset?)null), (replacement.Token.Name, replacement.Token.ExpiresAtUtc));
+        }
+    }
+
+    [Fact]
+    public async Task An_expired_token_is_rotated()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var expired = Token(identity, expires: DateTimeOffset.UtcNow.AddMinutes(-1), name: "Nightly", scope: "read");
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.Add(identity);
+            dbContext.PersonalAccessTokens.Add(expired);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        using var response = await SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, expired.Id), new { }, withCsrfToken: true);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        var rotated = (await response.Content.ReadFromJsonAsync<RotatedPersonalAccessTokenDto>(ProgramDependencyWiringTests.Json))!;
+        Assert.Equal(("Nightly", PersonalAccessTokenScopes.Read, true), (rotated.Token.Name, rotated.Token.Scope, rotated.Token.IsActive));
+        Assert.NotNull((await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().SingleAsync(token => token.Id == expired.Id))).RevokedAtUtc);
+    }
+
+    [Fact]
+    public async Task A_refused_or_failed_rotate_writes_nothing_and_the_old_token_keeps_working()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var other = Identity("Other", DateTimeOffset.UtcNow);
+        var disabled = Identity("Disabled", DateTimeOffset.UtcNow);
+        disabled.DisabledAtUtc = DateTimeOffset.UtcNow;
+        var person = new AppUser { Issuer = OidcIssuer, Subject = "person", DisplayName = "A person", CreatedAtUtc = DateTimeOffset.UtcNow };
+        var personsToken = Token(person);
+        var disabledsToken = Token(disabled);
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.AddRange(identity, other, disabled, person);
+            dbContext.PersonalAccessTokens.AddRange(personsToken, disabledsToken);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+        using var mcp = api.CreateMcpClient();
+        var old = await IssueAsync(admin, identity.Id, "Writer", "full");
+        var others = await IssueAsync(admin, other.Id, "Other", "full");
+
+        Assert.Equal(
+            [
+                (HttpStatusCode.BadRequest, KanbanErrorCodes.InvalidArgument),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
+                (HttpStatusCode.NotFound, KanbanErrorCodes.NotFound),
+                (HttpStatusCode.Conflict, KanbanAdminErrorCodes.IdentityDisabled)
+            ],
+            new[]
+            {
+                await AnswerAsync(admin, RotatePath(identity.Id, old.Token.Id), new { expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(-1) }),
+                // Another identity's token, a person's token (under the identity or the person), unknown ids.
+                await AnswerAsync(admin, RotatePath(identity.Id, others.Token.Id), new { }),
+                await AnswerAsync(admin, RotatePath(identity.Id, personsToken.Id), new { }),
+                await AnswerAsync(admin, RotatePath(person.Id, personsToken.Id), new { }),
+                await AnswerAsync(admin, RotatePath(identity.Id, Guid.NewGuid()), new { }),
+                await AnswerAsync(admin, RotatePath(Guid.NewGuid(), old.Token.Id), new { }),
+                await AnswerAsync(admin, RotatePath(disabled.Id, disabledsToken.Id), new { })
+            });
+        using (var withoutCsrf = await SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, old.Token.Id), new { }, withCsrfToken: false))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, withoutCsrf.StatusCode);
+        }
+
+        // Storing the replacement fails (the test server rethrows what the request threw): the old token is not revoked.
+        api.FailNextSave = true;
+        await Assert.ThrowsAsync<DbUpdateException>(() => SendAsync(admin, HttpMethod.Post, RotatePath(identity.Id, old.Token.Id), new { }, withCsrfToken: true));
+
+        var tokens = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        Assert.Equal(4, tokens.Count);
+        Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
+        var validated = await ValidateAsync(mcp, old.PlaintextToken);
+        using var forward = await ForwardAsync(mcp, validated, HttpMethod.Get, "/api/projects", null);
+        Assert.Equal(HttpStatusCode.OK, forward.StatusCode);
+    }
+
+    [Fact]
+    public async Task Rotating_is_refused_with_tokens_disabled_and_the_old_token_is_not_revoked()
+    {
+        using var api = new AdminApi(personalAccessTokensEnabled: false);
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        var token = Token(identity);
+        await api.SeedAsync(dbContext =>
+        {
+            dbContext.AppUsers.Add(identity);
+            dbContext.PersonalAccessTokens.Add(token);
+        });
+        using var admin = api.CreateSessionClient(AdminSubject);
+
+        Assert.Equal((HttpStatusCode.ServiceUnavailable, KanbanAdminErrorCodes.TokensDisabled), await AnswerAsync(admin, RotatePath(identity.Id, token.Id), new { }));
+        var stored = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().SingleAsync());
+        Assert.Equal((token.Id, (DateTimeOffset?)null), (stored.Id, stored.RevokedAtUtc));
+    }
+
+    [Fact]
+    public async Task Concurrent_rotates_of_one_token_leave_exactly_one_active_replacement_and_refuse_the_rest_with_the_typed_code()
+    {
+        using var api = new AdminApi();
+        var identity = Identity("Factory", DateTimeOffset.UtcNow);
+        await api.SeedAsync(dbContext => dbContext.AppUsers.Add(identity));
+        using var admin = api.CreateSessionClient(AdminSubject);
+        var old = await IssueAsync(admin, identity.Id, "Writer", "full");
+        var csrf = (await admin.GetFromJsonAsync<AntiforgeryToken>("/api/auth/antiforgery"))!.Token;
+
+        var answers = await Task.WhenAll(Enumerable.Range(0, 12).Select(async _ =>
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, RotatePath(identity.Id, old.Token.Id)) { Content = JsonContent.Create(new { }) };
+            request.Headers.Add("X-CSRF-TOKEN", csrf);
+            using var response = await admin.SendAsync(request);
+            return response.StatusCode == HttpStatusCode.Created
+                ? "rotated"
+                : $"{response.StatusCode}:{(await response.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Code}";
+        }));
+
+        Assert.Equal(1, answers.Count(answer => answer == "rotated"));
+        Assert.All(answers.Where(answer => answer != "rotated"), answer => Assert.Equal($"{HttpStatusCode.Conflict}:{KanbanAdminErrorCodes.TokenRevoked}", answer));
+        var tokens = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        Assert.Equal(2, tokens.Count);
+        Assert.NotNull(tokens.Single(token => token.Id == old.Token.Id).RevokedAtUtc);
+        Assert.Null(tokens.Single(token => token.Id != old.Token.Id).RevokedAtUtc);
+    }
+
+    private static string RotatePath(Guid identityId, Guid tokenId) => $"/api/admin/service-identities/{identityId}/tokens/{tokenId}/rotate";
+
     // The SQLite tests never see the SQL of MySql.EntityFrameworkCore, which cannot translate every query.
     [Fact]
     public void The_tokens_of_the_service_identities_are_read_by_a_query_mysql_can_translate()
@@ -451,7 +753,10 @@ public sealed class AdminServiceIdentityApiTests
             await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens", new { name = 1 }, withCsrfToken),
             await SendAsync(client, HttpMethod.Post, "/api/admin/service-identities", new { name = "Intruder" }, withCsrfToken),
             await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/disable", null, withCsrfToken),
-            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/enable", null, withCsrfToken)
+            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/enable", null, withCsrfToken),
+            await SendAsync(client, HttpMethod.Get, $"/api/admin/service-identities/{identityId}/tokens", null, withCsrfToken),
+            await SendAsync(client, HttpMethod.Delete, $"/api/admin/service-identities/{identityId}/tokens/{Guid.NewGuid()}", null, withCsrfToken),
+            await SendAsync(client, HttpMethod.Post, $"/api/admin/service-identities/{identityId}/tokens/{Guid.NewGuid()}/rotate", new { }, withCsrfToken)
         ];
 
         foreach (var response in responses)
@@ -520,14 +825,22 @@ public sealed class AdminServiceIdentityApiTests
         UpdatedAtUtc = createdAtUtc
     };
 
-    private static PersonalAccessToken Token(AppUser owner, DateTimeOffset? lastUsed = null, DateTimeOffset? revoked = null, DateTimeOffset? expires = null) => new()
+    private static PersonalAccessToken Token(
+        AppUser owner,
+        DateTimeOffset? lastUsed = null,
+        DateTimeOffset? revoked = null,
+        DateTimeOffset? expires = null,
+        string name = "token",
+        string scope = PersonalAccessTokenScopes.Full,
+        DateTimeOffset? created = null) => new()
     {
         AppUserId = owner.Id,
-        Name = "token",
+        Name = name,
+        Scope = scope,
         TokenPrefix = "prefix",
         TokenHash = Guid.NewGuid().ToString("N"),
-        EncryptedSecret = "unused",
-        CreatedAtUtc = DateTimeOffset.UtcNow.AddDays(-2),
+        EncryptedSecret = $"v1.secret-{Guid.NewGuid():N}",
+        CreatedAtUtc = created ?? DateTimeOffset.UtcNow.AddDays(-2),
         LastUsedAtUtc = lastUsed,
         RevokedAtUtc = revoked,
         ExpiresAtUtc = expires
@@ -600,6 +913,20 @@ public sealed class AdminServiceIdentityApiTests
         }
 
         public HttpClient CreateClient(WebApplicationFactoryClientOptions options) => factory.CreateClient(options);
+
+        /// <summary>The MCP server's client: the internal secret, and a token's identity only when one is forwarded.</summary>
+        public HttpClient CreateMcpClient()
+        {
+            var client = CreateClient(new WebApplicationFactoryClientOptions { BaseAddress = new Uri("https://localhost") });
+            client.DefaultRequestHeaders.Add(KanbanInternalAuth.SecretHeaderName, ProgramDependencyWiringTests.ApiApplication.InternalSecret);
+            return client;
+        }
+
+        /// <summary>Makes the application's next SaveChanges throw, once.</summary>
+        public bool FailNextSave
+        {
+            set => inner.FailNextSave = value;
+        }
 
         public HttpClient CreateCallerClient()
         {
