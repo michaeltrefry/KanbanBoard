@@ -126,53 +126,56 @@ async function fetchJson(input, init) {
   return text ? JSON.parse(text) : null;
 }
 
+// Ids are encoded: some come from the URL (?project=, ?story=), and an id must stay one path segment.
+const enc = (id) => encodeURIComponent(id);
+
 const api = {
   listProjects: (includeArchived = false) =>
     fetchJson(`/api/projects${includeArchived ? "?includeArchived=true" : ""}`),
   getProjectBoard: (projectId, { includeArchivedEpics = false } = {}) =>
-    fetchJson(`/api/projects/${projectId}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
   createProject: (payload) =>
     fetchJson(`/api/projects`, { method: "POST", body: JSON.stringify(payload) }),
   // PATCH, not PUT: PUT leaves the repository URL and default branch alone.
   updateProject: (id, payload) =>
-    fetchJson(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteProject: (id) =>
-    fetchJson(`/api/projects/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "DELETE" }),
 
   listProjectEpics: (projectId, includeArchived = false) =>
-    fetchJson(`/api/projects/${projectId}/epics${includeArchived ? "?includeArchived=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}/epics${includeArchived ? "?includeArchived=true" : ""}`),
   createEpic: (projectId, payload) =>
-    fetchJson(`/api/projects/${projectId}/epics`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(projectId)}/epics`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpic: (id, payload) =>
-    fetchJson(`/api/epics/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteEpic: (id) =>
-    fetchJson(`/api/epics/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "DELETE" }),
 
   listEpicDocuments: (epicId) =>
-    fetchJson(`/api/epics/${epicId}/documents`),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`),
   createEpicDocument: (epicId, payload) =>
-    fetchJson(`/api/epics/${epicId}/documents`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpicDocument: (id, payload) =>
-    fetchJson(`/api/epic-documents/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epic-documents/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
 
   getWorkItem: (id) =>
-    fetchJson(`/api/items/${id}`),
+    fetchJson(`/api/items/${enc(id)}`),
   createWorkItem: (payload) =>
     fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
   updateWorkItem: (id, payload) =>
-    fetchJson(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   addWorkItemComment: (id, payload) =>
-    fetchJson(`/api/items/${id}/comments`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}/comments`, { method: "POST", body: JSON.stringify(payload) }),
   moveWorkItem: (id, status, order) =>
-    fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
+    fetchJson(`/api/items/${enc(id)}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
-    fetchJson(`/api/items/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "DELETE" }),
   // The whole history of one item, oldest first: the feed read from its start, page after page, filtered to the item.
   listItemHistory: async (id) => {
     const entries = [];
     let query = "fromStart=true";
     for (;;) {
-      const page = await fetchJson(`/api/items/changes?itemId=${id}&limit=200&${query}`);
+      const page = await fetchJson(`/api/items/changes?itemId=${enc(id)}&limit=200&${query}`);
       entries.push(...page.items);
       if (page.items.length < 200) return entries;
       query = `cursor=${encodeURIComponent(page.next_cursor)}`;
@@ -186,24 +189,24 @@ const api = {
   createPersonalAccessToken: (payload) =>
     fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
   revokePersonalAccessToken: (id) =>
-    fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/me/personal-access-tokens/${enc(id)}`, { method: "DELETE" }),
 
   listServiceIdentities: () =>
     fetchJson(`/api/admin/service-identities`),
   createServiceIdentity: (name) =>
     fetchJson(`/api/admin/service-identities`, { method: "POST", body: JSON.stringify({ name }) }),
   disableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/disable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/disable`, { method: "POST" }),
   enableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/enable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/enable`, { method: "POST" }),
   issueServiceIdentityToken: (identityId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
   listServiceIdentityTokens: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`),
   revokeServiceIdentityToken: (identityId, tokenId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}`, { method: "DELETE" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}`, { method: "DELETE" }),
   rotateServiceIdentityToken: (identityId, tokenId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
 };
 
 /* ============ Feedback hook ============ */
@@ -218,6 +221,31 @@ function useFeedback() {
   const clear = useCallback(() => { clearTimeout(timer.current); setMsg(null); }, []);
   useEffect(() => () => clearTimeout(timer.current), []);
   return { msg, show, clear };
+}
+
+/* ============ Links ============ */
+// The absolute address of a story's page.
+function storyPageUrl(id) {
+  return `${window.location.origin}/stories/${id}`;
+}
+
+// Puts text on the clipboard. The Clipboard API needs a secure context (https or localhost), so elsewhere, or when it
+// refuses, a hidden textarea and execCommand("copy") are tried. Rejects when neither works.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* falls back below */ }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } catch { copied = false; }
+  area.remove();
+  if (!copied) throw new Error("the browser refused to copy");
 }
 
 function FeedbackBar({ msg, onClose }) {
@@ -961,7 +989,7 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
 }
 
 /* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage }) {
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage, onCopyLink }) {
   const { local, saving, patch, flush, merge } = useStoryEditor(story, onUpdate);
 
   // Saves a pending edit first, so the page loads the story as it was left here.
@@ -970,10 +998,14 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
     flush().finally(() => onOpenPage(id));
   };
 
+  // Saves a pending edit before closing: closing may step back to another document (after a reload), which would
+  // otherwise drop an edit not yet saved.
+  const close = () => { flush().finally(onClose); };
+
   if (!story || !local) return null;
   return (
     <>
-      <div className="sheet-overlay" onClick={onClose}/>
+      <div className="sheet-overlay" onClick={close}/>
       <aside className="sheet">
         <header className="sheet-head">
           <div style={{flex:1}}>
@@ -987,13 +1019,14 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             />
           </div>
           <div className="sheet-head-actions">
+            <button className="btn ghost" onClick={() => onCopyLink(story.id)} title="Copy a link to this story's page">Copy link</button>
             <button className="btn ghost sheet-open-page" onClick={openPage} title="Open as page" aria-label="Open as page">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/>
               </svg>
             </button>
             <button className="btn ghost" onClick={() => { if (confirm("Delete this item?")) { onDelete(story.id); onClose(); } }}>Delete</button>
-            <button className="btn" onClick={onClose}>Close</button>
+            <button className="btn" onClick={close}>Close</button>
           </div>
         </header>
         <div className="sheet-body">
@@ -2313,6 +2346,25 @@ function storyIdFromUrl() {
   return match ? match[1] : null;
 }
 
+const STORY_NOT_FOUND = "There is no story with this id; it may have been deleted.";
+
+// The board view's ?story= as written (not checked), or null; only the board view has a slideout.
+function rawSheetParam() {
+  if (storyIdFromUrl() || viewFromUrl() !== "board") return null;
+  return new URLSearchParams(window.location.search).get("story") || null;
+}
+
+// The story open in the board's slideout (?story={id}), or null; a ?story= that is not a story id counts as none.
+function sheetStoryIdFromUrl() {
+  const id = rawSheetParam();
+  return id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}
+
+// True when the board's ?story= is not a story id: it is dropped from the URL with the not-found message.
+function sheetParamIsInvalid() {
+  return !!rawSheetParam() && !sheetStoryIdFromUrl();
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -2339,8 +2391,24 @@ function App() {
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
   const skipEpicReset = useRef(true);      // keep URL-loaded epic on initial mount + on popstate
   const initialUrlSyncDone = useRef(false);
+  const replaceUrlOnce = useRef(false);    // the next URL change corrects the current entry rather than adding one
 
   const [selectedStory, setSelectedStory] = useState(null);
+  // A slideout story named by the URL (load or Back/Forward) and not open yet: it is looked up, then opened.
+  const [pendingSheetId, setPendingSheetId] = useState(() => sheetStoryIdFromUrl());
+  // What the URL's ?story= shows: the open slideout, else the one being looked up.
+  const sheetStoryId = currentView === "board" && !currentStoryId ? (selectedStory?.id || pendingSheetId) : null;
+  const selectedStoryRef = useRef(null);
+  selectedStoryRef.current = selectedStory;
+  const pendingSheetRef = useRef(null);
+  pendingSheetRef.current = pendingSheetId;
+  const currentProjectRef = useRef(null);
+  currentProjectRef.current = currentProjectId;
+  const sheetLookup = useRef(null);        // the id of the slideout story being read from the API
+  const badSheetParam = useRef(sheetParamIsInvalid()); // the page was loaded with a ?story= that is not a story id
+  // Set while Close's history.back() is on its way, so a second close does not step back a second entry.
+  const sheetClosing = useRef(false);
+  const sheetClosingTimer = useRef(null);
   const [activeDoc, setActiveDoc] = useState(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -2380,6 +2448,8 @@ function App() {
     if (currentView !== "board") params.set("view", currentView);
     if (currentProjectId) params.set("project", currentProjectId);
     if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
+    const boardQs = params.toString();
+    if (sheetStoryId) params.set("story", sheetStoryId);
     const qs = params.toString();
     const newUrl = currentStoryId ? `/stories/${currentStoryId}` : `/${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
@@ -2387,25 +2457,79 @@ function App() {
       initialUrlSyncDone.current = true;
       return;
     }
-    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId };
-    if (!initialUrlSyncDone.current) {
+    // Only the slideout changed: opening it pushes (so Back closes it); switching to another card or closing it
+    // replaces, so cards looked at one after another do not stack up in the history.
+    const currentParams = new URLSearchParams(window.location.search);
+    const hadSheet = currentParams.has("story");
+    currentParams.delete("story");
+    const sheetOnly = !currentStoryId && window.location.pathname === "/" && currentParams.toString() === boardQs;
+    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
+    if (!initialUrlSyncDone.current || replaceUrlOnce.current) {
+      replaceUrlOnce.current = false;
       window.history.replaceState(state, "", newUrl);
       initialUrlSyncDone.current = true;
+    } else if (sheetOnly && hadSheet) {
+      // An entry pushed by opening the slideout stays marked so, so Close can still step back over it.
+      window.history.replaceState({ ...state, sheetPushed: !!sheetStoryId && !!window.history.state?.sheetPushed }, "", newUrl);
     } else {
-      window.history.pushState(state, "", newUrl);
+      window.history.pushState({ ...state, sheetPushed: sheetOnly && !!sheetStoryId }, "", newUrl);
     }
-  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId]);
+  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId, sheetStoryId]);
+
+  // A ?story= the page was loaded with that is not a story id: the first URL sync above has dropped it; say so.
+  useEffect(() => {
+    if (bootstrapped && badSheetParam.current) {
+      badSheetParam.current = false;
+      show(STORY_NOT_FOUND);
+    }
+  }, [bootstrapped, show]);
+
+  // Closes the slideout. When opening it added the history entry, steps back over it (as browser Back does), so Back
+  // afterwards does not reopen it; otherwise (e.g. the board was loaded with ?story=) just drops it. Used by Close,
+  // the overlay and Delete, and when the story is gone (deleted elsewhere).
+  const closeSheet = useCallback(() => {
+    if (sheetClosing.current) return; // a step back is already on its way: a second one would leave the board
+    const open = selectedStoryRef.current;
+    const urlSheet = new URLSearchParams(window.location.search).get("story");
+    if (open && urlSheet === open.id && window.history.state?.sheetPushed) {
+      sheetClosing.current = true;
+      // popstate clears it; this is in case it never comes.
+      window.clearTimeout(sheetClosingTimer.current);
+      sheetClosingTimer.current = window.setTimeout(() => { sheetClosing.current = false; }, 1000);
+      window.history.back();
+    } else {
+      setSelectedStory(null);
+    }
+  }, []);
+  useEffect(() => () => window.clearTimeout(sheetClosingTimer.current), []);
 
   /* Sync state <- URL on back/forward */
   useEffect(() => {
     const onPop = () => {
+      sheetClosing.current = false;
+      window.clearTimeout(sheetClosingTimer.current);
       const params = new URLSearchParams(window.location.search);
+      if (sheetParamIsInvalid()) {
+        // Not a story id: never looked up; dropped from this entry as a story that does not exist would be.
+        params.delete("story");
+        const qs = params.toString();
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? "?" + qs : ""}`);
+        show(STORY_NOT_FOUND);
+      }
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
       const nextView = viewFromUrl();
       const nextStory = storyIdFromUrl();
+      const nextSheet = sheetStoryIdFromUrl();
       skipUrlPush.current = true;
       setCurrentStoryId(nextStory);
+      // Back from an opened slideout closes it (useStoryEditor saves a pending edit as it closes); Forward reopens it.
+      if (selectedStoryRef.current?.id !== nextSheet) {
+        setSelectedStory(null);
+        setPendingSheetId(nextSheet);
+      } else {
+        setPendingSheetId(null);
+      }
       // A story page's URL carries no board query: leave the board state alone, the page sets its project once it loads.
       if (nextStory) return;
       setCurrentProjectId(prev => {
@@ -2503,7 +2627,12 @@ function App() {
       setEpics(epicList);
       const nextItems = board.items || [];
       setItems(nextItems);
-      setSelectedStory(current => current ? nextItems.find(item => item.id === current.id) || null : current);
+      // The open slideout gets the story as it is now; a story deleted elsewhere closes it (stepping back over the
+      // entry its opening added, so Back afterwards is not a step to an identical entry).
+      const open = selectedStoryRef.current;
+      const fresh = open && nextItems.find(item => item.id === open.id);
+      if (fresh) setSelectedStory(current => current?.id === fresh.id ? fresh : current);
+      else if (open) closeSheet();
 
       // Drop the current epic selection if it isn't valid for this project
       // (e.g. a stale ?epic=... in the URL after reloading into another project).
@@ -2517,7 +2646,7 @@ function App() {
     } catch (e) {
       show(`Couldn't load project: ${e.message}`);
     }
-  }, [show]);
+  }, [show, closeSheet]);
 
   const refreshLiveView = useCallback(async () => {
     const activeProjectId = currentProjectId;
@@ -2541,6 +2670,47 @@ function App() {
     }
     loadProjectDetail(currentProjectId);
   }, [currentProjectId, loadProjectDetail]);
+
+  /* Opens the slideout story the URL names: from the board when it is there, else read from the API (it may be in
+     another project, which the board then switches to). A story that does not exist drops ?story= with a message. */
+  useEffect(() => {
+    if (!bootstrapped || !pendingSheetId) return;
+    if (currentView !== "board" || currentStoryId) { setPendingSheetId(null); return; }
+    const id = pendingSheetId;
+    const known = items.find(item => item.id === id);
+    if (known) {
+      sheetLookup.current = null;
+      setSelectedStory(known);
+      setPendingSheetId(null);
+      return;
+    }
+    if (sheetLookup.current === id) return;
+    sheetLookup.current = id;
+    api.getWorkItem(id).then(story => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      if (story.projectId && story.projectId !== currentProjectRef.current) {
+        // Drops an answer still on its way for the project being left, so it cannot close the slideout.
+        latestDetailProjectId.current = story.projectId;
+        // The URL named a story of another project: the corrected URL replaces it, so Back does not land on it again.
+        replaceUrlOnce.current = true;
+        setCurrentProjectId(prev => {
+          if (prev !== story.projectId) skipEpicReset.current = true;
+          return story.projectId;
+        });
+        setCurrentEpicId(story.epicId || null);
+      }
+      setSelectedStory(story);
+      setPendingSheetId(null);
+    }, e => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      setPendingSheetId(null);
+      show(e.status === 404 ? STORY_NOT_FOUND : `Couldn't open the story: ${e.message}`);
+    });
+  }, [bootstrapped, pendingSheetId, items, currentView, currentStoryId, show]);
 
   useEffect(() => {
     if (!bootstrapped || typeof window.EventSource === "undefined") return undefined;
@@ -2649,7 +2819,7 @@ function App() {
     } catch (e) {
       if (e.status === 404) {
         setItems(cur => cur.filter(s => s.id !== next.id));
-        setSelectedStory(current => current?.id === next.id ? null : current);
+        if (selectedStoryRef.current?.id === next.id) closeSheet();
         if (onDeleted) onDeleted();
         else show("This story was deleted elsewhere; the edit was not saved.");
         return null;
@@ -2861,6 +3031,18 @@ function App() {
   };
   const onStoryLoaded = (story) => scopeBoard(story.projectId, story.epicId || null);
 
+  /* Board slideout (?story={id}) */
+  const openSheet = (story) => {
+    setPendingSheetId(null);
+    setSelectedStory(story);
+  };
+  const copyStoryLink = (id) => {
+    const url = storyPageUrl(id);
+    copyToClipboard(url).then(
+      () => show("Link copied to the clipboard", "success"),
+      e => show(`Couldn't copy the link (${e.message}): ${url}`));
+  };
+
   return (
     <div className="shell">
       <Sidebar
@@ -2931,7 +3113,7 @@ function App() {
             <Board
               items={boardItems}
               projectKey={currentProject?.key}
-              onOpen={(s) => setSelectedStory(s)}
+              onOpen={openSheet}
               onMove={moveStory}
               showAging={tweaks.showAging}
             />
@@ -2946,7 +3128,7 @@ function App() {
         projects={projects}
         epics={epics}
         currentProject={currentProject}
-        onOpenStory={(s) => setSelectedStory(s)}
+        onOpenStory={openSheet}
         onQuickAdd={quickAdd}
         setProjectId={(id) => { setCurrentProjectId(id); openBoard(); }}
         setEpicId={(id) => { setCurrentEpicId(id); openBoard(); }}
@@ -2955,11 +3137,12 @@ function App() {
         story={selectedStory}
         projectKey={currentProject?.key}
         epics={epics.filter(e => !e.isArchived)}
-        onClose={() => setSelectedStory(null)}
+        onClose={closeSheet}
         onUpdate={updateStory}
         onDelete={deleteStory}
         onAddComment={addComment}
         onOpenPage={openStoryPage}
+        onCopyLink={copyStoryLink}
       />
       <DocSheet
         doc={activeDoc}
