@@ -49,7 +49,8 @@ public sealed record PersonalAccessTokenValidationResult(
 
 public sealed class PersonalAccessTokenService(
     KanbanDbContext dbContext,
-    IOptions<PersonalAccessTokenOptions> options) : IPersonalAccessTokenService
+    IOptions<PersonalAccessTokenOptions> options,
+    TimeProvider? timeProvider = null) : IPersonalAccessTokenService
 {
     private const int SecretByteLength = 32;
     private const int DisplayPrefixByteLength = 8;
@@ -85,7 +86,7 @@ public sealed class PersonalAccessTokenService(
         var tokenPrefix = Base64UrlEncode(RandomNumberGenerator.GetBytes(DisplayPrefixByteLength));
         var secret = Base64UrlEncode(RandomNumberGenerator.GetBytes(SecretByteLength));
         var plaintextToken = $"{options.TokenPrefix}_{tokenPrefix}_{secret}";
-        var now = DateTimeOffset.UtcNow;
+        var now = (timeProvider ?? TimeProvider.System).GetUtcNow();
 
         var token = new PersonalAccessToken
         {

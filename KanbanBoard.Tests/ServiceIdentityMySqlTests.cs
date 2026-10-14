@@ -83,7 +83,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), null, CancellationToken.None));
+        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), null, DateTimeOffset.UtcNow, CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.True(texts.Count == 2, string.Join("\n---\n", texts));
@@ -142,7 +142,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.True(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, new ChangeActor(Guid.NewGuid(), "Ada"), CancellationToken.None));
+        Assert.True(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, new ChangeActor(Guid.NewGuid(), "Ada"), DateTimeOffset.UtcNow, CancellationToken.None));
 
         var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
         Assert.True(texts.Count == 3, string.Join("\n---\n", texts));
@@ -169,7 +169,7 @@ public sealed class ServiceIdentityMySqlTests
         var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 0 };
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        Assert.False(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, null, CancellationToken.None));
+        Assert.False(await ServiceIdentityProvisioner.DisableAsync(dbContext, IdentityId, null, DateTimeOffset.UtcNow, CancellationToken.None));
 
         Assert.Single(database.Commands);
         Assert.Empty(database.Locks);

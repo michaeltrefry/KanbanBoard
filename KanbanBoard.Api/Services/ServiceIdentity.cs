@@ -225,6 +225,7 @@ public static class ServiceIdentityProvisioner
         Guid identityId,
         Guid tokenId,
         ChangeActor? admin,
+        DateTimeOffset now,
         CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
@@ -242,7 +243,7 @@ public static class ServiceIdentityProvisioner
 
         if (token.RevokedAtUtc is null)
         {
-            token.RevokedAtUtc = DateTimeOffset.UtcNow;
+            token.RevokedAtUtc = now;
             token.RevokedByUserId = admin?.Id;
             token.RevokedByName = admin?.Name;
             await dbContext.SaveChangesAsync(cancellationToken);
@@ -280,7 +281,8 @@ public static class ServiceIdentityProvisioner
     /// Disabling a disabled identity keeps the time it was first disabled. Each token it revokes records
     /// <paramref name="admin"/> as its revoker; a token revoked before keeps its own. False when there is no such identity.
     /// </summary>
-    public static async Task<bool> DisableAsync(KanbanDbContext dbContext, Guid identityId, ChangeActor? admin, CancellationToken cancellationToken)
+    public static async Task<bool> DisableAsync(
+        KanbanDbContext dbContext, Guid identityId, ChangeActor? admin, DateTimeOffset disabledAtUtc, CancellationToken cancellationToken)
     {
         await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
         if (await LockAsync(dbContext, identityId, cancellationToken) == 0)
@@ -288,7 +290,8 @@ public static class ServiceIdentityProvisioner
             return false;
         }
 
-        var now = DateTimeOffset.UtcNow;
+        // A local, as the setters capture it, so that the identity's id keeps its plain parameter name in the SQL.
+        var now = disabledAtUtc;
         var (revokedById, revokedByName) = (admin?.Id, admin?.Name);
         await dbContext.AppUsers
             .Where(user => user.Id == identityId && user.DisabledAtUtc == null)

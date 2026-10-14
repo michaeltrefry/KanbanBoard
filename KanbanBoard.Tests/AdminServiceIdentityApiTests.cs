@@ -874,6 +874,36 @@ public sealed class AdminServiceIdentityApiTests
             await AnswerAsync(admin, RotatePath(identity.Id, active.Id), new { expiresAtUtc = realNow.AddDays(1) }));
         listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
         Assert.Equal(0, Assert.Single(listed!).ActiveTokenCount);
+
+        // The times stored are the application's too: a revoke, then a disable, each an hour on.
+        clock.Advance(TimeSpan.FromHours(1));
+        var revokedAt = clock.Now;
+        using (var revoke = await SendAsync(admin, HttpMethod.Delete, $"/api/admin/service-identities/{identity.Id}/tokens/{active.Id}", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+        }
+
+        clock.Advance(TimeSpan.FromHours(1));
+        var lastIssuedAt = clock.Now;
+        var last = await IssueAsync(admin, identity.Id, "Last", "full");
+        clock.Advance(TimeSpan.FromHours(1));
+        var disabledAt = clock.Now;
+        using (var disable = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/disable", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+        }
+
+        var stored = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        var issuedAt = realNow.AddDays(-1);
+        Assert.Equal(
+            [
+                (issued.Token.Id, issuedAt, (DateTimeOffset?)issuedAt),
+                (active.Id, issuedAt, (DateTimeOffset?)revokedAt),
+                (last.Token.Id, lastIssuedAt, (DateTimeOffset?)disabledAt)
+            ],
+            stored.OrderBy(token => token.CreatedAtUtc).ThenBy(token => token.Id != issued.Token.Id)
+                .Select(token => (token.Id, token.CreatedAtUtc, token.RevokedAtUtc)).ToList());
+        Assert.All(stored.Where(token => token.ExpiresAtUtc is not null), token => Assert.True(token.ExpiresAtUtc > token.CreatedAtUtc));
     }
 
     // In Production, as the server runs: no developer exception page answers for the endpoint.
