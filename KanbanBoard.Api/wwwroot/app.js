@@ -126,53 +126,56 @@ async function fetchJson(input, init) {
   return text ? JSON.parse(text) : null;
 }
 
+// Ids are encoded: some come from the URL (?project=, ?story=), and an id must stay one path segment.
+const enc = (id) => encodeURIComponent(id);
+
 const api = {
   listProjects: (includeArchived = false) =>
     fetchJson(`/api/projects${includeArchived ? "?includeArchived=true" : ""}`),
   getProjectBoard: (projectId, { includeArchivedEpics = false } = {}) =>
-    fetchJson(`/api/projects/${projectId}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
   createProject: (payload) =>
     fetchJson(`/api/projects`, { method: "POST", body: JSON.stringify(payload) }),
   // PATCH, not PUT: PUT leaves the repository URL and default branch alone.
   updateProject: (id, payload) =>
-    fetchJson(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteProject: (id) =>
-    fetchJson(`/api/projects/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "DELETE" }),
 
   listProjectEpics: (projectId, includeArchived = false) =>
-    fetchJson(`/api/projects/${projectId}/epics${includeArchived ? "?includeArchived=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}/epics${includeArchived ? "?includeArchived=true" : ""}`),
   createEpic: (projectId, payload) =>
-    fetchJson(`/api/projects/${projectId}/epics`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(projectId)}/epics`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpic: (id, payload) =>
-    fetchJson(`/api/epics/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteEpic: (id) =>
-    fetchJson(`/api/epics/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "DELETE" }),
 
   listEpicDocuments: (epicId) =>
-    fetchJson(`/api/epics/${epicId}/documents`),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`),
   createEpicDocument: (epicId, payload) =>
-    fetchJson(`/api/epics/${epicId}/documents`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpicDocument: (id, payload) =>
-    fetchJson(`/api/epic-documents/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epic-documents/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
 
   getWorkItem: (id) =>
-    fetchJson(`/api/items/${id}`),
+    fetchJson(`/api/items/${enc(id)}`),
   createWorkItem: (payload) =>
     fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
   updateWorkItem: (id, payload) =>
-    fetchJson(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   addWorkItemComment: (id, payload) =>
-    fetchJson(`/api/items/${id}/comments`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}/comments`, { method: "POST", body: JSON.stringify(payload) }),
   moveWorkItem: (id, status, order) =>
-    fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
+    fetchJson(`/api/items/${enc(id)}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
-    fetchJson(`/api/items/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "DELETE" }),
   // The whole history of one item, oldest first: the feed read from its start, page after page, filtered to the item.
   listItemHistory: async (id) => {
     const entries = [];
     let query = "fromStart=true";
     for (;;) {
-      const page = await fetchJson(`/api/items/changes?itemId=${id}&limit=200&${query}`);
+      const page = await fetchJson(`/api/items/changes?itemId=${enc(id)}&limit=200&${query}`);
       entries.push(...page.items);
       if (page.items.length < 200) return entries;
       query = `cursor=${encodeURIComponent(page.next_cursor)}`;
@@ -186,24 +189,24 @@ const api = {
   createPersonalAccessToken: (payload) =>
     fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
   revokePersonalAccessToken: (id) =>
-    fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/me/personal-access-tokens/${enc(id)}`, { method: "DELETE" }),
 
   listServiceIdentities: () =>
     fetchJson(`/api/admin/service-identities`),
   createServiceIdentity: (name) =>
     fetchJson(`/api/admin/service-identities`, { method: "POST", body: JSON.stringify({ name }) }),
   disableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/disable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/disable`, { method: "POST" }),
   enableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/enable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/enable`, { method: "POST" }),
   issueServiceIdentityToken: (identityId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
   listServiceIdentityTokens: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`),
   revokeServiceIdentityToken: (identityId, tokenId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}`, { method: "DELETE" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}`, { method: "DELETE" }),
   rotateServiceIdentityToken: (identityId, tokenId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
 };
 
 /* ============ Feedback hook ============ */
@@ -995,10 +998,14 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
     flush().finally(() => onOpenPage(id));
   };
 
+  // Saves a pending edit before closing: closing may step back to another document (after a reload), which would
+  // otherwise drop an edit not yet saved.
+  const close = () => { flush().finally(onClose); };
+
   if (!story || !local) return null;
   return (
     <>
-      <div className="sheet-overlay" onClick={onClose}/>
+      <div className="sheet-overlay" onClick={close}/>
       <aside className="sheet">
         <header className="sheet-head">
           <div style={{flex:1}}>
@@ -1019,7 +1026,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
               </svg>
             </button>
             <button className="btn ghost" onClick={() => { if (confirm("Delete this item?")) { onDelete(story.id); onClose(); } }}>Delete</button>
-            <button className="btn" onClick={onClose}>Close</button>
+            <button className="btn" onClick={close}>Close</button>
           </div>
         </header>
         <div className="sheet-body">
@@ -2339,10 +2346,23 @@ function storyIdFromUrl() {
   return match ? match[1] : null;
 }
 
-// The story open in the board's slideout (?story={id}), or null; only the board view has one.
-function sheetStoryIdFromUrl() {
+const STORY_NOT_FOUND = "There is no story with this id; it may have been deleted.";
+
+// The board view's ?story= as written (not checked), or null; only the board view has a slideout.
+function rawSheetParam() {
   if (storyIdFromUrl() || viewFromUrl() !== "board") return null;
   return new URLSearchParams(window.location.search).get("story") || null;
+}
+
+// The story open in the board's slideout (?story={id}), or null; a ?story= that is not a story id counts as none.
+function sheetStoryIdFromUrl() {
+  const id = rawSheetParam();
+  return id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+}
+
+// True when the board's ?story= is not a story id: it is dropped from the URL with the not-found message.
+function sheetParamIsInvalid() {
+  return !!rawSheetParam() && !sheetStoryIdFromUrl();
 }
 
 function App() {
@@ -2385,6 +2405,10 @@ function App() {
   const currentProjectRef = useRef(null);
   currentProjectRef.current = currentProjectId;
   const sheetLookup = useRef(null);        // the id of the slideout story being read from the API
+  const badSheetParam = useRef(sheetParamIsInvalid()); // the page was loaded with a ?story= that is not a story id
+  // Set while Close's history.back() is on its way, so a second close does not step back a second entry.
+  const sheetClosing = useRef(false);
+  const sheetClosingTimer = useRef(null);
   const [activeDoc, setActiveDoc] = useState(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -2452,10 +2476,46 @@ function App() {
     }
   }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId, sheetStoryId]);
 
+  // A ?story= the page was loaded with that is not a story id: the first URL sync above has dropped it; say so.
+  useEffect(() => {
+    if (bootstrapped && badSheetParam.current) {
+      badSheetParam.current = false;
+      show(STORY_NOT_FOUND);
+    }
+  }, [bootstrapped, show]);
+
+  // Closes the slideout. When opening it added the history entry, steps back over it (as browser Back does), so Back
+  // afterwards does not reopen it; otherwise (e.g. the board was loaded with ?story=) just drops it. Used by Close,
+  // the overlay and Delete, and when the story is gone (deleted elsewhere).
+  const closeSheet = useCallback(() => {
+    if (sheetClosing.current) return; // a step back is already on its way: a second one would leave the board
+    const open = selectedStoryRef.current;
+    const urlSheet = new URLSearchParams(window.location.search).get("story");
+    if (open && urlSheet === open.id && window.history.state?.sheetPushed) {
+      sheetClosing.current = true;
+      // popstate clears it; this is in case it never comes.
+      window.clearTimeout(sheetClosingTimer.current);
+      sheetClosingTimer.current = window.setTimeout(() => { sheetClosing.current = false; }, 1000);
+      window.history.back();
+    } else {
+      setSelectedStory(null);
+    }
+  }, []);
+  useEffect(() => () => window.clearTimeout(sheetClosingTimer.current), []);
+
   /* Sync state <- URL on back/forward */
   useEffect(() => {
     const onPop = () => {
+      sheetClosing.current = false;
+      window.clearTimeout(sheetClosingTimer.current);
       const params = new URLSearchParams(window.location.search);
+      if (sheetParamIsInvalid()) {
+        // Not a story id: never looked up; dropped from this entry as a story that does not exist would be.
+        params.delete("story");
+        const qs = params.toString();
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? "?" + qs : ""}`);
+        show(STORY_NOT_FOUND);
+      }
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
       const nextView = viewFromUrl();
@@ -2567,7 +2627,12 @@ function App() {
       setEpics(epicList);
       const nextItems = board.items || [];
       setItems(nextItems);
-      setSelectedStory(current => current ? nextItems.find(item => item.id === current.id) || null : current);
+      // The open slideout gets the story as it is now; a story deleted elsewhere closes it (stepping back over the
+      // entry its opening added, so Back afterwards is not a step to an identical entry).
+      const open = selectedStoryRef.current;
+      const fresh = open && nextItems.find(item => item.id === open.id);
+      if (fresh) setSelectedStory(current => current?.id === fresh.id ? fresh : current);
+      else if (open) closeSheet();
 
       // Drop the current epic selection if it isn't valid for this project
       // (e.g. a stale ?epic=... in the URL after reloading into another project).
@@ -2581,7 +2646,7 @@ function App() {
     } catch (e) {
       show(`Couldn't load project: ${e.message}`);
     }
-  }, [show]);
+  }, [show, closeSheet]);
 
   const refreshLiveView = useCallback(async () => {
     const activeProjectId = currentProjectId;
@@ -2643,7 +2708,7 @@ function App() {
       sheetLookup.current = null;
       if (pendingSheetRef.current !== id) return;
       setPendingSheetId(null);
-      show(e.status === 404 ? "There is no story with this id; it may have been deleted." : `Couldn't open the story: ${e.message}`);
+      show(e.status === 404 ? STORY_NOT_FOUND : `Couldn't open the story: ${e.message}`);
     });
   }, [bootstrapped, pendingSheetId, items, currentView, currentStoryId, show]);
 
@@ -2754,7 +2819,7 @@ function App() {
     } catch (e) {
       if (e.status === 404) {
         setItems(cur => cur.filter(s => s.id !== next.id));
-        setSelectedStory(current => current?.id === next.id ? null : current);
+        if (selectedStoryRef.current?.id === next.id) closeSheet();
         if (onDeleted) onDeleted();
         else show("This story was deleted elsewhere; the edit was not saved.");
         return null;
@@ -2970,13 +3035,6 @@ function App() {
   const openSheet = (story) => {
     setPendingSheetId(null);
     setSelectedStory(story);
-  };
-  // Close, the overlay and Delete: when opening the slideout added the history entry, step back over it (as browser
-  // Back does), so Back afterwards does not reopen it; otherwise (e.g. the board was loaded with ?story=) drop it.
-  const closeSheet = () => {
-    const urlSheet = new URLSearchParams(window.location.search).get("story");
-    if (selectedStory && urlSheet === selectedStory.id && window.history.state?.sheetPushed) window.history.back();
-    else setSelectedStory(null);
   };
   const copyStoryLink = (id) => {
     const url = storyPageUrl(id);
