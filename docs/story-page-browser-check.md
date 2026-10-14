@@ -24,7 +24,7 @@ browser) against a running API before an epic story is closed. Each later story 
 | 5 | Press browser Back, then Forward. | Back shows the story page again at `/stories/{storyId}`; Forward returns to the epic-scoped board. |
 | 6 | On the story page click **Demo** in the breadcrumb. | The URL is `/?project={demoId}` and the board shows all of Demo (no epic selected). |
 | 7 | On the board, open the story's card. In the slideout, type into the title and **immediately** click the open-as-page button (the expand icon left of Delete). | The slideout closes and the URL is `/stories/{storyId}`. The page shows the title just typed (the pending edit was saved first). |
-| 8 | Press browser Back. | The board is shown again at its previous URL. |
+| 8 | Press browser Back. | The board is shown again at its previous URL, with the story's slideout open (`…&story={storyId}`, since sc-26159). |
 | 9 | Open `/stories/00000000-0000-0000-0000-000000000001`. | The app loads and shows **Story not found** / "There is no story with this id", with a **Back to board** button. |
 | 10 | Click **Back to board**. | The board is shown at `/?project=…`. |
 | 11 | Open `/stories/not-a-guid`, `/stories/{storyId without its hyphens}`, `/api/does-not-exist` and `/styles.css`. | The first three are plain 404s (no app HTML); `/styles.css` is served as CSS. |
@@ -70,3 +70,20 @@ Open `/stories/{storyId}` in two tabs, A and B. Changes "from elsewhere" are mad
 | 33 | In A, open DevTools → Network and filter `changes`. Create or change a story in another project. | A fetches `/api/items/{storyId}` once but does not read `/api/items/changes?itemId=…` (its history) again. |
 | 34 | In A, type into the title and, within 400 ms, delete the story elsewhere. | A shows **Story deleted**; no "Save failed" message. On the board, the same with the story's slideout open closes the slideout, takes the card off and shows "This story was deleted elsewhere; the edit was not saved." |
 | 35 | Open a story page and, while it shows "Loading story…" (throttle the network in DevTools), change its title elsewhere. | Once loaded, A shows the new title without another change. |
+
+### Slideout URL state and Copy link (sc-26159)
+
+Open the board at `/?project={demoId}` in a fresh tab. Story page and a second Demo story are on the board.
+
+| # | Step | Expected |
+|---|------|----------|
+| 36 | Click Story page's card. | The slideout opens and the URL becomes `/?project={demoId}&story={storyId}` (a new history entry). |
+| 37 | Reload the page. | The board loads with Story page's slideout open again. |
+| 38 | Type into the slideout's title and **immediately** press browser Back. | The slideout closes, the URL is `/?project={demoId}` and the card shows the new title (`GET /api/items/{storyId}` returns it): the pending edit was saved. Forward reopens the slideout. |
+| 39 | With the slideout open, press **Close** (and, again, click the dimmed overlay). | The slideout closes and `?story=` leaves the URL; pressing Back afterwards does not reopen the slideout (it leaves the board URL, like Back from the board would). |
+| 40 | Open a card, then open the other Demo story from the command palette (Cmd+K) while the slideout is open; press Back. | The URL's `story=` changes to the second story without a new history entry; Back closes the slideout (it does not step back to the first story). |
+| 41 | Open `/?project={otherId}&story={storyId}` (the story is in Demo). | The board switches to Demo (sidebar highlights Demo, URL `/?project={demoId}&epic={permalinksId}&story={storyId}`, replacing the entry) and shows Story page's slideout. |
+| 42 | Open `/?project={demoId}&story=00000000-0000-0000-0000-000000000001`, then `/?story=not-a-guid`. | The board loads without a slideout, `story=` is dropped from the URL and the feedback bar says "There is no story with this id; it may have been deleted." No script error in the console. |
+| 43 | Open the slideout and delete the story elsewhere (`DELETE /api/items/{id}`). | The slideout closes and `story=` leaves the URL. |
+| 44 | In the slideout click **Copy link**. | The feedback bar shows "Link copied to the clipboard"; pasting gives `{origin}/stories/{storyId}`, which opens the story page. |
+| 45 | Open the app over plain http on a non-localhost address (not a secure context), or deny clipboard access, and click **Copy link**. | The link is still copied through the fallback; if the browser refuses that too, the feedback bar shows "Couldn't copy the link (…): {origin}/stories/{storyId}" so it can be copied by hand. |

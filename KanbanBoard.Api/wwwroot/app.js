@@ -220,6 +220,31 @@ function useFeedback() {
   return { msg, show, clear };
 }
 
+/* ============ Links ============ */
+// The absolute address of a story's page.
+function storyPageUrl(id) {
+  return `${window.location.origin}/stories/${id}`;
+}
+
+// Puts text on the clipboard. The Clipboard API needs a secure context (https or localhost), so elsewhere, or when it
+// refuses, a hidden textarea and execCommand("copy") are tried. Rejects when neither works.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* falls back below */ }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } catch { copied = false; }
+  area.remove();
+  if (!copied) throw new Error("the browser refused to copy");
+}
+
 function FeedbackBar({ msg, onClose }) {
   if (!msg) return null;
   return (
@@ -961,7 +986,7 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment }) {
 }
 
 /* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage }) {
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage, onCopyLink }) {
   const { local, saving, patch, flush, merge } = useStoryEditor(story, onUpdate);
 
   // Saves a pending edit first, so the page loads the story as it was left here.
@@ -987,6 +1012,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             />
           </div>
           <div className="sheet-head-actions">
+            <button className="btn ghost" onClick={() => onCopyLink(story.id)} title="Copy a link to this story's page">Copy link</button>
             <button className="btn ghost sheet-open-page" onClick={openPage} title="Open as page" aria-label="Open as page">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/>
@@ -2313,6 +2339,12 @@ function storyIdFromUrl() {
   return match ? match[1] : null;
 }
 
+// The story open in the board's slideout (?story={id}), or null; only the board view has one.
+function sheetStoryIdFromUrl() {
+  if (storyIdFromUrl() || viewFromUrl() !== "board") return null;
+  return new URLSearchParams(window.location.search).get("story") || null;
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -2339,8 +2371,20 @@ function App() {
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
   const skipEpicReset = useRef(true);      // keep URL-loaded epic on initial mount + on popstate
   const initialUrlSyncDone = useRef(false);
+  const replaceUrlOnce = useRef(false);    // the next URL change corrects the current entry rather than adding one
 
   const [selectedStory, setSelectedStory] = useState(null);
+  // A slideout story named by the URL (load or Back/Forward) and not open yet: it is looked up, then opened.
+  const [pendingSheetId, setPendingSheetId] = useState(() => sheetStoryIdFromUrl());
+  // What the URL's ?story= shows: the open slideout, else the one being looked up.
+  const sheetStoryId = currentView === "board" && !currentStoryId ? (selectedStory?.id || pendingSheetId) : null;
+  const selectedStoryRef = useRef(null);
+  selectedStoryRef.current = selectedStory;
+  const pendingSheetRef = useRef(null);
+  pendingSheetRef.current = pendingSheetId;
+  const currentProjectRef = useRef(null);
+  currentProjectRef.current = currentProjectId;
+  const sheetLookup = useRef(null);        // the id of the slideout story being read from the API
   const [activeDoc, setActiveDoc] = useState(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -2380,6 +2424,8 @@ function App() {
     if (currentView !== "board") params.set("view", currentView);
     if (currentProjectId) params.set("project", currentProjectId);
     if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
+    const boardQs = params.toString();
+    if (sheetStoryId) params.set("story", sheetStoryId);
     const qs = params.toString();
     const newUrl = currentStoryId ? `/stories/${currentStoryId}` : `/${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
@@ -2387,14 +2433,24 @@ function App() {
       initialUrlSyncDone.current = true;
       return;
     }
-    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId };
-    if (!initialUrlSyncDone.current) {
+    // Only the slideout changed: opening it pushes (so Back closes it); switching to another card or closing it
+    // replaces, so cards looked at one after another do not stack up in the history.
+    const currentParams = new URLSearchParams(window.location.search);
+    const hadSheet = currentParams.has("story");
+    currentParams.delete("story");
+    const sheetOnly = !currentStoryId && window.location.pathname === "/" && currentParams.toString() === boardQs;
+    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
+    if (!initialUrlSyncDone.current || replaceUrlOnce.current) {
+      replaceUrlOnce.current = false;
       window.history.replaceState(state, "", newUrl);
       initialUrlSyncDone.current = true;
+    } else if (sheetOnly && hadSheet) {
+      // An entry pushed by opening the slideout stays marked so, so Close can still step back over it.
+      window.history.replaceState({ ...state, sheetPushed: !!sheetStoryId && !!window.history.state?.sheetPushed }, "", newUrl);
     } else {
-      window.history.pushState(state, "", newUrl);
+      window.history.pushState({ ...state, sheetPushed: sheetOnly && !!sheetStoryId }, "", newUrl);
     }
-  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId]);
+  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId, sheetStoryId]);
 
   /* Sync state <- URL on back/forward */
   useEffect(() => {
@@ -2404,8 +2460,16 @@ function App() {
       const nextEpic = params.get("epic") || null;
       const nextView = viewFromUrl();
       const nextStory = storyIdFromUrl();
+      const nextSheet = sheetStoryIdFromUrl();
       skipUrlPush.current = true;
       setCurrentStoryId(nextStory);
+      // Back from an opened slideout closes it (useStoryEditor saves a pending edit as it closes); Forward reopens it.
+      if (selectedStoryRef.current?.id !== nextSheet) {
+        setSelectedStory(null);
+        setPendingSheetId(nextSheet);
+      } else {
+        setPendingSheetId(null);
+      }
       // A story page's URL carries no board query: leave the board state alone, the page sets its project once it loads.
       if (nextStory) return;
       setCurrentProjectId(prev => {
@@ -2541,6 +2605,47 @@ function App() {
     }
     loadProjectDetail(currentProjectId);
   }, [currentProjectId, loadProjectDetail]);
+
+  /* Opens the slideout story the URL names: from the board when it is there, else read from the API (it may be in
+     another project, which the board then switches to). A story that does not exist drops ?story= with a message. */
+  useEffect(() => {
+    if (!bootstrapped || !pendingSheetId) return;
+    if (currentView !== "board" || currentStoryId) { setPendingSheetId(null); return; }
+    const id = pendingSheetId;
+    const known = items.find(item => item.id === id);
+    if (known) {
+      sheetLookup.current = null;
+      setSelectedStory(known);
+      setPendingSheetId(null);
+      return;
+    }
+    if (sheetLookup.current === id) return;
+    sheetLookup.current = id;
+    api.getWorkItem(id).then(story => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      if (story.projectId && story.projectId !== currentProjectRef.current) {
+        // Drops an answer still on its way for the project being left, so it cannot close the slideout.
+        latestDetailProjectId.current = story.projectId;
+        // The URL named a story of another project: the corrected URL replaces it, so Back does not land on it again.
+        replaceUrlOnce.current = true;
+        setCurrentProjectId(prev => {
+          if (prev !== story.projectId) skipEpicReset.current = true;
+          return story.projectId;
+        });
+        setCurrentEpicId(story.epicId || null);
+      }
+      setSelectedStory(story);
+      setPendingSheetId(null);
+    }, e => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      setPendingSheetId(null);
+      show(e.status === 404 ? "There is no story with this id; it may have been deleted." : `Couldn't open the story: ${e.message}`);
+    });
+  }, [bootstrapped, pendingSheetId, items, currentView, currentStoryId, show]);
 
   useEffect(() => {
     if (!bootstrapped || typeof window.EventSource === "undefined") return undefined;
@@ -2861,6 +2966,25 @@ function App() {
   };
   const onStoryLoaded = (story) => scopeBoard(story.projectId, story.epicId || null);
 
+  /* Board slideout (?story={id}) */
+  const openSheet = (story) => {
+    setPendingSheetId(null);
+    setSelectedStory(story);
+  };
+  // Close, the overlay and Delete: when opening the slideout added the history entry, step back over it (as browser
+  // Back does), so Back afterwards does not reopen it; otherwise (e.g. the board was loaded with ?story=) drop it.
+  const closeSheet = () => {
+    const urlSheet = new URLSearchParams(window.location.search).get("story");
+    if (selectedStory && urlSheet === selectedStory.id && window.history.state?.sheetPushed) window.history.back();
+    else setSelectedStory(null);
+  };
+  const copyStoryLink = (id) => {
+    const url = storyPageUrl(id);
+    copyToClipboard(url).then(
+      () => show("Link copied to the clipboard", "success"),
+      e => show(`Couldn't copy the link (${e.message}): ${url}`));
+  };
+
   return (
     <div className="shell">
       <Sidebar
@@ -2931,7 +3055,7 @@ function App() {
             <Board
               items={boardItems}
               projectKey={currentProject?.key}
-              onOpen={(s) => setSelectedStory(s)}
+              onOpen={openSheet}
               onMove={moveStory}
               showAging={tweaks.showAging}
             />
@@ -2946,7 +3070,7 @@ function App() {
         projects={projects}
         epics={epics}
         currentProject={currentProject}
-        onOpenStory={(s) => setSelectedStory(s)}
+        onOpenStory={openSheet}
         onQuickAdd={quickAdd}
         setProjectId={(id) => { setCurrentProjectId(id); openBoard(); }}
         setEpicId={(id) => { setCurrentEpicId(id); openBoard(); }}
@@ -2955,11 +3079,12 @@ function App() {
         story={selectedStory}
         projectKey={currentProject?.key}
         epics={epics.filter(e => !e.isArchived)}
-        onClose={() => setSelectedStory(null)}
+        onClose={closeSheet}
         onUpdate={updateStory}
         onDelete={deleteStory}
         onAddComment={addComment}
         onOpenPage={openStoryPage}
+        onCopyLink={copyStoryLink}
       />
       <DocSheet
         doc={activeDoc}
