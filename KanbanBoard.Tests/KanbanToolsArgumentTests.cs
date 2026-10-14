@@ -90,7 +90,7 @@ public sealed class KanbanToolsArgumentTests
         ["add_work_item_comment"] = (false, [new() { ["itemId"] = Id, ["body"] = "note", ["author"] = "claude", ["idempotency_key"] = "k" }]),
         ["add_issue_comment"] = (false, [new() { ["itemId"] = Id, ["author"] = "claude", ["body"] = "note", ["idempotency_key"] = "k" }]),
         ["list_work_item_comments"] = (false, [new() { ["id"] = Id, ["limit"] = 10, ["cursor"] = "c" }]),
-        ["list_changes"] = (false, [new() { ["cursor"] = "c", ["project_id"] = Id, ["limit"] = 10, ["from_start"] = false }]),
+        ["list_changes"] = (false, [new() { ["cursor"] = "c", ["project_id"] = Id, ["item_id"] = Id, ["limit"] = 10, ["from_start"] = false }]),
         ["create_work_item"] = (false,
         [
             new()
