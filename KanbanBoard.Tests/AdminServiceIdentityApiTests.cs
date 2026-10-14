@@ -874,6 +874,36 @@ public sealed class AdminServiceIdentityApiTests
             await AnswerAsync(admin, RotatePath(identity.Id, active.Id), new { expiresAtUtc = realNow.AddDays(1) }));
         listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
         Assert.Equal(0, Assert.Single(listed!).ActiveTokenCount);
+
+        // The times stored are the application's too: a revoke, then a disable, each an hour on.
+        clock.Advance(TimeSpan.FromHours(1));
+        var revokedAt = clock.Now;
+        using (var revoke = await SendAsync(admin, HttpMethod.Delete, $"/api/admin/service-identities/{identity.Id}/tokens/{active.Id}", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, revoke.StatusCode);
+        }
+
+        clock.Advance(TimeSpan.FromHours(1));
+        var lastIssuedAt = clock.Now;
+        var last = await IssueAsync(admin, identity.Id, "Last", "full");
+        clock.Advance(TimeSpan.FromHours(1));
+        var disabledAt = clock.Now;
+        using (var disable = await SendAsync(admin, HttpMethod.Post, $"/api/admin/service-identities/{identity.Id}/disable", null, withCsrfToken: true))
+        {
+            Assert.Equal(HttpStatusCode.OK, disable.StatusCode);
+        }
+
+        var stored = await api.ReadAsync(dbContext => dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync());
+        var issuedAt = realNow.AddDays(-1);
+        Assert.Equal(
+            [
+                (issued.Token.Id, issuedAt, (DateTimeOffset?)issuedAt),
+                (active.Id, issuedAt, (DateTimeOffset?)revokedAt),
+                (last.Token.Id, lastIssuedAt, (DateTimeOffset?)disabledAt)
+            ],
+            stored.OrderBy(token => token.CreatedAtUtc).ThenBy(token => token.Id != issued.Token.Id)
+                .Select(token => (token.Id, token.CreatedAtUtc, token.RevokedAtUtc)).ToList());
+        Assert.All(stored.Where(token => token.ExpiresAtUtc is not null), token => Assert.True(token.ExpiresAtUtc > token.CreatedAtUtc));
     }
 
     // In Production, as the server runs: no developer exception page answers for the endpoint.
@@ -928,6 +958,30 @@ public sealed class AdminServiceIdentityApiTests
 
         Assert.Equal((HttpStatusCode.OK, HttpStatusCode.OK), (disable.StatusCode, enable.StatusCode));
         Assert.Empty(api.Logs.Entries.Where(entry => entry.Level >= LogLevel.Error));
+    }
+
+    // A rotate may be sent with no body, so its body is optional in the API's document; an issue's body is required.
+    [Fact]
+    public async Task The_api_document_marks_the_rotate_body_optional_and_the_issue_body_required()
+    {
+        using var api = new AdminApi();
+        using var client = api.CreateSessionClient(AdminSubject);
+
+        using var response = await client.GetAsync("/openapi/v1.json");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var operations = document.RootElement.GetProperty("paths").EnumerateObject()
+            .SelectMany(path => path.Value.EnumerateObject())
+            .Where(operation => operation.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                                operation.Value.TryGetProperty("operationId", out _))
+            .Select(operation => operation.Value)
+            .ToList();
+
+        bool? Required(string operationId) =>
+            operations.Single(operation => operation.GetProperty("operationId").GetString() == operationId)
+                .GetProperty("requestBody").TryGetProperty("required", out var required) ? required.GetBoolean() : null;
+        Assert.NotEqual(true, Required("RotateServiceIdentityToken"));
+        Assert.Equal(true, Required("IssueServiceIdentityToken"));
     }
 
     private static async Task<HttpResponseMessage> SendRawAsync(HttpClient client, string path, string body)

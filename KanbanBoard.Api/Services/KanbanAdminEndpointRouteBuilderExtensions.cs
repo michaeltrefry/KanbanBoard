@@ -123,7 +123,8 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
-            await ServiceIdentityProvisioner.DisableAsync(dbContext, identityId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), cancellationToken)
+            await ServiceIdentityProvisioner.DisableAsync(
+                dbContext, identityId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken)
                 ? Results.Ok((await SummariesAsync(dbContext, identityId, timeProvider.GetUtcNow(), cancellationToken)).Single())
                 : IdentityNotFound(identityId))
         .WithName("DisableServiceIdentity");
@@ -236,9 +237,11 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             Guid tokenId,
             HttpContext httpContext,
             KanbanDbContext dbContext,
+            TimeProvider timeProvider,
             CancellationToken cancellationToken) =>
             await ServiceIdentityProvisioner.RevokeTokenAsync(
-                dbContext, identityId, tokenId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), cancellationToken)
+                dbContext, identityId, tokenId, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken),
+                timeProvider.GetUtcNow(), cancellationToken)
                 ? Results.NoContent()
                 : TokenNotFound(identityId, tokenId))
         .WithName("RevokeServiceIdentityToken");
@@ -289,7 +292,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                     tokenId),
                 statusCode: StatusCodes.Status201Created);
         })
-        .Accepts<RotatePersonalAccessTokenRequest>("application/json")
+        .Accepts<RotatePersonalAccessTokenRequest>(isOptional: true, "application/json")
         .WithName("RotateServiceIdentityToken");
 
         return endpoints;
