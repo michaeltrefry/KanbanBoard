@@ -98,7 +98,11 @@ PersonalAccessTokens__TokenPrefix=kbp
 InternalApi__SharedSecret=RANDOM_32_PLUS_CHARACTER_SHARED_SECRET
 McpAuthentication__RequirePersonalAccessToken=true
 McpAuthentication__ValidationCacheSeconds=30
+
+App__PublicBaseUrl=https://kanban.trefry.net
 ```
+
+`App__PublicBaseUrl` is the address people open the board at. Work items in API and MCP answers carry `url`, the page of the item, as `{App__PublicBaseUrl}/stories/{id}` (a trailing slash on the setting is dropped). It is configured rather than taken from the request, because behind the proxy, and for the MCP server calling the API on the internal network, the request names a host nobody can open. Unset, `url` is `null`. A value that is not an absolute `http` or `https` URL stops the API at startup.
 
 For `dotnet run`, export the same variables in your shell before starting the API because ASP.NET Core does not read `.env` files by itself.
 
@@ -284,6 +288,7 @@ Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
 - `KANBAN_ADMIN_SUBJECTS`: the admins of the Admin page (service identities and their tokens), written to `Auth__AdminSubjects`. Variable or secret. See [Admins](#admins). Unset or empty: nobody is an admin and the page is not shown.
+- `KANBAN_PUBLIC_BASE_URL`: the public address of the board, written to `App__PublicBaseUrl`; story `url` = `{this}/stories/{id}`. Variable. Defaults to `https://kanban.trefry.net` when unset or empty. Must be an absolute `http`/`https` URL without a query or fragment; the deploy fails before touching the server otherwise.
 - `KANBAN_DB_MIGRATE_ON_STARTUP`: `false` stops the API from applying EF Core migrations on startup. Defaults to `true` if omitted. Only the lowercase values `true` and `false` are accepted; the deploy fails before touching the server on any other value. Variable.
 - `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.

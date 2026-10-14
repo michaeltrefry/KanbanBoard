@@ -1,6 +1,8 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -15,8 +17,9 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            await HandleAsync(itemId, request.BlockedByItemId, dbContext, changeNotifier,
+            await HandleAsync(itemId, request.BlockedByItemId, dbContext, changeNotifier, appOptions,
                 WorkItemDependencies.AddAsync(
                     dbContext, itemId, request.BlockedByItemId,
                     await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
@@ -30,8 +33,9 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            await HandleAsync(itemId, blockedByItemId, dbContext, changeNotifier,
+            await HandleAsync(itemId, blockedByItemId, dbContext, changeNotifier, appOptions,
                 WorkItemDependencies.RemoveAsync(
                     dbContext, itemId, blockedByItemId,
                     await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
@@ -46,6 +50,7 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
         Guid blockedByItemId,
         KanbanDbContext dbContext,
         BoardChangeNotifier changeNotifier,
+        IOptions<AppOptions> appOptions,
         Task<WorkItemDependencyOutcome> write,
         CancellationToken cancellationToken)
     {
@@ -81,6 +86,7 @@ public static class KanbanDependencyEndpointRouteBuilderExtensions
         return Results.Ok(WorkItemDtoMapper.ToDto(
             item,
             DateTimeOffset.UtcNow,
+            appOptions.Value,
             await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
             await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
     }

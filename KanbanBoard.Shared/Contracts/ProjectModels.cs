@@ -162,6 +162,13 @@ public sealed record WorkItemDto(
     public IReadOnlyList<string> LabelList { get; init; } = [];
 
     /// <summary>
+    /// The page of the item on the board, made from the configured public address of the board. Always written, also
+    /// as null: null when the server has no public address configured.
+    /// </summary>
+    [JsonPropertyName("url"), JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Url { get; init; }
+
+    /// <summary>
     /// Only on the answer to adding a comment: the id of the comment that was added, or of the earlier comment the
     /// idempotency key already belonged to. It is one of <see cref="Comments"/>.
     /// </summary>
@@ -236,7 +243,12 @@ public sealed record WorkItemSearchResultDto(
     WorkItemStatus Status,
     // Always written, also as null.
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] int? Estimate = null,
-    [property: JsonPropertyName("version")] long Version = 0);
+    [property: JsonPropertyName("version")] long Version = 0)
+{
+    /// <summary>The page of the item on the board, as on <see cref="WorkItemDto.Url"/>. Always written, also as null.</summary>
+    [JsonPropertyName("url"), JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public string? Url { get; init; }
+}
 
 public sealed record CurrentUserDto(
     Guid Id,

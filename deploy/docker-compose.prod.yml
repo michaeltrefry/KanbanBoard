@@ -27,6 +27,7 @@ services:
       PersonalAccessTokens__EncryptionKey: ${PersonalAccessTokens__EncryptionKey:-}
       PersonalAccessTokens__TokenPrefix: ${PersonalAccessTokens__TokenPrefix:-kbp}
       InternalApi__SharedSecret: ${InternalApi__SharedSecret:-}
+      App__PublicBaseUrl: ${App__PublicBaseUrl:-}
     networks:
       - default
       - trefry-network

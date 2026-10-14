@@ -1,6 +1,8 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -19,6 +21,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
         {
             if (!WorkItemLinks.TryNormalizeKind(request.Kind, out var kind))
@@ -38,7 +41,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
                 itemId,
                 await WorkItemLinks.AddAsync(
                     dbContext, itemId, kind, url, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
-                dbContext, changeNotifier, timeProvider, cancellationToken);
+                dbContext, changeNotifier, timeProvider, appOptions, cancellationToken);
         })
         .WithName("AddWorkItemLink");
 
@@ -52,6 +55,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
         {
             string? normalizedKind = null;
@@ -76,7 +80,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
                 await WorkItemLinks.RemoveAsync(
                     dbContext, itemId, linkId, normalizedKind, linkId is null ? normalizedUrl : null,
                     await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
-                dbContext, changeNotifier, timeProvider, cancellationToken);
+                dbContext, changeNotifier, timeProvider, appOptions, cancellationToken);
         })
         .WithName("RemoveWorkItemLink");
 
@@ -89,6 +93,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
         KanbanDbContext dbContext,
         BoardChangeNotifier changeNotifier,
         TimeProvider timeProvider,
+        IOptions<AppOptions> appOptions,
         CancellationToken cancellationToken)
     {
         var item = outcome == WorkItemLinkOutcome.NotFound
@@ -113,6 +118,7 @@ public static class KanbanLinkEndpointRouteBuilderExtensions
         return Results.Ok(WorkItemDtoMapper.ToDto(
             item,
             timeProvider.GetUtcNow(),
+            appOptions.Value,
             await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
             await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
     }

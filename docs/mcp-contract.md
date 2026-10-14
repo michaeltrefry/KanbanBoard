@@ -265,7 +265,7 @@ The server lists 37 tools: 14 read tools and 23 write tools.
 
 #### `get_work_item`
 
-**Read tool.** Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version.
+**Read tool.** Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version; url is the page of the item on the board, null when the server has no public address configured.
 
 | Argument | Type | Required | Default | Allowed values | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -604,6 +604,7 @@ Every tool that returns a work item returns this shape.
 | `links` | array of [Link](#link) | always | Oldest first. `[]` when there are none. |
 | `version` | integer | always | The write counter. See [`version`](#version-and-expected_version). |
 | `label_list` | array of string | always | The labels of `labels` as a list, in the same order. `[]` when there are none. |
+| `url` | string | always, `null` when the server has no public address configured | The page of the item on the board: `{PublicBaseUrl}/stories/{id}`, from the API's `App:PublicBaseUrl` setting, never from the request. |
 | `comment_id` | GUID | left out when the answer is not that of `add_work_item_comment` or `add_issue_comment` | The id of the comment that was added, or of the earlier comment of a repeated `idempotency_key`. |
 | `comment_created` | boolean | left out when the answer is not that of `add_work_item_comment` or `add_issue_comment` | `false` for a repeated `idempotency_key`. |
 | `created` | boolean | left out when the answer is not that of `create_work_item` or `create_epic_work_item` | `false` for a repeated `idempotency_key`. |
@@ -658,6 +659,7 @@ An entry of the answer of `search_work_items`.
 | `status` | string | always | |
 | `estimate` | integer | always, `null` when not set | |
 | `version` | integer | always | |
+| `url` | string | always, `null` when the server has no public address configured | The page of the item, as `url` of a [work item](#work-item). |
 
 ### Work item page
 
@@ -803,7 +805,7 @@ One legacy exception, for callers from before `clear`: `update_work_item` still 
 
 The server leaves a field without a value out of the answer, except the fields it promises in every answer. The [shapes](#shapes) say which is which for every field; in short:
 
-- **Always present, `null` when empty:** `estimate`, `claimant`, `claimant_id`, `claim_marker`, `claim_expires_at_utc` on a work item; `estimate` on a search result; `repository_url` and `default_branch` on a project and on a board; `old` and `new` of a change.
+- **Always present, `null` when empty:** `estimate`, `claimant`, `claimant_id`, `claim_marker`, `claim_expires_at_utc`, `url` on a work item; `estimate` and `url` on a search result; `repository_url` and `default_branch` on a project and on a board; `old` and `new` of a change.
 - **Left out when empty:** `description` (project, board, epic, work item), `epicId`, `epic` and `labels` of a work item, `author_id` of a comment, `actor` of a change entry, `next_cursor` of a work item page and of a comment page, and the fields that belong to one tool's answer (`created`, `comment_id`, `comment_created`).
 - **Always present and never `null`:** everything else, including the arrays (`comments`, `blockers`, `dependents`, `links`, `label_list`, `items`), which are `[]` when empty, and `next_cursor` of `list_changes`.
 

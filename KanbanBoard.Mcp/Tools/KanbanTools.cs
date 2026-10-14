@@ -375,7 +375,7 @@ public sealed class KanbanTools(
         return await response.Content.ReadFromJsonAsync<TResult>(JsonOptions);
     }
 
-    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version.")]
+    [McpServerTool, Description("Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version; url is the page of the item on the board, null when the server has no public address configured.")]
     public async Task<WorkItemDto> GetWorkItem(
         [Description("Work item id")] Guid itemId)
     {

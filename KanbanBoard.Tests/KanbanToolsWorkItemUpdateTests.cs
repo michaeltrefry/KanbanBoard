@@ -12,14 +12,14 @@ public sealed class KanbanToolsWorkItemUpdateTests
 {
     // An item without an estimate, as the API sends it.
     private const string ItemJson =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"],"url":null}""";
 
-    // ItemJson as the tools return it: null properties are left out, except estimate and the four claim fields.
+    // ItemJson as the tools return it: null properties are left out, except estimate, the four claim fields and url.
     private const string ItemText =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"api,two words","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":7,"label_list":["api","two words"],"url":null}""";
 
     private const string SearchJson =
-        """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":7},{"id":"33333333-3333-3333-3333-333333333333","projectId":"22222222-2222-2222-2222-222222222222","title":"Other","type":"Task","status":"Done","estimate":5,"version":1}]""";
+        """[{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":7,"url":null},{"id":"33333333-3333-3333-3333-333333333333","projectId":"22222222-2222-2222-2222-222222222222","title":"Other","type":"Task","status":"Done","estimate":5,"version":1,"url":null}]""";
 
     private static readonly Guid ItemId = Guid.Parse("11111111-1111-1111-1111-111111111111");
     private static readonly Guid ProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
