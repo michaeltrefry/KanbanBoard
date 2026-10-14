@@ -6,6 +6,7 @@ using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Scalar.AspNetCore;
 using System.Text.Json.Serialization;
 
@@ -22,6 +23,9 @@ var internalApiOptions = builder.Configuration
 var databaseOptions = builder.Configuration
     .GetSection(DatabaseOptions.SectionName)
     .Get<DatabaseOptions>() ?? new DatabaseOptions();
+var startupAppOptions = builder.Configuration
+    .GetSection(AppOptions.SectionName)
+    .Get<AppOptions>() ?? new AppOptions();
 var connectionString = builder.Configuration.GetConnectionString("Kanban");
 
 var authConfigurationErrors = authOptions.Validate();
@@ -32,6 +36,7 @@ var configurationErrors = authConfigurationErrors
     .Concat(patConfigurationErrors)
     .Concat(internalApiConfigurationErrors)
     .Concat(databaseConfigurationErrors)
+    .Concat(startupAppOptions.Validate())
     .ToList();
 if (configurationErrors.Count > 0)
 {
@@ -48,6 +53,7 @@ builder.Services.Configure<KanbanAuthOptions>(builder.Configuration.GetSection(K
 builder.Services.Configure<PersonalAccessTokenOptions>(builder.Configuration.GetSection(PersonalAccessTokenOptions.SectionName));
 builder.Services.Configure<InternalApiOptions>(builder.Configuration.GetSection(InternalApiOptions.SectionName));
 builder.Services.Configure<DatabaseOptions>(builder.Configuration.GetSection(DatabaseOptions.SectionName));
+builder.Services.Configure<AppOptions>(builder.Configuration.GetSection(AppOptions.SectionName));
 builder.Services.AddKanbanAuthentication(authOptions, builder.Environment);
 builder.Services.AddScoped<IPersonalAccessTokenService, PersonalAccessTokenService>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -172,7 +178,7 @@ app.MapGet("/api/changes", async (HttpContext httpContext, BoardChangeNotifier c
     }
 });
 
-app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStatus? status, bool? includeArchivedEpics, KanbanDbContext dbContext, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
 {
     var includeArchivedEpicItems = includeArchivedEpics ?? false;
     var project = await dbContext.Projects
@@ -187,6 +193,7 @@ app.MapGet("/api/projects/{projectId:guid}", async (Guid projectId, WorkItemStat
         ? Results.NotFound()
         : Results.Ok(ToBoardDto(
             project,
+            appOptions.Value,
             await WorkItemDependencies.LoadAsync(dbContext, dbContext.WorkItems.Where(item => item.ProjectId == projectId), cancellationToken),
             await WorkItemLinks.LoadAsync(dbContext, dbContext.WorkItems.Where(item => item.ProjectId == projectId), cancellationToken),
             status,
@@ -265,14 +272,14 @@ app.MapGet("/api/epic-documents/{documentId:guid}", async (Guid documentId, Kanb
 })
 .WithName("GetEpicDocument");
 
-app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limit, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+app.MapGet("/api/items/search", async (string? query, Guid? projectId, int? limit, KanbanDbContext dbContext, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
 {
     if (!WorkItemSearch.TryNormalizeTerms(query, out _))
     {
         return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "Argument 'query' is required.");
     }
 
-    return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, cancellationToken));
+    return Results.Ok(await WorkItemSearch.SearchAsync(dbContext, query, projectId, limit, appOptions.Value, cancellationToken));
 })
 .WithName("SearchWorkItems");
 
@@ -534,7 +541,7 @@ app.MapPut("/api/epic-documents/{documentId:guid}", async (Guid documentId, Upda
 
 // With an idempotency key that the caller already used in the project, nothing is created, nothing is recorded in the
 // change feed and that item is returned as it is now, with "created": false.
-app.MapPost("/api/items", async (CreateWorkItemRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+app.MapPost("/api/items", async (CreateWorkItemRequest request, HttpContext httpContext, KanbanDbContext dbContext, BoardChangeNotifier changeNotifier, TimeProvider timeProvider, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
 {
     if (!WorkItemWrites.TryNew(
             request.ProjectId, request.EpicId, request.Title, request.Description, request.Type, request.Status, request.Priority,
@@ -574,6 +581,7 @@ app.MapPost("/api/items", async (CreateWorkItemRequest request, HttpContext http
     var dto = WorkItemDtoMapper.ToDto(
         stored,
         now,
+        appOptions.Value,
         await WorkItemDependencies.LoadAsync(dbContext, stored.Id, cancellationToken),
         await WorkItemLinks.LoadAsync(dbContext, stored.Id, cancellationToken)) with { Created = created };
     if (!created)
@@ -633,7 +641,7 @@ app.MapDelete("/api/items/{itemId:guid}", async (Guid itemId, HttpContext httpCo
 
 app.Run();
 
-static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup dependencies, ILookup<Guid, WorkItemLinkDto> links, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
+static ProjectBoardDto ToBoardDto(Project project, AppOptions appOptions, WorkItemDependencyLookup dependencies, ILookup<Guid, WorkItemLinkDto> links, WorkItemStatus? status = null, bool includeArchivedEpics = false) =>
     new(
         project.Id,
         project.Name,
@@ -647,7 +655,7 @@ static ProjectBoardDto ToBoardDto(Project project, WorkItemDependencyLookup depe
             .OrderBy(item => item.Status)
             .ThenBy(item => item.Order)
             .ThenBy(item => item.CreatedAtUtc)
-            .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, dependencies, links))
+            .Select(item => WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, appOptions, dependencies, links))
             .ToList(),
         project.RepositoryUrl,
         project.DefaultBranch);

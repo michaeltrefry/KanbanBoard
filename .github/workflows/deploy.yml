@@ -221,6 +221,7 @@ jobs:
           KANBAN_MARIADB_CONNECTION: ${{ secrets.KANBAN_MARIADB_CONNECTION }}
           KANBAN_DB_MIGRATE_ON_STARTUP: ${{ vars.KANBAN_DB_MIGRATE_ON_STARTUP }}
           KANBAN_ADMIN_SUBJECTS: ${{ vars.KANBAN_ADMIN_SUBJECTS || secrets.KANBAN_ADMIN_SUBJECTS }}
+          KANBAN_PUBLIC_BASE_URL: ${{ vars.KANBAN_PUBLIC_BASE_URL || 'https://kanban.trefry.net' }}
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME || secrets.GHCR_USERNAME }}
         run: |
           write_env() {
@@ -254,6 +255,7 @@ jobs:
           write_env InternalApi__SharedSecret "${KANBAN_INTERNAL_API_SHARED_SECRET}"
           write_env McpAuthentication__RequirePersonalAccessToken true
           write_env McpAuthentication__ValidationCacheSeconds 30
+          write_env App__PublicBaseUrl "${KANBAN_PUBLIC_BASE_URL}"
           write_env GHCR_USERNAME "${GHCR_USERNAME}"
 
       - name: Copy deployment assets

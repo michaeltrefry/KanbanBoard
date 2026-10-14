@@ -347,9 +347,9 @@ public sealed class WorkItemClaimApiTests
             ClaimExpiresAtUtc = now.AddSeconds(1)
         };
 
-        var live = WorkItemDtoMapper.ToDto(item, now);
-        var expired = WorkItemDtoMapper.ToDto(item, now.AddSeconds(1));
-        var unclaimed = WorkItemDtoMapper.ToDto(new WorkItem { Title = "Free" }, now);
+        var live = WorkItemDtoMapper.ToDto(item, now, new AppOptions());
+        var expired = WorkItemDtoMapper.ToDto(item, now.AddSeconds(1), new AppOptions());
+        var unclaimed = WorkItemDtoMapper.ToDto(new WorkItem { Title = "Free" }, now, new AppOptions());
 
         Assert.Equal(("Factory", claimantId, "run-1", now.AddSeconds(1)),
             (live.Claimant, live.ClaimantId, live.ClaimMarker, live.ClaimExpiresAtUtc)!);

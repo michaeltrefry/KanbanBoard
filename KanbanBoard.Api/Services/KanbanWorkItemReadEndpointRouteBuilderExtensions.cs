@@ -1,7 +1,9 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -9,7 +11,7 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
 {
     public static IEndpointRouteBuilder MapKanbanWorkItemReadEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        endpoints.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? type, WorkItemStatus? status, bool? includeArchivedEpics, bool? unblockedOnly, string? label, string? updatedSince, string? claimState, int? limit, string? cursor, bool? includeComments, KanbanDbContext dbContext, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        endpoints.MapGet("/api/items", async (Guid? projectId, Guid? epicId, WorkItemType? type, WorkItemStatus? status, bool? includeArchivedEpics, bool? unblockedOnly, string? label, string? updatedSince, string? claimState, int? limit, string? cursor, bool? includeComments, KanbanDbContext dbContext, TimeProvider timeProvider, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
         {
             // Error messages name the arguments as the MCP tool spells them.
             var normalizedLabel = label?.Trim();
@@ -124,7 +126,7 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                     dbContext, query.Where(item => item.CreatedAtUtc <= lastCreatedAtUtc), cancellationToken);
 
                 return Results.Ok(new WorkItemPageDto(
-                    page.Select(item => WorkItemDtoMapper.ToDto(item, now, pageDependencies, pageLinks)).ToList(),
+                    page.Select(item => WorkItemDtoMapper.ToDto(item, now, appOptions.Value, pageDependencies, pageLinks)).ToList(),
                     rows.Count > pageSize ? WorkItemCursor.After(page[^1]).Encode(WorkItemCursor.WorkItems) : null));
             }
 
@@ -139,13 +141,13 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 .OrderBy(item => item.Status)
                 .ThenBy(item => item.Order)
                 .ThenBy(item => item.CreatedAtUtc)
-                .Select(item => WorkItemDtoMapper.ToDto(item, now, dependencies, links))
+                .Select(item => WorkItemDtoMapper.ToDto(item, now, appOptions.Value, dependencies, links))
                 .ToList());
         })
         .WithName("ListWorkItems");
 
         // Every item that carries the URL, whatever its status, project or epic, oldest first.
-        endpoints.MapGet("/api/items/by-link", async (string? url, KanbanDbContext dbContext, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+        endpoints.MapGet("/api/items/by-link", async (string? url, KanbanDbContext dbContext, TimeProvider timeProvider, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
         {
             var normalizedUrl = url?.Trim();
             if (string.IsNullOrEmpty(normalizedUrl))
@@ -168,11 +170,11 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
             var links = await WorkItemLinks.LoadAsync(dbContext, query, cancellationToken);
             var now = timeProvider.GetUtcNow();
 
-            return Results.Ok(items.Select(item => WorkItemDtoMapper.ToDto(item, now, dependencies, links)).ToList());
+            return Results.Ok(items.Select(item => WorkItemDtoMapper.ToDto(item, now, appOptions.Value, dependencies, links)).ToList());
         })
         .WithName("FindWorkItemsByLink");
 
-        endpoints.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, CancellationToken cancellationToken) =>
+        endpoints.MapGet("/api/items/{itemId:guid}", async (Guid itemId, KanbanDbContext dbContext, IOptions<AppOptions> appOptions, CancellationToken cancellationToken) =>
         {
             var item = await dbContext.WorkItems
                 .AsNoTracking()
@@ -185,6 +187,7 @@ public static class KanbanWorkItemReadEndpointRouteBuilderExtensions
                 : Results.Ok(WorkItemDtoMapper.ToDto(
                     item,
                     DateTimeOffset.UtcNow,
+                    appOptions.Value,
                     await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
                     await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
         })

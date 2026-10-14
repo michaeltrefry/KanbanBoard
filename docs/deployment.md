@@ -98,7 +98,11 @@ PersonalAccessTokens__TokenPrefix=kbp
 InternalApi__SharedSecret=RANDOM_32_PLUS_CHARACTER_SHARED_SECRET
 McpAuthentication__RequirePersonalAccessToken=true
 McpAuthentication__ValidationCacheSeconds=30
+
+App__PublicBaseUrl=https://kanban.trefry.net
 ```
+
+`App__PublicBaseUrl` is the address people open the board at. Work items in API and MCP answers carry `url`, the page of the item, as `{App__PublicBaseUrl}/stories/{id}` (a trailing slash on the setting is dropped). It is configured rather than taken from the request, because behind the proxy, and for the MCP server calling the API on the internal network, the request names a host nobody can open. Unset, `url` is `null`. A value that is not an absolute `http` or `https` URL stops the API at startup.
 
 For `dotnet run`, export the same variables in your shell before starting the API because ASP.NET Core does not read `.env` files by itself.
 

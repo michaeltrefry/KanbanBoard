@@ -296,6 +296,9 @@ public sealed class ProgramDependencyWiringTests
             set => saveFailure.ChangeLogArmed = value;
         }
 
+        /// <summary>The application's App:PublicBaseUrl; left unset when null.</summary>
+        public string? PublicBaseUrl { get; init; }
+
         /// <summary>A context on the application's database, for a test to look at what is stored.</summary>
         public KanbanDbContext OpenDatabase() =>
             new(new DbContextOptionsBuilder<KanbanDbContext>().UseSqlite($"Data Source={databasePath};Pooling=False").Options);
@@ -343,6 +346,11 @@ public sealed class ProgramDependencyWiringTests
             builder.UseSetting("Database:MigrateOnStartup", "false");
             builder.UseSetting("Auth:Enabled", "false");
             builder.UseSetting("InternalApi:SharedSecret", InternalSecret);
+            if (PublicBaseUrl is not null)
+            {
+                builder.UseSetting("App:PublicBaseUrl", PublicBaseUrl);
+            }
+
             builder.ConfigureTestServices(services =>
             {
                 foreach (var registration in services

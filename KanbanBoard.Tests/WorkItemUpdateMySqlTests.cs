@@ -174,7 +174,7 @@ public sealed class WorkItemUpdateMySqlTests
         var database = new FakeDatabase(lockResult: 1);
         await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
 
-        await WorkItemSearch.SearchAsync(dbContext, "needle", null, null, CancellationToken.None);
+        await WorkItemSearch.SearchAsync(dbContext, "needle", null, null, new AppOptions(), CancellationToken.None);
 
         Assert.StartsWith(
             "SELECT `w`.`Id`, `w`.`ProjectId`, `w`.`Title`, `w`.`Type`, `w`.`Status`, `w`.`Estimate`, `w`.`Version`\nFROM `WorkItems` AS `w`",

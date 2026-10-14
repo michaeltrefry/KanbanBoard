@@ -1,3 +1,4 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 
@@ -7,10 +8,11 @@ public static class WorkItemDtoMapper
 {
     // A claim past its expiry is reported as no claim, so readers never have to compare clocks with the server.
     // Pass the lookups from WorkItemDependencies.LoadAsync and WorkItemLinks.LoadAsync; without them the item is
-    // reported with no dependencies and no links.
+    // reported with no dependencies and no links. The url comes from the configured public address, never the request.
     public static WorkItemDto ToDto(
         WorkItem item,
         DateTimeOffset now,
+        AppOptions app,
         WorkItemDependencyLookup? dependencies = null,
         ILookup<Guid, WorkItemLinkDto>? links = null)
     {
@@ -44,7 +46,8 @@ public static class WorkItemDtoMapper
             LabelList = WorkItemWrites.SplitLabels(item.Labels),
             Blockers = dependencies?.Blockers[item.Id].ToList() ?? [],
             Dependents = dependencies?.Dependents[item.Id].ToList() ?? [],
-            Links = links?[item.Id].ToList() ?? []
+            Links = links?[item.Id].ToList() ?? [],
+            Url = app.StoryUrl(item.Id)
         };
     }
 

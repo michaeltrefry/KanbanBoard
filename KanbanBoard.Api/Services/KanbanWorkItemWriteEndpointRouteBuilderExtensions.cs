@@ -1,6 +1,8 @@
 using System.Text.Json;
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Shared.Contracts;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -17,8 +19,9 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            UpdateAsync(itemId, payload, strict: false, httpContext, dbContext, changeNotifier, timeProvider, cancellationToken))
+            UpdateAsync(itemId, payload, strict: false, httpContext, dbContext, changeNotifier, timeProvider, appOptions, cancellationToken))
         .WithName("UpdateWorkItem");
 
         // The partial update: a field that is present is written, null clears it, an absent field is left alone.
@@ -31,8 +34,9 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            UpdateAsync(itemId, payload, strict: true, httpContext, dbContext, changeNotifier, timeProvider, cancellationToken))
+            UpdateAsync(itemId, payload, strict: true, httpContext, dbContext, changeNotifier, timeProvider, appOptions, cancellationToken))
         .WithName("PatchWorkItem");
 
         endpoints.MapPost("/api/items/{itemId:guid}/move", async (
@@ -42,13 +46,14 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
             await AnswerAsync(
                 itemId,
                 await WorkItemWrites.MoveAsync(
                     dbContext, itemId, request.Status, request.Order, request.ExpectedVersion,
                     await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
-                dbContext, changeNotifier, timeProvider, cancellationToken))
+                dbContext, changeNotifier, timeProvider, appOptions, cancellationToken))
         .WithName("MoveWorkItem");
 
         return endpoints;
@@ -62,6 +67,7 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         KanbanDbContext dbContext,
         BoardChangeNotifier changeNotifier,
         TimeProvider timeProvider,
+        IOptions<AppOptions> appOptions,
         CancellationToken cancellationToken)
     {
         if (!UpdateWorkItemPatch.TryParse(payload, strict, out var patch, out var parseError))
@@ -78,7 +84,7 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
             itemId,
             await WorkItemWrites.UpdateAsync(
                 dbContext, itemId, patch!, await ChangeActor.ResolveAsync(httpContext, dbContext, cancellationToken), timeProvider.GetUtcNow(), cancellationToken),
-            dbContext, changeNotifier, timeProvider, cancellationToken);
+            dbContext, changeNotifier, timeProvider, appOptions, cancellationToken);
     }
 
     private static async Task<IResult> AnswerAsync(
@@ -87,6 +93,7 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         KanbanDbContext dbContext,
         BoardChangeNotifier changeNotifier,
         TimeProvider timeProvider,
+        IOptions<AppOptions> appOptions,
         CancellationToken cancellationToken)
     {
         switch (result.Outcome)
@@ -103,6 +110,7 @@ public static class KanbanWorkItemWriteEndpointRouteBuilderExtensions
         return Results.Ok(WorkItemDtoMapper.ToDto(
             result.Item!,
             timeProvider.GetUtcNow(),
+            appOptions.Value,
             await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
             await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)));
     }

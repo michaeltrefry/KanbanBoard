@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
@@ -434,12 +435,12 @@ public sealed class WorkItemUpdateApiTests
         var item = new WorkItem { Title = "Old", Labels = "api, Backend ,two words,,100%" };
         var none = new WorkItem { Title = "None", Labels = null };
 
-        var dto = WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
+        var dto = WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, new AppOptions());
 
         // The string exactly as stored, and its labels.
         Assert.Equal("api, Backend ,two words,,100%", dto.Labels);
         Assert.Equal(["api", "Backend", "two words", "100%"], dto.LabelList);
-        Assert.Empty(WorkItemDtoMapper.ToDto(none, DateTimeOffset.UtcNow).LabelList);
+        Assert.Empty(WorkItemDtoMapper.ToDto(none, DateTimeOffset.UtcNow, new AppOptions()).LabelList);
     }
 
     [Fact]
