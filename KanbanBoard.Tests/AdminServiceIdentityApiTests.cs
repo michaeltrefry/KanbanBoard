@@ -930,6 +930,30 @@ public sealed class AdminServiceIdentityApiTests
         Assert.Empty(api.Logs.Entries.Where(entry => entry.Level >= LogLevel.Error));
     }
 
+    // A rotate may be sent with no body, so its body is optional in the API's document; an issue's body is required.
+    [Fact]
+    public async Task The_api_document_marks_the_rotate_body_optional_and_the_issue_body_required()
+    {
+        using var api = new AdminApi();
+        using var client = api.CreateSessionClient(AdminSubject);
+
+        using var response = await client.GetAsync("/openapi/v1.json");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var document = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var operations = document.RootElement.GetProperty("paths").EnumerateObject()
+            .SelectMany(path => path.Value.EnumerateObject())
+            .Where(operation => operation.Value.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                                operation.Value.TryGetProperty("operationId", out _))
+            .Select(operation => operation.Value)
+            .ToList();
+
+        bool? Required(string operationId) =>
+            operations.Single(operation => operation.GetProperty("operationId").GetString() == operationId)
+                .GetProperty("requestBody").TryGetProperty("required", out var required) ? required.GetBoolean() : null;
+        Assert.NotEqual(true, Required("RotateServiceIdentityToken"));
+        Assert.Equal(true, Required("IssueServiceIdentityToken"));
+    }
+
     private static async Task<HttpResponseMessage> SendRawAsync(HttpClient client, string path, string body)
     {
         var antiforgery = await client.GetFromJsonAsync<AntiforgeryToken>("/api/auth/antiforgery");

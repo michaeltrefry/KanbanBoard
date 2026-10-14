@@ -289,7 +289,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                     tokenId),
                 statusCode: StatusCodes.Status201Created);
         })
-        .Accepts<RotatePersonalAccessTokenRequest>("application/json")
+        .Accepts<RotatePersonalAccessTokenRequest>(isOptional: true, "application/json")
         .WithName("RotateServiceIdentityToken");
 
         return endpoints;
