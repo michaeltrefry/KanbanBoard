@@ -14,10 +14,12 @@ public static class KanbanChangeFeedEndpointRouteBuilderExtensions
         // Without a cursor the answer holds no entry and the cursor of the newest one: the place to start
         // following from. With fromStart it starts at the oldest entry instead. The answer always carries a
         // cursor, which is the position after the entries it returned. An unknown project is a filter that matches
-        // nothing, not an error: the feed keeps the entries of projects that were deleted.
+        // nothing, not an error: the feed keeps the entries of projects that were deleted. So is an unknown item; but
+        // an item together with a project that does not own it is refused rather than answered with nothing.
         endpoints.MapGet("/api/items/changes", async (
             string? cursor,
             Guid? projectId,
+            Guid? itemId,
             int? limit,
             bool? fromStart,
             KanbanDbContext dbContext,
@@ -39,6 +41,23 @@ public static class KanbanChangeFeedEndpointRouteBuilderExtensions
                 return InvalidArgument("Argument 'cursor' is not a cursor returned by this tool. Pass next_cursor from the previous call unchanged.");
             }
 
+            if (itemId is not null && projectId is not null)
+            {
+                // An item never changes project. A deleted item is owned by the project its entries name.
+                var owner = await dbContext.WorkItems.AsNoTracking()
+                                .Where(item => item.Id == itemId)
+                                .Select(item => (Guid?)item.ProjectId)
+                                .FirstOrDefaultAsync(cancellationToken)
+                            ?? await dbContext.WorkItemChanges.AsNoTracking()
+                                .Where(change => change.WorkItemId == itemId)
+                                .Select(change => (Guid?)change.ProjectId)
+                                .FirstOrDefaultAsync(cancellationToken);
+                if (owner is not null && owner != projectId)
+                {
+                    return InvalidArgument("Argument 'item_id' names a work item of another project than 'project_id'. Pass the project of the item, or leave project_id out.");
+                }
+            }
+
             if (cursor is null && fromStart != true)
             {
                 // The newest entry of the whole feed, whatever the project: a cursor is a position in the feed.
@@ -47,7 +66,12 @@ public static class KanbanChangeFeedEndpointRouteBuilderExtensions
             }
 
             var query = dbContext.WorkItemChanges.AsNoTracking().Where(change => change.Sequence > after);
-            if (projectId is not null)
+            if (itemId is not null)
+            {
+                // IX_WorkItemChanges_WorkItemId_Sequence. The project, when passed, owns the item: checked above.
+                query = query.Where(change => change.WorkItemId == itemId);
+            }
+            else if (projectId is not null)
             {
                 query = query.Where(change => change.ProjectId == projectId);
             }

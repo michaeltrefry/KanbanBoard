@@ -167,6 +167,17 @@ const api = {
     fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
     fetchJson(`/api/items/${id}`, { method: "DELETE" }),
+  // The whole history of one item, oldest first: the feed read from its start, page after page, filtered to the item.
+  listItemHistory: async (id) => {
+    const entries = [];
+    let query = "fromStart=true";
+    for (;;) {
+      const page = await fetchJson(`/api/items/changes?itemId=${id}&limit=200&${query}`);
+      entries.push(...page.items);
+      if (page.items.length < 200) return entries;
+      query = `cursor=${encodeURIComponent(page.next_cursor)}`;
+    }
+  },
 
   getCurrentUser: () =>
     fetchJson(`/api/me`),
@@ -935,13 +946,139 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
 }
 
 /* ============ Story page (/stories/{id}) ============ */
-function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment, onOpenBoard }) {
+// A link to another story's page. A plain click opens it here; a modified click is left to the browser (new tab).
+function StoryRef({ item, onOpen }) {
+  return (
+    <a className="story-ref" href={`/stories/${item.id}`}
+       onClick={e => {
+         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+         e.preventDefault();
+         onOpen(item.id);
+       }}>
+      <span className="story-ref-title">{item.title}</span>
+      <span className="story-ref-status">{STATUS_LABEL[item.status] || item.status}</span>
+    </a>
+  );
+}
+
+// The claim (read-only), the external links and the dependencies in both directions.
+function StoryRelations({ local, onOpenStory }) {
+  const links = local.links || [];
+  const blockers = local.blockers || [];
+  const dependents = local.dependents || [];
+  return (
+    <div className="story-relations">
+      <div className="sheet-section-title">Claim</div>
+      <div className="story-claim">
+        {local.claimant
+          ? <>Claimed by <strong>{local.claimant}</strong> · expires {formatDateTime(local.claim_expires_at_utc)}</>
+          : <span className="story-none">Not claimed</span>}
+      </div>
+
+      <div className="sheet-section-title">Links</div>
+      {links.length === 0 ? <div className="story-none">No links</div> : (
+        <ul className="story-list">
+          {links.map(link => (
+            <li key={link.id}>
+              <span className="story-link-kind">{link.kind}</span>
+              <a href={link.url} target="_blank" rel="noopener noreferrer">{link.url}</a>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="sheet-section-title">Blocked by</div>
+      {blockers.length === 0 ? <div className="story-none">Nothing</div> : (
+        <ul className="story-list">
+          {blockers.map(item => <li key={item.id}><StoryRef item={item} onOpen={onOpenStory}/></li>)}
+        </ul>
+      )}
+
+      <div className="sheet-section-title">Blocks</div>
+      {dependents.length === 0 ? <div className="story-none">Nothing</div> : (
+        <ul className="story-list">
+          {dependents.map(item => <li key={item.id}><StoryRef item={item} onOpen={onOpenStory}/></li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const CHANGE_KIND_LABEL = {
+  item_created: "Created", item_updated: "Updated", item_moved: "Moved", item_deleted: "Deleted",
+  claimed: "Claimed", claim_renewed: "Claim renewed", claim_released: "Claim released",
+  comment_added: "Comment added", link_added: "Link added", link_removed: "Link removed",
+  dependency_added: "Blocker added", dependency_removed: "Blocker removed",
+};
+
+// One value of a change entry as short text: a comment by its author, a link by its URL, a blocker by its title
+// when the story still lists it, a long text cut.
+function changeValue(field, value, titles) {
+  if (value === null || value === undefined) return "—";
+  if (field === "comment") return `by ${value.author}`;
+  if (field === "link") return `${value.kind} ${value.url}`;
+  if (field === "blocked_by") return titles[value] || value;
+  if (field === "claim_expires_at_utc") return formatDateTime(value);
+  const text = String(value);
+  return text.length > 80 ? text.slice(0, 80) + "…" : text;
+}
+
+// The story's change history, newest first. Read again after each save on this page and after a comment.
+function StoryHistory({ storyId, local, saving }) {
+  const [entries, setEntries] = useState(null);
+  const [error, setError] = useState(null);
+  const request = useRef(0);
+
+  useEffect(() => {
+    if (saving) return;
+    const current = ++request.current;
+    api.listItemHistory(storyId).then(
+      loaded => { if (current === request.current) { setEntries(loaded.reverse()); setError(null); } },
+      e => { if (current === request.current) setError(e.message); });
+  }, [storyId, saving, local.comments?.length]);
+
+  const titles = useMemo(() => Object.fromEntries(
+    [...(local.blockers || []), ...(local.dependents || [])].map(item => [item.id, item.title])
+  ), [local.blockers, local.dependents]);
+
+  return (
+    <div className="story-history">
+      <div className="sheet-section-title" style={{marginTop: 18}}>History</div>
+      {error && <div className="comments-empty">Couldn't load the history: {error}</div>}
+      {!error && entries === null && <div className="story-none">Loading history…</div>}
+      {!error && entries?.length === 0 && <div className="comments-empty">No recorded changes.</div>}
+      {!error && entries?.length > 0 && (
+        <ol className="history-list">
+          {entries.map(entry => (
+            <li key={entry.sequence} className="history-entry">
+              <div className="comment-meta">
+                <span className="comment-author">{CHANGE_KIND_LABEL[entry.kind] || entry.kind}{entry.actor?.name ? ` · ${entry.actor.name}` : ""}</span>
+                <span className="comment-date">{formatDateTime(entry.created_at_utc)}</span>
+              </div>
+              <ul className="history-changes">
+                {entry.changes.filter(change => change.field !== "version").map(change => (
+                  <li key={change.field}>
+                    <span className="history-field">{change.field}</span>{" "}
+                    {changeValue(change.field, change.old, titles)} → {changeValue(change.field, change.new, titles)}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory }) {
   const [story, setStory] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | error
   const [loadError, setLoadError] = useState(null);
   const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
   // Saves a pending edit first, so coming back to this page loads the story as it was left.
   const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
+  const openStory = (id) => { flush().finally(() => onOpenStory(id)); };
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -1020,8 +1157,14 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
           </div>
         </header>
         <div className="story-page-body">
-          <StoryFields local={local} epics={epicOptions} patch={patch}/>
-          <StoryNotes key={local.id} storyId={local.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
+          <div>
+            <StoryFields local={local} epics={epicOptions} patch={patch}/>
+            <StoryRelations local={local} onOpenStory={openStory}/>
+          </div>
+          <div>
+            <StoryNotes key={local.id} storyId={local.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
+            <StoryHistory storyId={local.id} local={local} saving={saving}/>
+          </div>
         </div>
       </div>
     </section>
@@ -2609,6 +2752,7 @@ function App() {
             onUpdate={updateStory}
             onAddComment={addComment}
             onOpenBoard={openBoardFromStory}
+            onOpenStory={openStoryPage}
           />
         ) : currentView === "settings" ? (
           <UserSettingsView show={show} />

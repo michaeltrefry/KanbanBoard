@@ -12,6 +12,7 @@ public sealed class KanbanToolsChangeFeedTests
         """{"sequence":42,"item_id":"11111111-1111-1111-1111-111111111111","project_id":"22222222-2222-2222-2222-222222222222","kind":"item_moved","actor":{"id":"33333333-3333-3333-3333-333333333333","name":"Factory"},"changes":[{"field":"status","old":"Backlog","new":"InProgress"},{"field":"estimate","old":null,"new":3},{"field":"comment","old":null,"new":{"id":"77777777-7777-7777-7777-777777777777","author":"Factory","body":"shipped"}}],"created_at_utc":"2026-10-12T12:00:00+00:00"}""";
 
     private static readonly Guid ProjectId = Guid.Parse("22222222-2222-2222-2222-222222222222");
+    private static readonly Guid ItemId = Guid.Parse("11111111-1111-1111-1111-111111111111");
 
     [Fact]
     public async Task List_changes_is_listed_in_snake_case_with_optional_arguments_only()
@@ -20,7 +21,7 @@ public sealed class KanbanToolsChangeFeedTests
 
         var tool = (await server.Client.ListToolsAsync()).Single(candidate => candidate.Name == "list_changes");
 
-        Assert.Equal(["cursor", "from_start", "limit", "project_id"], ArgumentNames(tool));
+        Assert.Equal(["cursor", "from_start", "item_id", "limit", "project_id"], ArgumentNames(tool));
         Assert.False(tool.JsonSchema.TryGetProperty("required", out var required) && required.GetArrayLength() > 0);
         // The kinds are part of the contract a caller reads.
         Assert.All(WorkItemChangeKinds.All, kind => Assert.Contains(kind, tool.Description, StringComparison.Ordinal));
@@ -35,12 +36,13 @@ public sealed class KanbanToolsChangeFeedTests
         var head = await server.CallAsync("list_changes", new());
         var page = await server.CallAsync("list_changes", new() { ["cursor"] = "aC4+MQ", ["project_id"] = ProjectId, ["limit"] = 25 });
         var fromStart = await server.CallAsync("list_changes", new() { ["from_start"] = true });
+        var ofItem = await server.CallAsync("list_changes", new() { ["from_start"] = true, ["item_id"] = ItemId, ["project_id"] = ProjectId });
 
-        Assert.All(new[] { head, page, fromStart }, result => Assert.NotEqual(true, result.IsError));
+        Assert.All(new[] { head, page, fromStart, ofItem }, result => Assert.NotEqual(true, result.IsError));
         // A read tool: a read-scope token reaches the API, with GETs only.
         Assert.All(server.Api.Requests, request => Assert.Equal((HttpMethod.Get, "/api/items/changes"), (request.Method, request.Path)));
         Assert.Equal(
-            [string.Empty, $"?cursor=aC4%2BMQ&projectId={ProjectId}&limit=25", "?fromStart=true"],
+            [string.Empty, $"?cursor=aC4%2BMQ&projectId={ProjectId}&limit=25", "?fromStart=true", $"?projectId={ProjectId}&itemId={ItemId}&fromStart=true"],
             server.Api.Requests.Select(request => request.Query).ToArray());
         // Old and new values come through as they are, null included.
         Assert.Equal($$"""{"items":[{{EntryJson}}],"next_cursor":"aC40Mg"}""", Text(page));
@@ -108,6 +110,7 @@ public sealed class KanbanToolsChangeFeedTests
         Assert.Contains("old_truncated", description, StringComparison.Ordinal);
         Assert.Contains("new_truncated", description, StringComparison.Ordinal);
         Assert.Contains("A project_id no project has is not refused", description, StringComparison.Ordinal);
+        Assert.Contains("item_id together with a project_id that does not own the item", description, StringComparison.Ordinal);
         Assert.Contains("ahead of the newest entry", description, StringComparison.Ordinal);
     }
 

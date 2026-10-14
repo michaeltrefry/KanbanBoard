@@ -197,6 +197,8 @@ public sealed class KanbanDbContext(DbContextOptions<KanbanDbContext> options) :
             entity.Property(change => change.CreatedAtUtc).HasConversion(DateTimeOffsetToUtcDateTimeConverter).HasColumnType("datetime(6)");
             // The feed of one project, in feed order.
             entity.HasIndex(change => new { change.ProjectId, change.Sequence });
+            // The history of one item, in feed order.
+            entity.HasIndex(change => new { change.WorkItemId, change.Sequence });
         });
 
         modelBuilder.Entity<AppUser>(entity =>

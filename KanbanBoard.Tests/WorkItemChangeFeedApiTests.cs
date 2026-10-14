@@ -280,6 +280,55 @@ public sealed class WorkItemChangeFeedApiTests
     }
 
     [Fact]
+    public async Task Item_id_restricts_the_feed_to_that_item_and_is_refused_with_a_project_id_that_does_not_own_it()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var one = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "One", key = "ITEM1" });
+        var two = await PostAsync<ProjectSummaryDto>(client, "/api/projects", new { name = "Two", key = "ITEM2" });
+        var head = await HeadAsync(client);
+        var item = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = one.Id, title = "Item", type = "Task", status = "Backlog", priority = "Medium" });
+        var sibling = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = one.Id, title = "Sibling", type = "Task", status = "Backlog", priority = "Medium" });
+        var gone = await PostAsync<WorkItemDto>(client, "/api/items", new { projectId = two.Id, title = "Gone", type = "Task", status = "Backlog", priority = "Medium" });
+        await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/comments", new { author = "tester", body = "note" });
+        await PostAsync<WorkItemDto>(client, $"/api/items/{sibling.Id}/comments", new { author = "tester", body = "other" });
+        // The dependency is an entry on the blocked item only, not on the blocker.
+        await PostAsync<WorkItemDto>(client, $"/api/items/{sibling.Id}/dependencies", new AddWorkItemDependencyRequest(item.Id));
+        await PostAsync<WorkItemDto>(client, $"/api/items/{item.Id}/move", new { status = "Done", order = 0 });
+        (await client.DeleteAsync($"/api/items/{gone.Id}")).EnsureSuccessStatusCode();
+
+        var ofItem = await ReadAsync(client, head, itemId: item.Id);
+        var fromStart = await client.GetFromJsonAsync<WorkItemChangePageDto>($"/api/items/changes?fromStart=true&itemId={item.Id}&limit=2", Json);
+        var ofItemInProject = await ReadAsync(client, head, one.Id, itemId: item.Id);
+        // A deleted item keeps its entries, and the project they name still owns it.
+        var ofGone = await ReadAsync(client, head, two.Id, itemId: gone.Id);
+        var ofUnknown = await ReadAsync(client, head, one.Id, itemId: Guid.NewGuid());
+
+        Assert.Equal(["item_created", "comment_added", "item_moved"], ofItem.Items.Select(entry => entry.Kind).ToArray());
+        Assert.All(ofItem.Items, entry => Assert.Equal(item.Id, entry.ItemId));
+        Assert.Equal(ofItem.Items.Take(2).Select(entry => entry.Sequence), fromStart!.Items.Select(entry => entry.Sequence));
+        Assert.Equal(Sequences(ofItem.Items), Sequences(ofItemInProject.Items));
+        Assert.Equal(["item_created", "item_deleted"], ofGone.Items.Select(entry => entry.Kind).ToArray());
+        Assert.Empty(ofUnknown.Items);
+        Assert.Equal(head, ofUnknown.NextCursor);
+
+        foreach (var query in new[]
+                 {
+                     $"cursor={head}&projectId={two.Id}&itemId={item.Id}",
+                     $"fromStart=true&projectId={one.Id}&itemId={gone.Id}",
+                     $"projectId={Guid.NewGuid()}&itemId={item.Id}"
+                 })
+        {
+            using var response = await client.GetAsync($"/api/items/changes?{query}");
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+            var error = JsonSerializer.Deserialize<KanbanErrorDto>(body, Json)!;
+            Assert.Equal(KanbanErrorCodes.InvalidArgument, error.Code);
+            Assert.Contains("'item_id'", error.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public async Task Without_a_cursor_the_answer_is_the_place_to_start_from_and_no_entry()
     {
         using var api = new ApiApplication();
@@ -701,10 +750,10 @@ public sealed class WorkItemChangeFeedApiTests
         return head.NextCursor;
     }
 
-    private static async Task<WorkItemChangePageDto> ReadAsync(HttpClient client, string cursor, Guid? projectId = null, int limit = 200)
+    private static async Task<WorkItemChangePageDto> ReadAsync(HttpClient client, string cursor, Guid? projectId = null, int limit = 200, Guid? itemId = null)
     {
         using var response = await client.GetAsync(
-            $"/api/items/changes?cursor={Uri.EscapeDataString(cursor)}&limit={limit}{(projectId is null ? string.Empty : $"&projectId={projectId}")}");
+            $"/api/items/changes?cursor={Uri.EscapeDataString(cursor)}&limit={limit}{(projectId is null ? string.Empty : $"&projectId={projectId}")}{(itemId is null ? string.Empty : $"&itemId={itemId}")}");
         var body = await response.Content.ReadAsStringAsync();
         Assert.True(response.IsSuccessStatusCode, body);
         return JsonSerializer.Deserialize<WorkItemChangePageDto>(body, Json)!;
