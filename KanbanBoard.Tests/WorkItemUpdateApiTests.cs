@@ -501,6 +501,28 @@ public sealed class WorkItemUpdateApiTests
     }
 
     [Fact]
+    public async Task A_partial_put_of_the_web_ui_changes_only_the_fields_it_names_and_a_null_clears_description_and_epic()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "PART");
+        var created = await CreateAsync(client, project, new { title = "Title", description = "Body", type = "Story", status = "Ready", priority = "High", estimate = 5, labels = "api,backend", epicId = epic });
+
+        var title = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { title = "x" });
+        var description = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { description = (string?)null });
+        var epicCleared = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { epicId = (Guid?)null });
+
+        Assert.Equal(
+            ("x", "Body", WorkItemType.Story, WorkItemStatus.Ready, WorkItemPriority.High, 5, "api,backend", epic, 2L),
+            (title.Title, title.Description, title.Type, title.Status, title.Priority, title.Estimate, title.Labels, title.EpicId, title.Version));
+        Assert.Equal(((string?)null, epic, "x", 5, "api,backend"), (description.Description, description.EpicId, description.Title, description.Estimate, description.Labels));
+        Assert.Equal(
+            ("x", (string?)null, WorkItemType.Story, WorkItemStatus.Ready, WorkItemPriority.High, 5, "api,backend", (Guid?)null, 4L),
+            (epicCleared.Title, epicCleared.Description, epicCleared.Type, epicCleared.Status, epicCleared.Priority, epicCleared.Estimate, epicCleared.Labels, epicCleared.EpicId, epicCleared.Version));
+        Assert.Equal(epicCleared, await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{created.Id}", Json), Same);
+    }
+
+    [Fact]
     public async Task The_put_of_the_web_ui_ignores_fields_it_does_not_know_and_the_patch_refuses_them()
     {
         using var api = new ApiApplication();

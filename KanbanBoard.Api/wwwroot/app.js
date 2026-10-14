@@ -816,9 +816,10 @@ function useStoryEditor(story, onUpdate) {
     focusedStoryField() === field || pendingFields.current.has(field) || savingFields.current.get(field) > 0;
 
   // Takes a copy of the story read from the server, except for the fields being edited here, which keep what the
-  // viewer typed. A copy older than the editor's own last save is dropped. Answers the held fields it would change.
+  // viewer typed. A copy older than the editor's own last save is dropped (answers null). Otherwise answers the held
+  // fields it would change.
   const merge = (fresh) => {
-    if (!fresh || (fresh.version || 0) < savedVersion.current) return [];
+    if (!fresh || (fresh.version || 0) < savedVersion.current) return null;
     const held = Object.keys(EDITABLE_FIELDS).filter(isEditing);
     const differs = (f) => local?.id === fresh.id && (fresh[f] ?? null) !== (local[f] ?? null);
     setLocal(current => {
@@ -1134,9 +1135,20 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
   const [story, setStory] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | deleted | error
   const [loadError, setLoadError] = useState(null);
-  // Counts the copies of the story taken from the change feed, so the history is read again with each.
+  // Counts the copies of the story taken from the change feed that differ from the last one, so the history is read
+  // again with each (and not for a change to some other story).
   const [refreshCount, setRefreshCount] = useState(0);
-  const { local, saving, patch, flush, discard, merge } = useStoryEditor(story, onUpdate);
+  // The story as last read, as JSON: a copy equal to it changes nothing on the page.
+  const lastSeen = useRef(null);
+  // The change count when the story was last read (or its load began): a change after it means a newer copy.
+  const seenChangeSeq = useRef(changeSeq);
+  const latestChangeSeq = useRef(changeSeq);
+  latestChangeSeq.current = changeSeq;
+  // Deleted elsewhere while open here: an edit not yet saved has nothing left to go to.
+  const markDeleted = () => { discard(); setLoadState("deleted"); };
+  // A save that finds the story deleted shows the deleted page, not a failed save.
+  const updateFromPage = (next, fields) => onUpdate(next, fields, { onDeleted: markDeleted });
+  const { local, saving, patch, flush, discard, merge } = useStoryEditor(story, updateFromPage);
   // Saves a pending edit first, so coming back to this page loads the story as it was left.
   const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
   const openStory = (id) => { flush().finally(() => onOpenStory(id)); };
@@ -1144,8 +1156,10 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
   const load = useCallback(async () => {
     setLoadState("loading");
     setStory(null);
+    seenChangeSeq.current = latestChangeSeq.current;
     try {
       const loaded = await api.getWorkItem(storyId);
+      lastSeen.current = JSON.stringify(loaded);
       setStory(loaded);
       setLoadState("ready");
       onLoaded(loaded);
@@ -1167,20 +1181,25 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
     try {
       const fresh = await api.getWorkItem(storyId);
       if (current !== latestRefresh.current) return;
-      heldBack.current = merge(fresh).length > 0;
+      const held = merge(fresh);
+      if (held === null) return;
+      heldBack.current = held.length > 0;
+      const seen = JSON.stringify(fresh);
+      if (seen === lastSeen.current) return;
+      lastSeen.current = seen;
       setRefreshCount(n => n + 1);
     } catch (e) {
       if (current !== latestRefresh.current) return;
-      // Deleted elsewhere while open here: an edit not yet saved has nothing left to go to.
-      if (e.status === 404) { discard(); setLoadState("deleted"); }
+      if (e.status === 404) markDeleted();
     }
   };
-  const firstChangeSeq = useRef(changeSeq);
+  // A change counted while the story loaded (after its read, before the answer) is read once it is ready.
   useEffect(() => {
-    if (changeSeq === firstChangeSeq.current || loadState !== "ready") return;
+    if (loadState !== "ready" || changeSeq === seenChangeSeq.current) return;
+    seenChangeSeq.current = changeSeq;
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [changeSeq]);
+  }, [changeSeq, loadState]);
   // Leaving a field takes what arrived for it while it had the focus (after the focus has moved, so it is not held).
   const onFieldBlur = () => {
     if (heldBack.current) setTimeout(() => { void refresh(); }, 0);
@@ -2607,7 +2626,8 @@ function App() {
   };
 
   // Writes the given fields of the story (every field without a list): a field left out keeps its value on the server.
-  const updateStory = async (next, fields) => {
+  // A story deleted elsewhere is taken off the board and out of the slideout; onDeleted (the story page) shows it.
+  const updateStory = async (next, fields, { onDeleted } = {}) => {
     const payload = {
       epicId: next.epicId || null,
       title: next.title,
@@ -2627,6 +2647,13 @@ function App() {
       setSelectedStory(current => current?.id === saved.id ? saved : current);
       return saved;
     } catch (e) {
+      if (e.status === 404) {
+        setItems(cur => cur.filter(s => s.id !== next.id));
+        setSelectedStory(current => current?.id === next.id ? null : current);
+        if (onDeleted) onDeleted();
+        else show("This story was deleted elsewhere; the edit was not saved.");
+        return null;
+      }
       show(`Save failed: ${e.message}`);
       return null;
     }
