@@ -1346,6 +1346,9 @@ function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
 
   useEffect(() => { loadTokens(); }, [loadTokens, refreshKey]);
 
+  // Disabling the identity revokes the replacement as well: its plaintext is no longer worth showing.
+  useEffect(() => { if (identity.disabled) setReplacement(null); }, [identity.disabled]);
+
   const revokeToken = async (token) => {
     if (!confirm(`Revoke "${token.name}" of ${identity.name}? Clients using this token will stop working.`)) return;
     setBusyId(token.id);
@@ -1354,7 +1357,7 @@ function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
       if (replacement?.id === token.id) setReplacement(null);
       show(`${token.name} revoked`, "success");
       await loadTokens();
-      onChanged();
+      onChanged(token.id);
     } catch (e) {
       show(`Revoke failed: ${e.message}`);
     } finally {
@@ -1373,7 +1376,7 @@ function ServiceIdentityTokens({ identity, show, refreshKey, onChanged }) {
       setRotateExpiresLocal("");
       show(`${token.name} rotated; the old token is revoked`, "success");
       await loadTokens();
-      onChanged();
+      onChanged(token.id);
     } catch (e) {
       show(`Rotate failed: ${e.message}`);
     } finally {
@@ -1467,6 +1470,8 @@ function AdminView({ show }) {
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [tokensRefreshKey, setTokensRefreshKey] = useState(0);
+  const [issuedTokenId, setIssuedTokenId] = useState(null);
+  const [issueFormKey, setIssueFormKey] = useState(0);
 
   const loadIdentities = useCallback(async () => {
     setLoadError(null);
@@ -1511,6 +1516,7 @@ function AdminView({ show }) {
     setBusyId(identity.id);
     try {
       replaceIdentity(await api.disableServiceIdentity(identity.id));
+      setTokensRefreshKey(key => key + 1);
       show(`${identity.name} disabled; its tokens are revoked`, "success");
     } catch (e) {
       show(`Disable failed: ${e.message}`);
@@ -1535,6 +1541,7 @@ function AdminView({ show }) {
     if (!selected) return null;
     try {
       const created = await api.issueServiceIdentityToken(selected.id, payload);
+      setIssuedTokenId(created.token.id);
       show(`Token issued for ${selected.name}`, "success");
       loadIdentities();
       setTokensRefreshKey(key => key + 1);
@@ -1543,6 +1550,15 @@ function AdminView({ show }) {
       show(`Token issue failed: ${e.message}`);
       return null;
     }
+  };
+
+  // A revoke or rotate of the token just issued takes its plaintext off the issue form, as on the Settings page.
+  const tokenChanged = (tokenId) => {
+    if (tokenId === issuedTokenId) {
+      setIssuedTokenId(null);
+      setIssueFormKey(key => key + 1);
+    }
+    loadIdentities();
   };
 
   if (loading) {
@@ -1571,7 +1587,7 @@ function AdminView({ show }) {
       <div className="settings-layout">
         {selected && !selected.disabled ? (
           <TokenCreateForm
-            key={selected.id}
+            key={`${selected.id}:${issueFormKey}`}
             eyebrow={`Issue token for ${selected.name}`}
             title="Service identity token"
             placeholder={`${selected.name} orchestrator`}
@@ -1599,7 +1615,7 @@ function AdminView({ show }) {
             identity={selected}
             show={show}
             refreshKey={tokensRefreshKey}
-            onChanged={loadIdentities}
+            onChanged={tokenChanged}
           />
         )}
 
