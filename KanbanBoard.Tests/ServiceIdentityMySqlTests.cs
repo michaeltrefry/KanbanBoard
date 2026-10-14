@@ -18,9 +18,7 @@ public sealed class ServiceIdentityMySqlTests
     {
         // The name was free when looked up, and is still not visible afterwards (as in a REPEATABLE READ snapshot):
         // only the server's error 1062 on the unique index says it is taken.
-        var database = new FakeDatabase(lockResult: 1, command => Normalize(command.CommandText).StartsWith("SELECT EXISTS", StringComparison.Ordinal)
-            ? Table("e", false)
-            : null)
+        var database = new FakeDatabase(lockResult: 1, NamedLockGranted)
         {
             NonQueryResult = 1,
             Fail = command => Normalize(command.CommandText).StartsWith("INSERT INTO `AppUsers`", StringComparison.Ordinal)
@@ -31,8 +29,110 @@ public sealed class ServiceIdentityMySqlTests
 
         var created = await ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", CancellationToken.None);
 
-        Assert.Null(created);
+        Assert.Equal(ServiceIdentityCreateOutcome.Exists, created.Outcome);
     }
+
+    [Fact]
+    public async Task A_create_looks_the_name_up_and_inserts_it_under_the_create_lock()
+    {
+        var database = new FakeDatabase(lockResult: 1, NamedLockGranted) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        await Record.ExceptionAsync(() => ServiceIdentityProvisioner.CreateAsync(dbContext, "Factory", CancellationToken.None));
+
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count >= 4, string.Join("\n---\n", texts));
+        Assert.Equal($"GET {ServiceIdentityProvisioner.CreateLockName}", database.Locks[0]);
+        Assert.StartsWith("SELECT", texts[1], StringComparison.Ordinal);
+        Assert.Contains("FROM `AppUsers`", texts[1], StringComparison.Ordinal);
+        Assert.StartsWith("INSERT INTO `AppUsers`", texts[2], StringComparison.Ordinal);
+        Assert.Equal($"RELEASE {ServiceIdentityProvisioner.CreateLockName}", database.Locks[^1]);
+    }
+
+    // The order that keeps a token from being issued for a disabled identity: after BEGIN, the identity's row is held
+    // before its DisabledAtUtc is read, so the read sees a disable committed before the hold.
+    [Fact]
+    public async Task An_issue_from_the_admin_page_holds_the_identity_before_it_reads_whether_it_is_disabled()
+    {
+        var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        await ServiceIdentityProvisioner.IssueTokenAsync(dbContext, new PersonalAccessTokenService(dbContext, TestDb.PatOptions()),
+            IdentityId, "Token", null, "full", CancellationToken.None);
+
+        AssertHoldsTheIdentityByIdBeforeReadingIt(database);
+    }
+
+    [Fact]
+    public async Task A_rotate_holds_the_identity_before_it_reads_whether_it_is_disabled()
+    {
+        var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        await ServiceIdentityProvisioner.RotateTokenAsync(dbContext, new PersonalAccessTokenService(dbContext, TestDb.PatOptions()),
+            IdentityId, Guid.NewGuid(), null, CancellationToken.None);
+
+        AssertHoldsTheIdentityByIdBeforeReadingIt(database);
+    }
+
+    [Fact]
+    public async Task A_revoke_holds_the_identity_first_so_it_runs_after_or_before_a_rotate_of_the_token()
+    {
+        var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), CancellationToken.None));
+
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count == 2, string.Join("\n---\n", texts));
+        Assert.Equal([0], database.TransactionStarts);
+        Assert.Equal(
+            "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = `a`.`DisabledAtUtc`\n" +
+            "WHERE (`a`.`Id` = @identityId) AND (`a`.`Issuer` = 'kanban:service-identity')",
+            texts[0]);
+        Assert.Contains("FROM `PersonalAccessTokens`", texts[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_command_holds_the_identity_before_it_reads_whether_it_is_disabled()
+    {
+        var database = new FakeDatabase(lockResult: 1, NamedLockGranted) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        // Whatever the fake answers to the inserts that follow; only the first statements matter here.
+        await Record.ExceptionAsync(() => ServiceIdentityProvisioner.ProvisionAsync(dbContext,
+            new PersonalAccessTokenService(dbContext, TestDb.PatOptions()), "Factory", rotate: true, CancellationToken.None));
+
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        var begin = database.TransactionStarts[0];
+        Assert.True(texts.Count > begin + 1, string.Join("\n---\n", texts));
+        // Under the create lock, taken before the transaction.
+        Assert.Equal($"GET {ServiceIdentityProvisioner.CreateLockName}", database.Locks[0]);
+        Assert.Contains("GET_LOCK(", texts[begin - 1], StringComparison.Ordinal);
+        Assert.Equal(
+            "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = `a`.`DisabledAtUtc`\n" +
+            "WHERE (`a`.`Issuer` = 'kanban:service-identity') AND (`a`.`Subject` = @subject)",
+            texts[begin]);
+        Assert.StartsWith("SELECT", texts[begin + 1], StringComparison.Ordinal);
+        Assert.Contains("FROM `AppUsers`", texts[begin + 1], StringComparison.Ordinal);
+    }
+
+    private static void AssertHoldsTheIdentityByIdBeforeReadingIt(FakeDatabase database)
+    {
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count >= 2, string.Join("\n---\n", texts));
+        Assert.Equal([0], database.TransactionStarts);
+        Assert.Equal(
+            "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = `a`.`DisabledAtUtc`\n" +
+            "WHERE (`a`.`Id` = @identityId) AND (`a`.`Issuer` = 'kanban:service-identity')",
+            texts[0]);
+        Assert.StartsWith("SELECT", texts[1], StringComparison.Ordinal);
+        Assert.Contains("FROM `AppUsers`", texts[1], StringComparison.Ordinal);
+    }
+
+    // GET_LOCK and RELEASE_LOCK of the create lock answer 1; every other query finds no rows.
+    private static DataTable? NamedLockGranted(DbCommand command) =>
+        command.CommandText.Contains("_LOCK(", StringComparison.Ordinal) ? Table("Value", 1L) : null;
 
     [Fact]
     public async Task A_disable_holds_the_identity_first_then_disables_it_and_revokes_its_tokens_in_one_transaction()

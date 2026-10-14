@@ -6,6 +6,34 @@ using MySql.Data.MySqlClient;
 
 namespace KanbanBoard.Api.Services;
 
+public enum ServiceIdentityCreateOutcome
+{
+    Created,
+    /// <summary>An identity with that name exists; nothing was written.</summary>
+    Exists,
+    /// <summary>Other creates held the create lock for too long; nothing was written.</summary>
+    Busy
+}
+
+/// <param name="User">The created identity, or the existing one that has the name (null only if it vanished meanwhile).</param>
+public sealed record ServiceIdentityCreateResult(ServiceIdentityCreateOutcome Outcome, AppUser? User = null);
+
+public enum ServiceIdentityTokenOutcome
+{
+    Issued,
+    IdentityNotFound,
+    IdentityDisabled,
+    TokenNotFound,
+    TokenRevoked
+}
+
+/// <param name="Identity">The service identity, when there is one.</param>
+/// <param name="Token">The token issued, with its plaintext, when <see cref="Outcome"/> is <see cref="ServiceIdentityTokenOutcome.Issued"/>.</param>
+public sealed record ServiceIdentityTokenResult(
+    ServiceIdentityTokenOutcome Outcome,
+    AppUser? Identity = null,
+    CreatedPersonalAccessToken? Token = null);
+
 public sealed record ProvisionedServiceIdentity(
     AppUser User,
     bool Created,
@@ -24,6 +52,10 @@ public static class ServiceIdentityProvisioner
 
     public static readonly string InvalidNameMessage =
         $"A service identity name is required and must be at most {MaxNameLength} characters.";
+
+    /// <summary>The named lock that every create of a service identity, from the admin page or the command, holds.</summary>
+    public const string CreateLockName = "kanban_service_identity_creates";
+    public const int CreateLockTimeoutSeconds = 10;
 
     // The unique index on (Issuer, Subject), as the server names it in error 1062 (ER_DUP_ENTRY).
     private const string IdentityIndexName = "IX_AppUsers_Issuer_Subject";
@@ -57,43 +89,171 @@ public static class ServiceIdentityProvisioner
             .ExecuteUpdateAsync(setters => setters.SetProperty(user => user.DisabledAtUtc, user => user.DisabledAtUtc), cancellationToken);
 
     /// <summary>
-    /// Creates a service identity named <paramref name="displayName"/> (already <see cref="NormalizeName"/>d), or
-    /// returns null when one with that name, in any case, exists; nothing is written then.
+    /// Creates a service identity named <paramref name="displayName"/> (already <see cref="NormalizeName"/>d), or, when
+    /// one with that name exists as the unique index compares names (any case; on MariaDB any accent as well), writes
+    /// nothing and reports that identity. Creates run one at a time, as do those of the create-service-identity command,
+    /// so on MariaDB a name is looked up before the insert that would fail on it and no failed insert is logged.
     /// </summary>
-    public static async Task<AppUser?> CreateAsync(KanbanDbContext dbContext, string displayName, CancellationToken cancellationToken)
+    public static Task<ServiceIdentityCreateResult> CreateAsync(KanbanDbContext dbContext, string displayName, CancellationToken cancellationToken)
     {
         var subject = SubjectOf(displayName);
-        if (await dbContext.AppUsers.AnyAsync(user => user.Issuer == Issuer && user.Subject == subject, cancellationToken))
+        return MariaDbNamedLock.RunAsync(dbContext, CreateLockName, CreateLockTimeoutSeconds, new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Busy), async () =>
         {
-            return null;
-        }
-
-        var now = DateTimeOffset.UtcNow;
-        var user = new AppUser { Issuer = Issuer, Subject = subject, DisplayName = displayName, CreatedAtUtc = now, UpdatedAtUtc = now };
-        dbContext.AppUsers.Add(user);
-        try
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return user;
-        }
-        catch (DbUpdateException exception)
-        {
-            // Another create of the name committed between the check and the insert. On MariaDB the server says so
-            // and is taken at its word; elsewhere (SQLite) the name is looked up again, outside any transaction.
-            dbContext.ChangeTracker.Clear();
-            if (exception.InnerException is MySqlException { Number: DuplicateEntryError } duplicate &&
-                duplicate.Message.Contains(IdentityIndexName, StringComparison.Ordinal))
+            if (await FindAsync(dbContext, subject, cancellationToken) is { } existing)
             {
-                return null;
+                return new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Exists, existing);
             }
 
-            if (await dbContext.AppUsers.AsNoTracking().AnyAsync(candidate => candidate.Issuer == Issuer && candidate.Subject == subject, cancellationToken))
+            var now = DateTimeOffset.UtcNow;
+            var user = new AppUser { Issuer = Issuer, Subject = subject, DisplayName = displayName, CreatedAtUtc = now, UpdatedAtUtc = now };
+            dbContext.AppUsers.Add(user);
+            try
             {
-                return null;
+                await dbContext.SaveChangesAsync(cancellationToken);
+                return new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Created, user);
             }
+            catch (DbUpdateException exception)
+            {
+                // Another create of the name committed between the look-up and the insert, which the lock leaves only
+                // to a writer that does not take it (SQLite takes none). On MariaDB the server says so and is taken at
+                // its word; elsewhere the name is looked up again.
+                dbContext.ChangeTracker.Clear();
+                var duplicate = exception.InnerException is MySqlException { Number: DuplicateEntryError } mySqlException &&
+                    mySqlException.Message.Contains(IdentityIndexName, StringComparison.Ordinal);
+                var winner = await FindAsync(dbContext, subject, cancellationToken);
+                if (duplicate || winner is not null)
+                {
+                    return new ServiceIdentityCreateResult(ServiceIdentityCreateOutcome.Exists, winner);
+                }
 
-            throw;
+                throw;
+            }
+        }, cancellationToken);
+    }
+
+    /// <summary>The service identity whose subject equals <paramref name="subject"/> as the database compares it.</summary>
+    private static Task<AppUser?> FindAsync(KanbanDbContext dbContext, string subject, CancellationToken cancellationToken) =>
+        dbContext.AppUsers
+            .AsNoTracking()
+            .FirstOrDefaultAsync(candidate => candidate.Issuer == Issuer && candidate.Subject == subject, cancellationToken);
+
+    /// <summary>
+    /// Issues a token for the service identity in one transaction that holds the identity's row first: a disable of it
+    /// waits for this issue (and then revokes the token) or this issue sees the disable and writes nothing.
+    /// </summary>
+    public static async Task<ServiceIdentityTokenResult> IssueTokenAsync(
+        KanbanDbContext dbContext,
+        IPersonalAccessTokenService personalAccessTokenService,
+        Guid identityId,
+        string name,
+        DateTimeOffset? expiresAtUtc,
+        string scope,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var (refusal, identity) = await HoldEnabledAsync(dbContext, identityId, cancellationToken);
+        if (refusal is not null)
+        {
+            return refusal;
         }
+
+        var created = await personalAccessTokenService.CreateAsync(identity!, name, expiresAtUtc, scope, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.Issued, identity, created);
+    }
+
+    /// <summary>
+    /// Replaces the identity's token <paramref name="tokenId"/> with a new one of the same name and scope that expires
+    /// at <paramref name="expiresAtUtc"/>, and revokes the old one only once the new one is stored, all in one
+    /// transaction that holds the identity's row first. Every write of the identity's tokens (issue, rotate, revoke,
+    /// disable, the command's rotate) holds that row, so rotates of one token run one at a time: the first replaces
+    /// it, the others find it revoked and write nothing. A revoked token is not rotated; an
+    /// expired one is. Whatever is refused or fails, nothing is written and the old token stays as it was.
+    /// </summary>
+    public static async Task<ServiceIdentityTokenResult> RotateTokenAsync(
+        KanbanDbContext dbContext,
+        IPersonalAccessTokenService personalAccessTokenService,
+        Guid identityId,
+        Guid tokenId,
+        DateTimeOffset? expiresAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        var (refusal, identity) = await HoldEnabledAsync(dbContext, identityId, cancellationToken);
+        if (refusal is not null)
+        {
+            return refusal;
+        }
+
+        var old = await dbContext.PersonalAccessTokens
+            .AsNoTracking()
+            .FirstOrDefaultAsync(token => token.Id == tokenId && token.AppUserId == identityId, cancellationToken);
+        if (old is null)
+        {
+            return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.TokenNotFound, identity);
+        }
+
+        if (old.RevokedAtUtc is not null)
+        {
+            return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.TokenRevoked, identity);
+        }
+
+        var created = await personalAccessTokenService.CreateAsync(identity!, old.Name, expiresAtUtc, old.Scope, cancellationToken);
+        await dbContext.PersonalAccessTokens
+            .Where(token => token.Id == tokenId)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(token => token.RevokedAtUtc, created.Token.CreatedAtUtc), cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.Issued, identity, created);
+    }
+
+    /// <summary>
+    /// Revokes the service identity's token <paramref name="tokenId"/>; revoking a revoked token keeps the time it was
+    /// first revoked. False when the identity is no service identity or the token is not one of its tokens. Holds the
+    /// identity's row first, as every write of its tokens does, so a revoke and a rotate of one token run one after
+    /// the other.
+    /// </summary>
+    public static async Task<bool> RevokeTokenAsync(KanbanDbContext dbContext, Guid identityId, Guid tokenId, CancellationToken cancellationToken)
+    {
+        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
+        if (await LockAsync(dbContext, identityId, cancellationToken) == 0)
+        {
+            return false;
+        }
+
+        var token = await dbContext.PersonalAccessTokens
+            .FirstOrDefaultAsync(candidate => candidate.Id == tokenId && candidate.AppUserId == identityId, cancellationToken);
+        if (token is null)
+        {
+            return false;
+        }
+
+        token.RevokedAtUtc ??= DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    /// <summary>
+    /// The first statements of a transaction that writes a token for the service identity: <see cref="LockAsync"/>, then
+    /// the read of the identity, which therefore sees a disable committed before the hold. Returns the refusal, or the
+    /// identity when it is an enabled service identity.
+    /// </summary>
+    private static async Task<(ServiceIdentityTokenResult? Refusal, AppUser? Identity)> HoldEnabledAsync(
+        KanbanDbContext dbContext,
+        Guid identityId,
+        CancellationToken cancellationToken)
+    {
+        var identity = await LockAsync(dbContext, identityId, cancellationToken) == 0
+            ? null
+            : await dbContext.AppUsers.FirstOrDefaultAsync(user => user.Id == identityId, cancellationToken);
+        if (identity is null)
+        {
+            return (new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.IdentityNotFound), null);
+        }
+
+        return identity.DisabledAtUtc is null
+            ? (null, identity)
+            : (new ServiceIdentityTokenResult(ServiceIdentityTokenOutcome.IdentityDisabled, identity), identity);
     }
 
     /// <summary>
@@ -148,8 +308,30 @@ public static class ServiceIdentityProvisioner
         // Before any write: with tokens disabled nothing is created and nothing is revoked.
         personalAccessTokenService.EnsureEnabled();
 
-        // One transaction on a real database: a failure part-way leaves no identity, no unprinted token, no revocation.
         var relational = dbContext.Database.IsRelational();
+        if (!relational)
+        {
+            return await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, cancellationToken);
+        }
+
+        // Under the lock of every create, so that a create of the name from the admin page or another run of the
+        // command waits instead of failing on the unique index.
+        return await MariaDbNamedLock.RunAsync<ProvisionedServiceIdentity?>(dbContext, CreateLockName, CreateLockTimeoutSeconds, null,
+                async () => await ProvisionHeldAsync(dbContext, personalAccessTokenService, displayName, rotate, relational, cancellationToken),
+                cancellationToken) ??
+            throw new InvalidOperationException(
+                $"Other service identity creates were in progress for {CreateLockTimeoutSeconds} s. Nothing was written; try again.");
+    }
+
+    private static async Task<ProvisionedServiceIdentity> ProvisionHeldAsync(
+        KanbanDbContext dbContext,
+        IPersonalAccessTokenService personalAccessTokenService,
+        string displayName,
+        bool rotate,
+        bool relational,
+        CancellationToken cancellationToken)
+    {
+        // One transaction on a real database: a failure part-way leaves no identity, no unprinted token, no revocation.
         await using var transaction = relational
             ? await dbContext.Database.BeginTransactionAsync(cancellationToken)
             : null;

@@ -279,6 +279,36 @@ public sealed record CreatedPersonalAccessTokenDto(
     PersonalAccessTokenMetadataDto Token,
     string PlaintextToken);
 
+/// <summary>The states of a token in an admin's list, by precedence: a revoked token is revoked even once it expired.</summary>
+public static class PersonalAccessTokenStates
+{
+    public const string Active = "active";
+    public const string Expired = "expired";
+    public const string Revoked = "revoked";
+}
+
+/// <summary>A token of a service identity as the admin page lists it: never its plaintext or secret.</summary>
+/// <param name="State">One of <see cref="PersonalAccessTokenStates"/>.</param>
+public sealed record ServiceIdentityTokenDto(
+    Guid Id,
+    string Name,
+    string Scope,
+    string TokenPrefix,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? ExpiresAtUtc,
+    DateTimeOffset? LastUsedAtUtc,
+    DateTimeOffset? RevokedAtUtc,
+    string State);
+
+/// <param name="ExpiresAtUtc">The replacement's expiry; null for none, whatever the rotated token's was.</param>
+public sealed record RotatePersonalAccessTokenRequest(DateTimeOffset? ExpiresAtUtc = null);
+
+/// <summary>The replacement of a rotated token, shown once, and the id of the token it replaced, now revoked.</summary>
+public sealed record RotatedPersonalAccessTokenDto(
+    PersonalAccessTokenMetadataDto Token,
+    string PlaintextToken,
+    Guid RevokedTokenId);
+
 /// <param name="IdempotencyKey">Makes the create safe to repeat: a key the caller already used returns that project.</param>
 public sealed record CreateProjectRequest(
     string Name,

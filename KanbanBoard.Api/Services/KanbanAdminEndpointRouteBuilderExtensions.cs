@@ -21,6 +21,9 @@ public static class KanbanAdminErrorCodes
 
     /// <summary>The service identity is disabled, so no token is issued for it; nothing was written.</summary>
     public const string IdentityDisabled = "identity_disabled";
+
+    /// <summary>The token is revoked (by an earlier rotate, among others), so it is not rotated; nothing was written.</summary>
+    public const string TokenRevoked = "token_revoked";
 }
 
 public static class KanbanAdminEndpointRouteBuilderExtensions
@@ -86,13 +89,20 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, ServiceIdentityProvisioner.InvalidNameMessage);
             }
 
-            var created = await ServiceIdentityProvisioner.CreateAsync(dbContext, name, cancellationToken);
-            if (created is null)
+            var result = await ServiceIdentityProvisioner.CreateAsync(dbContext, name, cancellationToken);
+            switch (result.Outcome)
             {
-                return Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityExists,
-                    $"A service identity named '{name}' already exists.");
+                case ServiceIdentityCreateOutcome.Busy:
+                    return Refusal(StatusCodes.Status503ServiceUnavailable, KanbanErrorCodes.Busy,
+                        $"Other service identity creates were in progress for {ServiceIdentityProvisioner.CreateLockTimeoutSeconds} s. Nothing was created; try again.");
+                case ServiceIdentityCreateOutcome.Exists:
+                    // The identity the name clashed with, which may differ from the requested name in case or accents.
+                    return Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityExists, result.User is { } existing
+                        ? $"A service identity named '{existing.DisplayName ?? existing.Subject}' ({existing.Id}) already exists; '{name}' is the same name."
+                        : $"A service identity named '{name}' already exists.");
             }
 
+            var created = result.User!;
             return Results.Json((await SummariesAsync(dbContext, created.Id, cancellationToken)).Single(), statusCode: StatusCodes.Status201Created);
         })
         .WithName("CreateServiceIdentity");
@@ -126,8 +136,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
         {
             if (!personalAccessTokenOptions.Value.Enabled)
             {
-                return Refusal(StatusCodes.Status503ServiceUnavailable, KanbanAdminErrorCodes.TokensDisabled,
-                    "Personal access tokens are disabled on this server.");
+                return TokensDisabled();
             }
 
             var validationError = KanbanSettingsEndpointRouteBuilderExtensions.ValidateCreatePersonalAccessTokenRequest(request);
@@ -136,39 +145,114 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
             }
 
-            // The identity's row is held until the token is stored, so a disable of it waits for this issue (and then
-            // revokes the token) or this issue sees the disable and refuses.
-            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-            // Only a service identity: this page never mints a token for a person.
-            if (await ServiceIdentityProvisioner.LockAsync(dbContext, identityId, cancellationToken) == 0)
-            {
-                return IdentityNotFound(identityId);
-            }
-
-            var identity = await dbContext.AppUsers.FirstAsync(user => user.Id == identityId, cancellationToken);
-            if (identity.DisabledAtUtc is not null)
-            {
-                return Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityDisabled,
-                    ServiceIdentityProvisioner.DisabledMessage(identity.DisplayName ?? identity.Subject));
-            }
-
-            var created = await personalAccessTokenService.CreateAsync(
-                identity,
+            var result = await ServiceIdentityProvisioner.IssueTokenAsync(
+                dbContext,
+                personalAccessTokenService,
+                identityId,
                 request.Name,
                 request.ExpiresAtUtc,
                 KanbanSettingsEndpointRouteBuilderExtensions.NormalizeScope(request.Scope),
                 cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            if (result.Outcome != ServiceIdentityTokenOutcome.Issued)
+            {
+                return TokenRefusal(result, identityId, null);
+            }
 
             // The plaintext is shown once and must not be kept by any cache.
             httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Json(
                 new CreatedPersonalAccessTokenDto(
-                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(created.Token),
-                    created.PlaintextToken),
+                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token),
+                    result.Token.PlaintextToken),
                 statusCode: StatusCodes.Status201Created);
         })
         .WithName("IssueServiceIdentityToken");
+
+        group.MapGet("/service-identities/{identityId:guid}/tokens", async (
+            Guid identityId,
+            KanbanDbContext dbContext,
+            TimeProvider timeProvider,
+            CancellationToken cancellationToken) =>
+        {
+            if (!await dbContext.AppUsers.AnyAsync(user => user.Id == identityId && user.Issuer == ServiceIdentityProvisioner.Issuer, cancellationToken))
+            {
+                return IdentityNotFound(identityId);
+            }
+
+            var tokens = await dbContext.PersonalAccessTokens
+                .AsNoTracking()
+                .Where(token => token.AppUserId == identityId)
+                .ToListAsync(cancellationToken);
+            var now = timeProvider.GetUtcNow();
+            return Results.Ok(tokens
+                .OrderByDescending(token => token.CreatedAtUtc)
+                .ThenBy(token => token.Name)
+                .Select(token => new ServiceIdentityTokenDto(
+                    token.Id,
+                    token.Name,
+                    token.Scope,
+                    token.TokenPrefix,
+                    token.CreatedAtUtc,
+                    token.ExpiresAtUtc,
+                    token.LastUsedAtUtc,
+                    token.RevokedAtUtc,
+                    // The rule of the Settings page: revoked before expired before active.
+                    token.RevokedAtUtc is not null ? PersonalAccessTokenStates.Revoked
+                        : token.ExpiresAtUtc <= now ? PersonalAccessTokenStates.Expired
+                        : PersonalAccessTokenStates.Active))
+                .ToList());
+        })
+        .WithName("ListServiceIdentityTokens");
+
+        // As the Settings page revokes a token: DELETE, 204, and revoking a revoked token succeeds and changes nothing.
+        group.MapDelete("/service-identities/{identityId:guid}/tokens/{tokenId:guid}", async (
+            Guid identityId,
+            Guid tokenId,
+            KanbanDbContext dbContext,
+            CancellationToken cancellationToken) =>
+            await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, identityId, tokenId, cancellationToken)
+                ? Results.NoContent()
+                : TokenNotFound(identityId, tokenId))
+        .WithName("RevokeServiceIdentityToken");
+
+        group.MapPost("/service-identities/{identityId:guid}/tokens/{tokenId:guid}/rotate", async (
+            Guid identityId,
+            Guid tokenId,
+            RotatePersonalAccessTokenRequest? request,
+            HttpContext httpContext,
+            KanbanDbContext dbContext,
+            IPersonalAccessTokenService personalAccessTokenService,
+            IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
+            CancellationToken cancellationToken) =>
+        {
+            if (!personalAccessTokenOptions.Value.Enabled)
+            {
+                return TokensDisabled();
+            }
+
+            var expiresAtUtc = request?.ExpiresAtUtc;
+            if (expiresAtUtc <= DateTimeOffset.UtcNow)
+            {
+                return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, "Field 'expiresAtUtc' must be in the future.");
+            }
+
+            var result = await ServiceIdentityProvisioner.RotateTokenAsync(
+                dbContext, personalAccessTokenService, identityId, tokenId, expiresAtUtc, cancellationToken);
+            if (result.Outcome != ServiceIdentityTokenOutcome.Issued)
+            {
+                return TokenRefusal(result, identityId, tokenId);
+            }
+
+            // The plaintext is shown once and must not be kept by any cache.
+            httpContext.Response.Headers.CacheControl = "no-store";
+            return Results.Json(
+                new RotatedPersonalAccessTokenDto(
+                    KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(result.Token!.Token),
+                    result.Token.PlaintextToken,
+                    tokenId),
+                statusCode: StatusCodes.Status201Created);
+        })
+        .WithName("RotateServiceIdentityToken");
 
         return endpoints;
     }
@@ -222,6 +306,23 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             .OrderBy(identity => identity.Name, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
+
+    private static IResult TokensDisabled() =>
+        Refusal(StatusCodes.Status503ServiceUnavailable, KanbanAdminErrorCodes.TokensDisabled,
+            "Personal access tokens are disabled on this server.");
+
+    private static IResult TokenRefusal(ServiceIdentityTokenResult result, Guid identityId, Guid? tokenId) => result.Outcome switch
+    {
+        ServiceIdentityTokenOutcome.IdentityDisabled => Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityDisabled,
+            ServiceIdentityProvisioner.DisabledMessage(result.Identity!.DisplayName ?? result.Identity.Subject)),
+        ServiceIdentityTokenOutcome.TokenNotFound => TokenNotFound(identityId, tokenId!.Value),
+        ServiceIdentityTokenOutcome.TokenRevoked => Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.TokenRevoked,
+            $"Token {tokenId} is revoked, so it is not rotated; nothing was written. Issue a new token instead."),
+        _ => IdentityNotFound(identityId)
+    };
+
+    private static IResult TokenNotFound(Guid identityId, Guid tokenId) =>
+        Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Service identity {identityId} has no token {tokenId}.");
 
     private static IResult IdentityNotFound(Guid identityId) =>
         Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Service identity {identityId} was not found.");
