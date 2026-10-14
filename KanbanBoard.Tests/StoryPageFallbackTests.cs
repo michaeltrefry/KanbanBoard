@@ -24,33 +24,39 @@ public sealed class StoryPageFallbackTests
     }
 
     [Fact]
-    public async Task A_story_path_that_is_not_a_story_id_is_not_found()
+    public async Task A_story_path_that_is_not_a_story_id_returns_the_app_html()
     {
-        using var api = new ProgramDependencyWiringTests.ApiApplication();
-        using var client = api.CreateClient();
-
-        using var notAnId = await client.GetAsync("/stories/not-an-id");
-        using var nested = await client.GetAsync($"/stories/{Guid.NewGuid()}/more");
-
-        Assert.Equal((HttpStatusCode.NotFound, HttpStatusCode.NotFound), (notAnId.StatusCode, nested.StatusCode));
-    }
-
-    [Fact]
-    public async Task Only_the_hyphenated_id_form_returns_the_app_html()
-    {
-        // The app reads only the hyphenated form from the path; the other forms a Guid parses from would load the
-        // app on a path it does not recognise as a story.
+        // The app shows its "Story not found" state for these, rather than the browser showing an empty 404.
         using var api = new ProgramDependencyWiringTests.ApiApplication();
         using var client = api.CreateClient();
         var id = Guid.NewGuid();
 
-        using var upperCase = await client.GetAsync($"/stories/{id.ToString("D").ToUpperInvariant()}");
-        using var digitsOnly = await client.GetAsync($"/stories/{id:N}");
-        using var braced = await client.GetAsync($"/stories/{id:B}");
+        foreach (var path in new[]
+                 {
+                     "/stories/not-a-guid",
+                     $"/stories/{id:N}",
+                     $"/stories/{id:B}",
+                     $"/stories/{id.ToString("D").ToUpperInvariant()}",
+                 })
+        {
+            using var response = await client.GetAsync(path);
 
-        Assert.Equal(
-            (HttpStatusCode.OK, HttpStatusCode.NotFound, HttpStatusCode.NotFound),
-            (upperCase.StatusCode, digitsOnly.StatusCode, braced.StatusCode));
+            Assert.True(response.StatusCode == HttpStatusCode.OK, $"{path}: {response.StatusCode}");
+            Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
+            Assert.Contains("<div id=\"root\"></div>", await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    [Fact]
+    public async Task A_deeper_story_path_is_not_found()
+    {
+        using var api = new ProgramDependencyWiringTests.ApiApplication();
+        using var client = api.CreateClient();
+
+        using var nested = await client.GetAsync($"/stories/{Guid.NewGuid()}/more");
+        using var nestedNotAnId = await client.GetAsync("/stories/a/b");
+
+        Assert.Equal((HttpStatusCode.NotFound, HttpStatusCode.NotFound), (nested.StatusCode, nestedNotAnId.StatusCode));
     }
 
     [Fact]
