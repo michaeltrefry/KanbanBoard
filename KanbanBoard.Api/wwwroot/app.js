@@ -1001,7 +1001,8 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment, onCopyCommentL
               <span className="comment-meta-end">
                 <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
                 <button type="button" className="comment-copy-link" onClick={() => onCopyCommentLink(storyId, comment.id)}
-                        title="Copy a link to this comment">Copy link</button>
+                        title="Copy a link to this comment"
+                        aria-label={`Copy a link to ${comment.author}'s comment from ${formatDateTime(comment.createdAtUtc)}`}>Copy link</button>
               </span>
             </div>
             <p className="comment-body">{comment.body}</p>
