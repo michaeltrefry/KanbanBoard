@@ -244,7 +244,17 @@ public sealed record CurrentUserDto(
     string Subject,
     string? DisplayName,
     string? Email,
-    DateTimeOffset? LastSeenAtUtc);
+    DateTimeOffset? LastSeenAtUtc,
+    bool IsAdmin = false);
+
+/// <param name="ActiveTokenCount">Tokens that are neither revoked nor expired.</param>
+/// <param name="LastUsedAtUtc">The most recent use of any of its tokens; null when none was ever used.</param>
+public sealed record ServiceIdentitySummaryDto(
+    Guid Id,
+    string Name,
+    DateTimeOffset CreatedAtUtc,
+    int ActiveTokenCount,
+    DateTimeOffset? LastUsedAtUtc);
 
 public sealed record PersonalAccessTokenMetadataDto(
     Guid Id,
