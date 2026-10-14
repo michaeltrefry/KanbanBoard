@@ -76,6 +76,24 @@ public sealed class ServiceIdentityMySqlTests
     }
 
     [Fact]
+    public async Task A_revoke_holds_the_identity_first_so_it_runs_after_or_before_a_rotate_of_the_token()
+    {
+        var database = new FakeDatabase(lockResult: 1) { NonQueryResult = 1 };
+        await using var dbContext = CreatePipelineContext(new DatabaseOptions(), database);
+
+        Assert.False(await ServiceIdentityProvisioner.RevokeTokenAsync(dbContext, IdentityId, Guid.NewGuid(), CancellationToken.None));
+
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+        Assert.True(texts.Count == 2, string.Join("\n---\n", texts));
+        Assert.Equal([0], database.TransactionStarts);
+        Assert.Equal(
+            "UPDATE `AppUsers` AS `a`\nSET `DisabledAtUtc` = `a`.`DisabledAtUtc`\n" +
+            "WHERE (`a`.`Id` = @identityId) AND (`a`.`Issuer` = 'kanban:service-identity')",
+            texts[0]);
+        Assert.Contains("FROM `PersonalAccessTokens`", texts[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task The_command_holds_the_identity_before_it_reads_whether_it_is_disabled()
     {
         var database = new FakeDatabase(lockResult: 1, NamedLockGranted) { NonQueryResult = 1 };
