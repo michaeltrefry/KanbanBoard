@@ -237,6 +237,28 @@ public sealed class WorkItemClaimApiTests
     }
 
     [Fact]
+    public async Task Claim_renew_and_release_each_send_one_board_change_and_a_refused_claim_sends_none()
+    {
+        using var fixture = await ApiFixture.CreateAsync();
+        var caller = await fixture.CreateCallerAsync("Factory");
+        var other = await fixture.CreateCallerAsync("Other");
+        var itemId = await fixture.AddItemAsync();
+        using var changes = fixture.SubscribeToBoardChanges();
+        int Drain() { var count = 0; while (changes.Reader.TryRead(out _)) count++; return count; }
+
+        Assert.Equal(HttpStatusCode.OK, (await fixture.ClaimAsync(itemId, caller, "run-1", 60)).StatusCode);
+        var afterClaim = Drain();
+        Assert.Equal(HttpStatusCode.Conflict, (await fixture.ClaimAsync(itemId, other, "run-2", 60)).StatusCode);
+        var afterRefused = Drain();
+        Assert.Equal(HttpStatusCode.OK, (await fixture.PostAsync($"/api/items/{itemId}/claim/renew", caller, new ClaimWorkItemRequest("run-1", 120))).StatusCode);
+        var afterRenew = Drain();
+        Assert.Equal(HttpStatusCode.OK, (await fixture.PostAsync($"/api/items/{itemId}/claim/release", caller, new ReleaseWorkItemClaimRequest("run-1"))).StatusCode);
+        var afterRelease = Drain();
+
+        Assert.Equal((1, 0, 1, 1), (afterClaim, afterRefused, afterRenew, afterRelease));
+    }
+
+    [Fact]
     public async Task Release_is_refused_when_the_caller_does_not_hold_the_claim()
     {
         using var fixture = await ApiFixture.CreateAsync();

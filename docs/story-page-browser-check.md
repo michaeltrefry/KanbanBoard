@@ -48,3 +48,25 @@ link `https://github.com/acme/app/pull/42` to Story page; claim Story page throu
 | 19 | Press browser Back. | Story page is shown again at `/stories/{storyId}`. |
 | 20 | Open a story with no claim, link or dependency. | Claim shows "Not claimed", Links "No links", Blocked by and Blocks "Nothing". |
 | 21 | `GET /api/items/changes?fromStart=true&itemId={storyId}&projectId={otherId}`. | HTTP 400 `invalid_argument` naming `item_id`; with `projectId={demoId}` or without `projectId` it returns only Story page's entries. |
+
+### Live updates (sc-26158)
+
+Open `/stories/{storyId}` in two tabs, A and B. Changes "from elsewhere" are made in B, or with
+`PATCH /api/items/{storyId}` / `POST /api/items/{storyId}/comments` (or the MCP server).
+
+| # | Step | Expected |
+|---|------|----------|
+| 22 | In B, change the title and set Status to Done; add a comment. | Within a second A shows the new title (field and breadcrumb), Done, the comment and new **Updated** / **Comment added** history entries, without a reload. |
+| 23 | Add a link and a blocker to the story through the API. | A shows them under **Links** and **Blocked by**, and the history entries, without a reload. |
+| 24 | In A, click into the description and type a few words; leave the cursor there. In B, type into the description and set Priority to Critical. | A shows Critical; its description still shows what was typed in A (not B's text). |
+| 25 | In A, click outside the description. | A's description now shows the text saved last (B's). |
+| 26 | In A, type into the title and, within 400 ms, `PATCH` `{"title":"Remote title","priority":"Low"}`. Wait two seconds. | A's title never shows "Remote title"; A shows Low. `GET /api/items/{storyId}` returns A's title and priority Low (A's save wrote only the title). |
+| 27 | In A, type into the title in bursts (pause about half a second between them). | The title never jumps back to an earlier value while the saves come back through the change feed. |
+| 28 | In A, start a comment draft; change the status elsewhere. | The status updates; the draft stays. |
+| 29 | In A, open DevTools → Network and filter `changes`. Click the breadcrumb back to the board, then change the story elsewhere. | One `/api/changes` stream per tab, the board's. After leaving the page the change fetches the board, not `/api/items/{storyId}`. |
+| 30 | Delete the story elsewhere while A shows it. | A shows **Story deleted** / "This story was deleted" with **Back to board**; leaving shows no "Save failed" message. |
+| 31 | Stop the API, change nothing, start it again. | Within a few seconds the board (and an open story page) is read again. |
+| 32 | Claim the story through the MCP server (`claim_work_item`), then renew and release it. | A's **Claim** shows "Claimed by {token identity} · expires {time}", then the new expiry, then "Not claimed", each with a **Claimed** / **Claim renewed** / **Claim released** history entry, without a reload. |
+| 33 | In A, open DevTools → Network and filter `changes`. Create or change a story in another project. | A fetches `/api/items/{storyId}` once but does not read `/api/items/changes?itemId=…` (its history) again. |
+| 34 | In A, type into the title and, within 400 ms, delete the story elsewhere. | A shows **Story deleted**; no "Save failed" message. On the board, the same with the story's slideout open closes the slideout, takes the card off and shows "This story was deleted elsewhere; the edit was not saved." |
+| 35 | Open a story page and, while it shows "Loading story…" (throttle the network in DevTools), change its title elsewhere. | Once loaded, A shows the new title without another change. |
