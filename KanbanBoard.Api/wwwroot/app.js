@@ -224,14 +224,23 @@ function useFeedback() {
 }
 
 /* ============ Links ============ */
-// The absolute address of a story's page.
-function storyPageUrl(id) {
-  return `${window.location.origin}/stories/${id}`;
+// A story id as the app writes it: the hyphenated form (any case).
+const STORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The path of a story's page.
+function storyPath(id) {
+  return `/stories/${id}`;
+}
+
+// The absolute address of a story's page: the story's own url (from App:PublicBaseUrl, as agents get it) when the
+// API gives one, else this page's origin.
+function storyPageUrl(story) {
+  return story.url || `${window.location.origin}${storyPath(story.id)}`;
 }
 
 // The absolute address of one comment on its story's page.
-function commentPageUrl(storyId, commentId) {
-  return `${storyPageUrl(storyId)}#${commentAnchorId(commentId)}`;
+function commentPageUrl(story, commentId) {
+  return `${storyPageUrl(story)}#${commentAnchorId(commentId)}`;
 }
 
 // The element id of a comment on the story page, which a #comment-{id} fragment names.
@@ -1000,7 +1009,7 @@ function StoryNotes({ storyId, local, merge, patch, onAddComment, onCopyCommentL
               <span className="comment-author">{comment.author}</span>
               <span className="comment-meta-end">
                 <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
-                <button type="button" className="comment-copy-link" onClick={() => onCopyCommentLink(storyId, comment.id)}
+                <button type="button" className="comment-copy-link" onClick={() => onCopyCommentLink(comment.id)}
                         title="Copy a link to this comment"
                         aria-label={`Copy a link to ${comment.author}'s comment from ${formatDateTime(comment.createdAtUtc)}`}>Copy link</button>
               </span>
@@ -1069,7 +1078,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             />
           </div>
           <div className="sheet-head-actions">
-            <button className="btn ghost" onClick={() => onCopyLink(story.id)} title="Copy a link to this story's page">Copy link</button>
+            <button className="btn ghost" onClick={() => onCopyLink(story)} title="Copy a link to this story's page">Copy link</button>
             <button className="btn ghost sheet-open-page" onClick={openPage} title="Open as page" aria-label="Open as page">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/>
@@ -1082,7 +1091,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
         <div className="sheet-body">
           <StoryFields local={local} epics={epics} patch={patch}/>
           <StoryNotes key={story.id} storyId={story.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
-                      onCopyCommentLink={onCopyCommentLink}/>
+                      onCopyCommentLink={commentId => onCopyCommentLink(story, commentId)}/>
         </div>
       </aside>
     </>
@@ -1093,7 +1102,7 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
 // A link to another story's page. A plain click opens it here; a modified click is left to the browser (new tab).
 function StoryRef({ item, onOpen }) {
   return (
-    <a className="story-ref" href={`/stories/${item.id}`}
+    <a className="story-ref" href={storyPath(item.id)}
        onClick={e => {
          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
          e.preventDefault();
@@ -1238,8 +1247,13 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
   const openStory = (id) => { flush().finally(() => onOpenStory(id)); };
 
   const load = useCallback(async () => {
-    setLoadState("loading");
     setStory(null);
+    // Not a story id (e.g. /stories/not-a-guid): there is no such story, and the API is not asked.
+    if (!STORY_ID_RE.test(storyId)) {
+      setLoadState("notFound");
+      return;
+    }
+    setLoadState("loading");
     seenChangeSeq.current = latestChangeSeq.current;
     try {
       const loaded = await api.getWorkItem(storyId);
@@ -1373,7 +1387,7 @@ function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, on
           </div>
           <div>
             <StoryNotes key={local.id} storyId={local.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
-                        onCopyCommentLink={onCopyCommentLink} anchored/>
+                        onCopyCommentLink={commentId => onCopyCommentLink(story, commentId)} anchored/>
             <StoryHistory storyId={local.id} local={local} saving={saving} refreshCount={refreshCount}/>
           </div>
         </div>
@@ -2392,9 +2406,10 @@ function viewFromUrl() {
   return view === "settings" || view === "admin" ? view : "board";
 }
 
-// The story id of a /stories/{id} path, or null anywhere else.
+// The segment of a /stories/{segment} path, or null anywhere else. It may not be a story id: the story page then
+// shows its not-found state without asking the API.
 function storyIdFromUrl() {
-  const match = window.location.pathname.match(/^\/stories\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i);
+  const match = window.location.pathname.match(/^\/stories\/([^/]+)\/?$/);
   return match ? match[1] : null;
 }
 
@@ -2409,7 +2424,7 @@ function rawSheetParam() {
 // The story open in the board's slideout (?story={id}), or null; a ?story= that is not a story id counts as none.
 function sheetStoryIdFromUrl() {
   const id = rawSheetParam();
-  return id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) ? id : null;
+  return id && STORY_ID_RE.test(id) ? id : null;
 }
 
 // True when the board's ?story= is not a story id: it is dropped from the URL with the not-found message.
@@ -2506,7 +2521,7 @@ function App() {
     const boardQs = params.toString();
     if (sheetStoryId) params.set("story", sheetStoryId);
     const qs = params.toString();
-    const newUrl = currentStoryId ? `/stories/${currentStoryId}` : `/${qs ? "?" + qs : ""}`;
+    const newUrl = currentStoryId ? storyPath(currentStoryId) : `/${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
     if (newUrl === currentUrl) {
       initialUrlSyncDone.current = true;
@@ -3105,8 +3120,8 @@ function App() {
       () => show("Link copied to the clipboard", "success"),
       e => show(`Couldn't copy the link (${e.message}): ${url}`));
   };
-  const copyStoryLink = (id) => copyLink(storyPageUrl(id));
-  const copyCommentLink = (storyId, commentId) => copyLink(commentPageUrl(storyId, commentId));
+  const copyStoryLink = (story) => copyLink(storyPageUrl(story));
+  const copyCommentLink = (story, commentId) => copyLink(commentPageUrl(story, commentId));
 
   return (
     <div className="shell">
