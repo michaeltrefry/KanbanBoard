@@ -214,6 +214,21 @@ public sealed class AdminServiceIdentityApiTests
         await api.AssertNoTokenAsync();
     }
 
+    // The SQLite tests never see the SQL of MySql.EntityFrameworkCore, which cannot translate every query.
+    [Fact]
+    public void The_tokens_of_the_service_identities_are_read_by_a_query_mysql_can_translate()
+    {
+        using var dbContext = new KanbanDbContext(new DbContextOptionsBuilder<KanbanDbContext>()
+            .UseMySQL("Server=127.0.0.1;Port=3306;Database=kanban_test;User ID=test;Password=test;")
+            .Options);
+
+        var sql = KanbanAdminEndpointRouteBuilderExtensions.TokensOfServiceIdentities(dbContext)
+            .Select(token => new { token.AppUserId, token.ExpiresAtUtc, token.RevokedAtUtc, token.LastUsedAtUtc })
+            .ToQueryString();
+
+        Assert.Contains("INNER JOIN `AppUsers`", sql, StringComparison.Ordinal);
+    }
+
     private static async Task AssertEveryAdminEndpointRefusesAsync(HttpClient client, Guid identityId, bool withCsrfToken)
     {
         HttpResponseMessage[] responses =

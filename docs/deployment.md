@@ -89,6 +89,7 @@ Auth__Authority=https://identity.trefry.net/realms/YOUR_REALM
 Auth__ClientId=kanban-board
 Auth__ClientSecret=KEYCLOAK_CLIENT_SECRET
 Auth__RequireHttpsMetadata=true
+Auth__AdminSubjects=KEYCLOAK_USER_ID_OF_EACH_ADMIN
 
 PersonalAccessTokens__Enabled=true
 PersonalAccessTokens__EncryptionKey=32_BYTE_BASE64_OR_64_HEX_KEY
@@ -185,6 +186,18 @@ Give the orchestrator the full-scope token (and the read-scope token where it on
 - Add `--rotate` to revoke the identity's existing tokens once the new pair is issued; if issuing fails, the existing tokens stay valid. MCP caches a validated token for `McpAuthentication__ValidationCacheSeconds` (default 30), so the MCP server can still accept a revoked token for that long; the API does not: it looks the forwarded token up on every call and refuses a revoked or expired one `scope_denied`, read or write.
 - `PersonalAccessTokens__Enabled` must be `true`; otherwise the command exits with code 1 and changes nothing: no identity, no token, and with `--rotate` no revocation.
 
+### Admins
+
+An admin sees an **Admin** button in the web UI, next to **Settings**. The Admin page lists the service identities (name, created, active tokens, last used) and issues a token for one of them (name, scope `read` or `full`, optional expiry); the plaintext is shown once. People keep managing their own tokens on the Settings page; the Admin page never issues a token for a person.
+
+Admins are set with `Auth__AdminSubjects` (on the hosted instance, the GitHub Actions variable or secret `KANBAN_ADMIN_SUBJECTS`, which the deploy writes into `.env.release`): the OIDC subject (`sub`) of each admin, separated by commas, semicolons or spaces. In Keycloak the subject is the user's **ID** (Users -> the user -> Details), a UUID; a signed-in user also sees their own subject on the Settings page. The match is exact and case-sensitive. The subject is matched rather than the email, which a user may be able to change or leave unverified at the provider.
+
+- Unset or empty: nobody is an admin, the Admin button is not shown, and every `/api/admin` endpoint answers 403 `{"code":"admin_required"}`.
+- Only a signed-in browser session counts. A request of the MCP server (internal secret, with or without a forwarded token) and a request carrying an `Authorization` header are refused with the same 403, whoever they are for.
+- With `Auth__Enabled=false` there is no signed-in user, so nobody is an admin.
+- Issuing needs `PersonalAccessTokens__Enabled=true`; otherwise it is refused with 503 `{"code":"tokens_disabled"}`.
+- A change to the list takes effect when the API restarts (on the hosted instance: the next deploy).
+
 ### Acceptance run
 
 After a deploy of the factory tools, run the acceptance script from a checkout of the deployed commit, with both tokens of the service identity and its name:
@@ -258,6 +271,7 @@ Required:
 Optional:
 
 - `LINODE_SSH_PORT`: SSH port. Defaults to `22` if omitted. Variable or secret.
+- `KANBAN_ADMIN_SUBJECTS`: the admins of the Admin page (service identities and their tokens), written to `Auth__AdminSubjects`. Variable or secret. See [Admins](#admins). Unset or empty: nobody is an admin and the page is not shown.
 - `KANBAN_DB_MIGRATE_ON_STARTUP`: `false` stops the API from applying EF Core migrations on startup. Defaults to `true` if omitted. Only the lowercase values `true` and `false` are accepted; the deploy fails before touching the server on any other value. Variable.
 - `LINODE_SSH_KEY_B64`: base64-encoded full private key. Secret. Optional alternative to `LINODE_SSH_KEY` if multiline secrets are troublesome.
 - `LINODE_SSH_KEY_PASSPHRASE`: passphrase for `LINODE_SSH_KEY`, only needed if the private key is passphrase-protected. Secret.

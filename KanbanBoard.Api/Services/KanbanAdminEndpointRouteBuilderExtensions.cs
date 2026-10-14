@@ -30,8 +30,8 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
     public static bool IsAdmin(HttpContext context)
     {
         var authOptions = context.RequestServices.GetRequiredService<IOptions<KanbanAuthOptions>>().Value;
-        if (!authOptions.Enabled ||
-            KanbanInternalApiExtensions.IsInternalApiRequest(context) ||
+        // Without authentication no request carries a signed-in user: the MCP server's are the only ones signed in.
+        if (KanbanInternalApiExtensions.IsInternalApiRequest(context) ||
             context.Request.Headers.ContainsKey("Authorization"))
         {
             return false;
@@ -70,10 +70,7 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 .AsNoTracking()
                 .Where(user => user.Issuer == ServiceIdentityProvisioner.Issuer)
                 .ToListAsync(cancellationToken);
-            var identityIds = identities.Select(user => user.Id).ToList();
-            var tokens = await dbContext.PersonalAccessTokens
-                .AsNoTracking()
-                .Where(token => identityIds.Contains(token.AppUserId))
+            var tokens = await TokensOfServiceIdentities(dbContext)
                 .Select(token => new { token.AppUserId, token.ExpiresAtUtc, token.RevokedAtUtc, token.LastUsedAtUtc })
                 .ToListAsync(cancellationToken);
             var tokensByIdentity = tokens.ToLookup(token => token.AppUserId);
@@ -137,6 +134,15 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
 
         return endpoints;
     }
+
+    /// <summary>
+    /// The tokens of every service identity, by a join: MySql.EntityFrameworkCore cannot translate a list of ids
+    /// given to <c>Contains</c>.
+    /// </summary>
+    public static IQueryable<PersonalAccessToken> TokensOfServiceIdentities(KanbanDbContext dbContext) =>
+        dbContext.PersonalAccessTokens
+            .AsNoTracking()
+            .Where(token => token.AppUser!.Issuer == ServiceIdentityProvisioner.Issuer);
 
     private static IResult Refusal(int statusCode, string code, string message) =>
         Results.Json(new KanbanErrorDto(code, message), statusCode: statusCode);

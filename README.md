@@ -364,6 +364,8 @@ dotnet KanbanBoard.Api.dll create-service-identity --name factory [--rotate]
 
 The name is the identity's display name and the `claimant` on the items it claims. Running the command again with the same name adds a new token pair to the same identity; `--rotate` also revokes its existing tokens once the new pair is issued. See [docs/deployment.md](docs/deployment.md#factory-service-identity) for the production steps.
 
+An admin (`Auth__AdminSubjects`, see [docs/deployment.md](docs/deployment.md#admins)) can also list the service identities and issue a token for one from the **Admin** page of the web UI.
+
 ### Available tool names
 
 The server lists 37 tools, by these names on the wire. [docs/mcp-contract.md](docs/mcp-contract.md#tool-reference) has every argument of each, with its type, whether it is required, its default and its allowed values.

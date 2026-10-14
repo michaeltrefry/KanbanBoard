@@ -220,6 +220,7 @@ jobs:
           KANBAN_INTERNAL_API_SHARED_SECRET: ${{ secrets.KANBAN_INTERNAL_API_SHARED_SECRET }}
           KANBAN_MARIADB_CONNECTION: ${{ secrets.KANBAN_MARIADB_CONNECTION }}
           KANBAN_DB_MIGRATE_ON_STARTUP: ${{ vars.KANBAN_DB_MIGRATE_ON_STARTUP }}
+          KANBAN_ADMIN_SUBJECTS: ${{ vars.KANBAN_ADMIN_SUBJECTS || secrets.KANBAN_ADMIN_SUBJECTS }}
           GHCR_USERNAME: ${{ vars.GHCR_USERNAME || secrets.GHCR_USERNAME }}
         run: |
           write_env() {
@@ -246,6 +247,7 @@ jobs:
           write_env Auth__ClientId kanban-board
           write_env Auth__ClientSecret "${KANBAN_AUTH_CLIENT_SECRET}"
           write_env Auth__RequireHttpsMetadata true
+          write_env Auth__AdminSubjects "${KANBAN_ADMIN_SUBJECTS}"
           write_env PersonalAccessTokens__Enabled true
           write_env PersonalAccessTokens__EncryptionKey "${KANBAN_PAT_ENCRYPTION_KEY}"
           write_env PersonalAccessTokens__TokenPrefix kbp
