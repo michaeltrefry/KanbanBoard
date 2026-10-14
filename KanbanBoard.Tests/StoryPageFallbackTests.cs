@@ -36,6 +36,24 @@ public sealed class StoryPageFallbackTests
     }
 
     [Fact]
+    public async Task Only_the_hyphenated_id_form_returns_the_app_html()
+    {
+        // The app reads only the hyphenated form from the path; the other forms a Guid parses from would load the
+        // app on a path it does not recognise as a story.
+        using var api = new ProgramDependencyWiringTests.ApiApplication();
+        using var client = api.CreateClient();
+        var id = Guid.NewGuid();
+
+        using var upperCase = await client.GetAsync($"/stories/{id.ToString("D").ToUpperInvariant()}");
+        using var digitsOnly = await client.GetAsync($"/stories/{id:N}");
+        using var braced = await client.GetAsync($"/stories/{id:B}");
+
+        Assert.Equal(
+            (HttpStatusCode.OK, HttpStatusCode.NotFound, HttpStatusCode.NotFound),
+            (upperCase.StatusCode, digitsOnly.StatusCode, braced.StatusCode));
+    }
+
+    [Fact]
     public async Task An_unknown_api_path_is_still_a_404_without_html()
     {
         using var api = new ProgramDependencyWiringTests.ApiApplication();

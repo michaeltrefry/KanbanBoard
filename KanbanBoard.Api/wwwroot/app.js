@@ -730,13 +730,23 @@ function useStoryEditor(story, onUpdate) {
   const [saving, setSaving] = useState(false);
   const saveTimer = useRef(null);
   const pending = useRef(null);
+  const inFlight = useRef(Promise.resolve());
 
-  useEffect(() => { setLocal(story); }, [story?.id]);
+  // Another story (or none): an edit of the previous one still waiting for its debounce is saved now, not dropped.
+  useEffect(() => {
+    if (pending.current && pending.current.id !== story?.id) {
+      clearTimeout(saveTimer.current);
+      save(pending.current);
+    }
+    setLocal(story);
+  }, [story?.id]);
 
   const save = (next) => {
     pending.current = null;
     setSaving(true);
-    return Promise.resolve(onUpdate(next)).finally(() => setSaving(false));
+    const request = Promise.resolve(onUpdate(next)).finally(() => setSaving(false));
+    inFlight.current = request.catch(() => {});
+    return request;
   };
 
   const patch = (p) => {
@@ -749,7 +759,8 @@ function useStoryEditor(story, onUpdate) {
 
   const flush = () => {
     clearTimeout(saveTimer.current);
-    return pending.current ? save(pending.current) : Promise.resolve();
+    // A save already under way is waited for too.
+    return pending.current ? save(pending.current) : inFlight.current;
   };
 
   return { local, setLocal, saving, patch, flush };
@@ -817,7 +828,8 @@ function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
     try {
       localStorage.setItem("kanban-comment-author", author);
       const saved = await onAddComment(storyId, { author, body });
-      setLocal(saved);
+      // Only while the editor still shows this story; it may have switched to another while the comment saved.
+      setLocal(current => current?.id === saved.id ? saved : current);
       setCommentBody("");
     } finally {
       setCommenting(false);
@@ -852,7 +864,10 @@ function StoryNotes({ storyId, local, setLocal, patch, onAddComment }) {
           <div className="comment-compose-head">Add Comment</div>
           <input
             value={commentAuthor}
-            onChange={e => setCommentAuthor(e.target.value)}
+            onChange={e => {
+              setCommentAuthor(e.target.value);
+              localStorage.setItem("kanban-comment-author", e.target.value);
+            }}
             placeholder="Author"
           />
           <textarea
@@ -924,7 +939,9 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
   const [story, setStory] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | error
   const [loadError, setLoadError] = useState(null);
-  const { local, setLocal, saving, patch } = useStoryEditor(story, onUpdate);
+  const { local, setLocal, saving, patch, flush } = useStoryEditor(story, onUpdate);
+  // Saves a pending edit first, so coming back to this page loads the story as it was left.
+  const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
 
   const load = useCallback(async () => {
     setLoadState("loading");
@@ -955,7 +972,7 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
           <p>{notFound ? "It may have been deleted, or the link is wrong." : loadError}</p>
           <div className="settings-actions">
             {!notFound && <button className="btn" type="button" onClick={load}>Retry</button>}
-            <button className="btn" type="button" onClick={() => onOpenBoard(null, null)}>Back to board</button>
+            <button className="btn" type="button" onClick={() => leave(null, null)}>Back to board</button>
           </div>
         </div>
       </section>
@@ -967,18 +984,23 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
   }
 
   const project = projects.find(p => p.id === local.projectId) || null;
-  const epic = epics.find(e => e.id === local.epicId) || (local.epic?.id === local.epicId ? local.epic : null);
+  // App's epics are those of its selected project, which is not always the story's (until the page scopes the board,
+  // or when the story's project is archived): only the story's project's epics, and its own epic from the story.
+  const storyEpics = epics.filter(e => e.projectId === local.projectId && (!e.isArchived || e.id === local.epicId));
+  const ownEpic = local.epic?.id === local.epicId ? local.epic : null;
+  const epic = storyEpics.find(e => e.id === local.epicId) || ownEpic;
+  const epicOptions = epic && !storyEpics.includes(epic) ? [...storyEpics, epic] : storyEpics;
   return (
     <section className="story-page">
       <nav className="story-crumbs" aria-label="Breadcrumb">
         <a href={`/?project=${local.projectId}`}
-           onClick={e => { e.preventDefault(); onOpenBoard(local.projectId, null); }}>
+           onClick={e => { e.preventDefault(); leave(local.projectId, null); }}>
           {project?.name || "Project"}
         </a>
         {epic && <>
           <span className="sep">›</span>
           <a href={`/?project=${local.projectId}&epic=${epic.id}`}
-             onClick={e => { e.preventDefault(); onOpenBoard(local.projectId, epic.id); }}>
+             onClick={e => { e.preventDefault(); leave(local.projectId, epic.id); }}>
             {epic.name}
           </a>
         </>}
@@ -998,7 +1020,7 @@ function StoryPage({ storyId, projects, epics, onLoaded, onUpdate, onAddComment,
           </div>
         </header>
         <div className="story-page-body">
-          <StoryFields local={local} epics={epics.filter(e => !e.isArchived || e.id === local.epicId)} patch={patch}/>
+          <StoryFields local={local} epics={epicOptions} patch={patch}/>
           <StoryNotes key={local.id} storyId={local.id} local={local} setLocal={setLocal} patch={patch} onAddComment={onAddComment}/>
         </div>
       </div>
@@ -2339,7 +2361,8 @@ function App() {
         labels: next.labels || null,
       });
       setItems(cur => cur.map(s => s.id === saved.id ? saved : s));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
       return saved;
     } catch (e) {
       show(`Save failed: ${e.message}`);
@@ -2360,7 +2383,8 @@ function App() {
     try {
       const saved = await api.addWorkItemComment(id, payload);
       setItems(cur => cur.map(item => item.id === saved.id ? saved : item));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
       return saved;
     } catch (e) {
       show(`Comment failed: ${e.message}`);

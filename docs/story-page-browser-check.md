@@ -27,4 +27,4 @@ browser) against a running API before an epic story is closed. Each later story 
 | 8 | Press browser Back. | The board is shown again at its previous URL. |
 | 9 | Open `/stories/00000000-0000-0000-0000-000000000001`. | The app loads and shows **Story not found** / "There is no story with this id", with a **Back to board** button. |
 | 10 | Click **Back to board**. | The board is shown at `/?project=…`. |
-| 11 | Open `/stories/not-a-guid`, `/api/does-not-exist` and `/styles.css`. | The first two are plain 404s (no app HTML); `/styles.css` is served as CSS. |
+| 11 | Open `/stories/not-a-guid`, `/stories/{storyId without its hyphens}`, `/api/does-not-exist` and `/styles.css`. | The first three are plain 404s (no app HTML); `/styles.css` is served as CSS. |
