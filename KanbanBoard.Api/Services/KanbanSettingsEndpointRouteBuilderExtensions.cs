@@ -52,6 +52,7 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
 
         group.MapPost("/personal-access-tokens", async (
             CreatePersonalAccessTokenRequest request,
+            HttpContext httpContext,
             ICurrentUserService currentUserService,
             IPersonalAccessTokenService personalAccessTokenService,
             IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
@@ -83,6 +84,8 @@ public static class KanbanSettingsEndpointRouteBuilderExtensions
                 NormalizeScope(request.Scope),
                 cancellationToken);
 
+            // The plaintext is shown once and must not be kept by any cache.
+            httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Created(
                 $"/api/me/personal-access-tokens/{created.Token.Id}",
                 new CreatedPersonalAccessTokenDto(

@@ -114,6 +114,35 @@ public sealed class ServiceIdentityTests
         Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
     }
 
+    // A disabled identity is enabled again only from the admin page; the command never issues a token for it.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Command_refuses_a_disabled_identity_and_writes_nothing(bool relational, bool rotate)
+    {
+        await using var services = CreateServices(relational: relational);
+        var dbContext = services.GetRequiredService<KanbanDbContext>();
+        var patService = services.GetRequiredService<IPersonalAccessTokenService>();
+        var first = await ServiceIdentityProvisioner.ProvisionAsync(dbContext, patService, "Factory", rotate: false, CancellationToken.None);
+        first.User.DisabledAtUtc = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync();
+        dbContext.ChangeTracker.Clear();
+        var error = new StringWriter();
+        var output = new StringWriter();
+
+        var exitCode = await ServiceIdentityCommand.RunAsync(
+            [ServiceIdentityCommand.CommandName, "--name", "FACTORY", .. rotate ? new[] { "--rotate" } : []], services, output, error, CancellationToken.None);
+
+        Assert.Equal(1, exitCode);
+        Assert.Equal(ServiceIdentityProvisioner.DisabledMessage("Factory") + Environment.NewLine, error.ToString());
+        Assert.Empty(output.ToString());
+        var tokens = await dbContext.PersonalAccessTokens.AsNoTracking().ToListAsync();
+        Assert.Equal(2, tokens.Count);
+        Assert.All(tokens, token => Assert.Null(token.RevokedAtUtc));
+        Assert.Equal("Factory", (await dbContext.AppUsers.AsNoTracking().SingleAsync()).DisplayName);
+    }
+
     // The in-memory provider has no transactions, so there the order of the writes alone must protect the old tokens.
     [Theory]
     [InlineData(false)]

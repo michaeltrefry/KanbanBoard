@@ -110,7 +110,7 @@ public static class KanbanInternalApiExtensions
     }
 
     public const string UnknownTokenMessage =
-        "The forwarded personal access token does not exist, was revoked or has expired, and cannot be used.";
+        "The forwarded personal access token does not exist, was revoked or has expired, or belongs to a disabled service identity, and cannot be used.";
 
     public const string ReadOnlyScopeMessage =
         "This personal access token has the 'read' scope and cannot create, update, or delete data.";

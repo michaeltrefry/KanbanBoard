@@ -15,6 +15,12 @@ public static class KanbanAdminErrorCodes
 
     /// <summary>Personal access tokens are disabled on this server, so no token can be issued.</summary>
     public const string TokensDisabled = "tokens_disabled";
+
+    /// <summary>A service identity with that name, in any case, already exists; nothing was created.</summary>
+    public const string IdentityExists = "identity_exists";
+
+    /// <summary>The service identity is disabled, so no token is issued for it; nothing was written.</summary>
+    public const string IdentityDisabled = "identity_disabled";
 }
 
 public static class KanbanAdminEndpointRouteBuilderExtensions
@@ -65,33 +71,54 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
             .WithTags("Admin");
 
         group.MapGet("/service-identities", async (KanbanDbContext dbContext, CancellationToken cancellationToken) =>
-        {
-            var identities = await dbContext.AppUsers
-                .AsNoTracking()
-                .Where(user => user.Issuer == ServiceIdentityProvisioner.Issuer)
-                .ToListAsync(cancellationToken);
-            var tokens = await TokensOfServiceIdentities(dbContext)
-                .Select(token => new { token.AppUserId, token.ExpiresAtUtc, token.RevokedAtUtc, token.LastUsedAtUtc })
-                .ToListAsync(cancellationToken);
-            var tokensByIdentity = tokens.ToLookup(token => token.AppUserId);
-            var now = DateTimeOffset.UtcNow;
-
-            return Results.Ok(identities
-                .Select(user => new ServiceIdentitySummaryDto(
-                    user.Id,
-                    user.DisplayName ?? user.Subject,
-                    user.CreatedAtUtc,
-                    tokensByIdentity[user.Id].Count(token =>
-                        token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now)),
-                    tokensByIdentity[user.Id].Max(token => token.LastUsedAtUtc)))
-                .OrderBy(identity => identity.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList());
-        })
+            Results.Ok(await SummariesAsync(dbContext, null, cancellationToken)))
         .WithName("ListServiceIdentities");
+
+        group.MapPost("/service-identities", async (
+            CreateServiceIdentityRequest request,
+            KanbanDbContext dbContext,
+            CancellationToken cancellationToken) =>
+        {
+            // The name rules of the create-service-identity command.
+            var name = ServiceIdentityProvisioner.NormalizeName(request.Name);
+            if (name is null)
+            {
+                return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, ServiceIdentityProvisioner.InvalidNameMessage);
+            }
+
+            var created = await ServiceIdentityProvisioner.CreateAsync(dbContext, name, cancellationToken);
+            if (created is null)
+            {
+                return Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityExists,
+                    $"A service identity named '{name}' already exists.");
+            }
+
+            return Results.Json((await SummariesAsync(dbContext, created.Id, cancellationToken)).Single(), statusCode: StatusCodes.Status201Created);
+        })
+        .WithName("CreateServiceIdentity");
+
+        group.MapPost("/service-identities/{identityId:guid}/disable", async (
+            Guid identityId,
+            KanbanDbContext dbContext,
+            CancellationToken cancellationToken) =>
+            await ServiceIdentityProvisioner.DisableAsync(dbContext, identityId, cancellationToken)
+                ? Results.Ok((await SummariesAsync(dbContext, identityId, cancellationToken)).Single())
+                : IdentityNotFound(identityId))
+        .WithName("DisableServiceIdentity");
+
+        group.MapPost("/service-identities/{identityId:guid}/enable", async (
+            Guid identityId,
+            KanbanDbContext dbContext,
+            CancellationToken cancellationToken) =>
+            await ServiceIdentityProvisioner.EnableAsync(dbContext, identityId, cancellationToken)
+                ? Results.Ok((await SummariesAsync(dbContext, identityId, cancellationToken)).Single())
+                : IdentityNotFound(identityId))
+        .WithName("EnableServiceIdentity");
 
         group.MapPost("/service-identities/{identityId:guid}/tokens", async (
             Guid identityId,
             CreatePersonalAccessTokenRequest request,
+            HttpContext httpContext,
             KanbanDbContext dbContext,
             IPersonalAccessTokenService personalAccessTokenService,
             IOptions<PersonalAccessTokenOptions> personalAccessTokenOptions,
@@ -109,12 +136,20 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 return Refusal(StatusCodes.Status400BadRequest, KanbanErrorCodes.InvalidArgument, validationError);
             }
 
+            // The identity's row is held until the token is stored, so a disable of it waits for this issue (and then
+            // revokes the token) or this issue sees the disable and refuses.
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
             // Only a service identity: this page never mints a token for a person.
-            var identity = await dbContext.AppUsers
-                .FirstOrDefaultAsync(user => user.Id == identityId && user.Issuer == ServiceIdentityProvisioner.Issuer, cancellationToken);
-            if (identity is null)
+            if (await ServiceIdentityProvisioner.LockAsync(dbContext, identityId, cancellationToken) == 0)
             {
-                return Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Service identity {identityId} was not found.");
+                return IdentityNotFound(identityId);
+            }
+
+            var identity = await dbContext.AppUsers.FirstAsync(user => user.Id == identityId, cancellationToken);
+            if (identity.DisabledAtUtc is not null)
+            {
+                return Refusal(StatusCodes.Status409Conflict, KanbanAdminErrorCodes.IdentityDisabled,
+                    ServiceIdentityProvisioner.DisabledMessage(identity.DisplayName ?? identity.Subject));
             }
 
             var created = await personalAccessTokenService.CreateAsync(
@@ -123,7 +158,10 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 request.ExpiresAtUtc,
                 KanbanSettingsEndpointRouteBuilderExtensions.NormalizeScope(request.Scope),
                 cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
 
+            // The plaintext is shown once and must not be kept by any cache.
+            httpContext.Response.Headers.CacheControl = "no-store";
             return Results.Json(
                 new CreatedPersonalAccessTokenDto(
                     KanbanSettingsEndpointRouteBuilderExtensions.ToPersonalAccessTokenMetadataDto(created.Token),
@@ -143,6 +181,50 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
         dbContext.PersonalAccessTokens
             .AsNoTracking()
             .Where(token => token.AppUser!.Issuer == ServiceIdentityProvisioner.Issuer);
+
+    /// <summary>
+    /// The summary of every service identity, or of the one with <paramref name="identityId"/>, ordered by name.
+    /// </summary>
+    public static async Task<List<ServiceIdentitySummaryDto>> SummariesAsync(
+        KanbanDbContext dbContext,
+        Guid? identityId,
+        CancellationToken cancellationToken)
+    {
+        var identityQuery = dbContext.AppUsers
+            .AsNoTracking()
+            .Where(user => user.Issuer == ServiceIdentityProvisioner.Issuer);
+        var tokenQuery = TokensOfServiceIdentities(dbContext);
+        if (identityId is { } id)
+        {
+            identityQuery = identityQuery.Where(user => user.Id == id);
+            tokenQuery = tokenQuery.Where(token => token.AppUserId == id);
+        }
+
+        var identities = await identityQuery.ToListAsync(cancellationToken);
+        var tokens = await tokenQuery
+            .Select(token => new { token.AppUserId, token.ExpiresAtUtc, token.RevokedAtUtc, token.LastUsedAtUtc })
+            .ToListAsync(cancellationToken);
+        var tokensByIdentity = tokens.ToLookup(token => token.AppUserId);
+        var now = DateTimeOffset.UtcNow;
+
+        return identities
+            .Select(user => new ServiceIdentitySummaryDto(
+                user.Id,
+                user.DisplayName ?? user.Subject,
+                user.CreatedAtUtc,
+                // None of a disabled identity's tokens is accepted, whether or not it was revoked.
+                user.DisabledAtUtc is not null
+                    ? 0
+                    : tokensByIdentity[user.Id].Count(token =>
+                        token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now)),
+                tokensByIdentity[user.Id].Max(token => token.LastUsedAtUtc),
+                user.DisabledAtUtc))
+            .OrderBy(identity => identity.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static IResult IdentityNotFound(Guid identityId) =>
+        Refusal(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound, $"Service identity {identityId} was not found.");
 
     private static IResult Refusal(int statusCode, string code, string message) =>
         Results.Json(new KanbanErrorDto(code, message), statusCode: statusCode);

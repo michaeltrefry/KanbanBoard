@@ -159,6 +159,12 @@ public sealed class AppUser
     public DateTimeOffset CreatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAtUtc { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? LastSeenAtUtc { get; set; }
+    /// <summary>
+    /// When a service identity was disabled; null while it is enabled, and always for a person. A disabled identity
+    /// gets no new token and none of its tokens is accepted. It is never deleted: comments, claims and change-feed
+    /// entries refer to it by id.
+    /// </summary>
+    public DateTimeOffset? DisabledAtUtc { get; set; }
     public List<PersonalAccessToken> PersonalAccessTokens { get; set; } = [];
 }
 

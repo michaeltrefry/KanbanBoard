@@ -176,6 +176,12 @@ const api = {
 
   listServiceIdentities: () =>
     fetchJson(`/api/admin/service-identities`),
+  createServiceIdentity: (name) =>
+    fetchJson(`/api/admin/service-identities`, { method: "POST", body: JSON.stringify({ name }) }),
+  disableServiceIdentity: (identityId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/disable`, { method: "POST" }),
+  enableServiceIdentity: (identityId) =>
+    fetchJson(`/api/admin/service-identities/${identityId}/enable`, { method: "POST" }),
   issueServiceIdentityToken: (identityId, payload) =>
     fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
 };
@@ -1270,6 +1276,9 @@ function AdminView({ show }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [busyId, setBusyId] = useState(null);
 
   const loadIdentities = useCallback(async () => {
     setLoadError(null);
@@ -1285,7 +1294,54 @@ function AdminView({ show }) {
 
   useEffect(() => { loadIdentities(); }, [loadIdentities]);
 
-  const selected = identities.find(identity => identity.id === selectedId) || null;
+  // A disabled identity gets no token, so the issue form is not offered for it.
+  const selected = identities.find(identity => identity.id === selectedId && !identity.disabled) || null;
+
+  const replaceIdentity = (updated) =>
+    setIdentities(cur => cur.map(identity => identity.id === updated.id ? updated : identity));
+
+  const createIdentity = async (e) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!name) return;
+    setCreating(true);
+    try {
+      const created = await api.createServiceIdentity(name);
+      setNewName("");
+      setSelectedId(created.id);
+      show(`Service identity ${created.name} created`, "success");
+      await loadIdentities();
+    } catch (e) {
+      show(`Create failed: ${e.message}`);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const disableIdentity = async (identity) => {
+    if (!confirm(`Disable "${identity.name}"? All of its tokens are revoked and stop working, and no token can be issued for it until it is enabled again. Enabling it later does not bring the revoked tokens back.`)) return;
+    setBusyId(identity.id);
+    try {
+      replaceIdentity(await api.disableServiceIdentity(identity.id));
+      show(`${identity.name} disabled; its tokens are revoked`, "success");
+    } catch (e) {
+      show(`Disable failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const enableIdentity = async (identity) => {
+    setBusyId(identity.id);
+    try {
+      replaceIdentity(await api.enableServiceIdentity(identity.id));
+      show(`${identity.name} enabled; issue it a new token`, "success");
+    } catch (e) {
+      show(`Enable failed: ${e.message}`);
+    } finally {
+      setBusyId(null);
+    }
+  };
 
   const issueToken = async (payload) => {
     if (!selected) return null;
@@ -1341,7 +1397,7 @@ function AdminView({ show }) {
                 <h2>Service identity token</h2>
               </div>
             </div>
-            <div className="settings-empty">Choose a service identity to issue a token for it.</div>
+            <div className="settings-empty">Choose an enabled service identity to issue a token for it.</div>
           </div>
         )}
 
@@ -1354,15 +1410,35 @@ function AdminView({ show }) {
             <button className="btn small ghost" type="button" onClick={loadIdentities}>Refresh</button>
           </div>
 
+          <form className="sheet-row" style={{gridTemplateColumns:"110px 1fr auto"}} onSubmit={createIdentity}>
+            <label htmlFor="service-identity-name">New identity</label>
+            <input
+              id="service-identity-name"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="Dark Factory"
+              maxLength={120}
+            />
+            <button className="btn small primary" type="submit" disabled={creating || !newName.trim()}>
+              {creating ? "Creating..." : "Create identity"}
+            </button>
+          </form>
+
           {identities.length === 0 ? (
             <div className="settings-empty">No service identities yet.</div>
           ) : (
             <div className="token-list">
               {identities.map(identity => (
-                <article key={identity.id} className={clsx("token-row", identity.id === selectedId && "selected")}>
+                <article
+                  key={identity.id}
+                  className={clsx("token-row", identity.disabled && "inactive", identity.id === selected?.id && "selected")}
+                >
                   <div className="token-main">
                     <div className="token-name-row">
                       <span className="token-name">{identity.name}</span>
+                      {identity.disabled && (
+                        <span className="token-state disabled" title={`Disabled ${formatTokenDate(identity.disabledAtUtc)}`}>Disabled</span>
+                      )}
                     </div>
                   </div>
                   <div className="token-meta">
@@ -1371,14 +1447,35 @@ function AdminView({ show }) {
                     <span>Last used <b>{formatTokenDate(identity.lastUsedAtUtc)}</b></span>
                   </div>
                   <div className="token-actions">
-                    <button
-                      className="btn small ghost"
-                      type="button"
-                      onClick={() => setSelectedId(identity.id)}
-                      disabled={identity.id === selectedId}
-                    >
-                      Issue token
-                    </button>
+                    {identity.disabled ? (
+                      <button
+                        className="btn small ghost"
+                        type="button"
+                        onClick={() => enableIdentity(identity)}
+                        disabled={busyId === identity.id}
+                      >
+                        Enable
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          className="btn small ghost"
+                          type="button"
+                          onClick={() => setSelectedId(identity.id)}
+                          disabled={identity.id === selected?.id}
+                        >
+                          Issue token
+                        </button>
+                        <button
+                          className="btn small ghost"
+                          type="button"
+                          onClick={() => disableIdentity(identity)}
+                          disabled={busyId === identity.id}
+                        >
+                          Disable
+                        </button>
+                      </>
+                    )}
                   </div>
                 </article>
               ))}
