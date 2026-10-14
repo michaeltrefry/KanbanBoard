@@ -133,8 +133,9 @@ const api = {
     fetchJson(`/api/projects/${projectId}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
   createProject: (payload) =>
     fetchJson(`/api/projects`, { method: "POST", body: JSON.stringify(payload) }),
+  // PATCH, not PUT: PUT leaves the repository URL and default branch alone.
   updateProject: (id, payload) =>
-    fetchJson(`/api/projects/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteProject: (id) =>
     fetchJson(`/api/projects/${id}`, { method: "DELETE" }),
 
@@ -368,7 +369,7 @@ function EpicStrip({ epics, items, currentEpicId, setEpicId, onNewEpic, showArch
 }
 
 /* ============ Epic detail + docs rail ============ */
-function EpicDetail({ epic, project, items, docs, onOpenDoc, onNewDoc, onEditEpic, onArchiveEpic, onDeleteEpic }) {
+function EpicDetail({ epic, project, items, docs, onOpenDoc, onNewDoc, onEditEpic, onArchiveEpic, onDeleteEpic, onEditProject }) {
   const count = items.length;
   const done = items.filter(s => s.status === "Done").length;
   const wip = items.filter(s => s.status === "InProgress").length;
@@ -381,12 +382,25 @@ function EpicDetail({ epic, project, items, docs, onOpenDoc, onNewDoc, onEditEpi
         <div className="epic-headline">
           <h1 className="epic-title">{project ? `${project.name} — everything open` : "Select a project"}</h1>
           {project && <p className="epic-summary">{project.description || "No description yet."}</p>}
+          {project?.repository_url && (
+            <p className="epic-summary">
+              {/^https?:\/\//i.test(project.repository_url)
+                ? <a href={project.repository_url} target="_blank" rel="noopener noreferrer">{project.repository_url}</a>
+                : project.repository_url}
+              {project.default_branch && <> · <span className="kbd">{project.default_branch}</span></>}
+            </p>
+          )}
           <div className="epic-headline-stats">
             <span><b>{count}</b> stories</span>
             <span><b>{done}</b> done</span>
             <span><b>{wip}</b> in progress</span>
             {blk > 0 && <span style={{color:"var(--status-blocked-ink)"}}><b>{blk}</b> blocked</span>}
             <span><b>{est}</b> pts total</span>
+            {project && (
+              <span style={{display:"flex", gap:6, marginLeft:"auto"}}>
+                <button className="btn small ghost" onClick={onEditProject}>Edit project</button>
+              </span>
+            )}
           </div>
         </div>
         <aside className="docs-rail">
@@ -1225,6 +1239,8 @@ function ProjectModal({ open, project, onClose, onSave, onDelete }) {
   const [key, setKey] = useState("");
   const [description, setDescription] = useState("");
   const [isArchived, setIsArchived] = useState(false);
+  const [repositoryUrl, setRepositoryUrl] = useState("");
+  const [defaultBranch, setDefaultBranch] = useState("");
   const [err, setErr] = useState(null);
 
   useEffect(() => {
@@ -1233,6 +1249,8 @@ function ProjectModal({ open, project, onClose, onSave, onDelete }) {
     setKey(project?.key || "");
     setDescription(project?.description || "");
     setIsArchived(project?.isArchived || false);
+    setRepositoryUrl(project?.repository_url || "");
+    setDefaultBranch(project?.default_branch || "");
     setErr(null);
   }, [open, project?.id]);
 
@@ -1246,6 +1264,8 @@ function ProjectModal({ open, project, onClose, onSave, onDelete }) {
         key: key.trim().toUpperCase(),
         description: description.trim() || null,
         isArchived,
+        repositoryUrl: repositoryUrl.trim() || null,
+        defaultBranch: defaultBranch.trim() || null,
       });
       onClose();
     } catch (e) {
@@ -1278,6 +1298,14 @@ function ProjectModal({ open, project, onClose, onSave, onDelete }) {
           <div className="sheet-row" style={{gridTemplateColumns: "90px 1fr"}}>
             <label>Description</label>
             <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What's this project about?"/>
+          </div>
+          <div className="sheet-row">
+            <label>Repository</label>
+            <input value={repositoryUrl} onChange={e => setRepositoryUrl(e.target.value)} placeholder="https://github.com/owner/repo.git"/>
+          </div>
+          <div className="sheet-row">
+            <label>Branch</label>
+            <input value={defaultBranch} onChange={e => setDefaultBranch(e.target.value)} placeholder="main"/>
           </div>
           {isEdit && (
             <div className="sheet-row">
@@ -1898,6 +1926,7 @@ function App() {
               onOpenDoc={(d) => setActiveDoc(d)}
               onNewDoc={openNewDoc}
               onEditEpic={() => setEpicModal({ open: true, epic: currentEpic })}
+              onEditProject={() => setProjectModal({ open: true, project: currentProject })}
               onArchiveEpic={toggleEpicArchive}
               onDeleteEpic={removeEpic}
             />
