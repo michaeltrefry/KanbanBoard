@@ -118,6 +118,10 @@ public sealed class AuthenticationMiddlewareTests
     [InlineData("/\\evil.example", "/")]
     [InlineData("/\\evil.example#x", "/")]
     [InlineData("https://evil.example/stories/1#comment-1", "/")]
+    [InlineData("/\t/evil.example", "/")]
+    [InlineData("/\r\n/evil.example", "/")]
+    [InlineData("/\n/evil.example", "/")]
+    [InlineData("/stories/1\t#comment-1", "/")]
     [InlineData("evil.example", "/")]
     [InlineData("#comment-1", "/")]
     [InlineData("", "/")]
@@ -125,9 +129,27 @@ public sealed class AuthenticationMiddlewareTests
         string returnUrl,
         string expectedRedirectUri)
     {
+        await AssertLoginRedirectUriAsync(Uri.EscapeDataString(returnUrl), expectedRedirectUri);
+    }
+
+    [Theory]
+    [InlineData("/%09/evil.example", "/")]
+    [InlineData("%2F%09%2Fevil.example", "/")]
+    [InlineData("/%0D%0A/evil.example", "/")]
+    [InlineData("/%0a/evil.example", "/")]
+    [InlineData("/%2509/evil.example", "/%09/evil.example")]
+    public async Task Login_rejects_percent_encoded_control_characters_in_return_url(
+        string rawReturnUrl,
+        string expectedRedirectUri)
+    {
+        await AssertLoginRedirectUriAsync(rawReturnUrl, expectedRedirectUri);
+    }
+
+    private static async Task AssertLoginRedirectUriAsync(string rawReturnUrlQueryValue, string expectedRedirectUri)
+    {
         using var host = await CreateLoginHostAsync();
 
-        var response = await host.GetTestClient().GetAsync($"/auth/login?returnUrl={Uri.EscapeDataString(returnUrl)}");
+        var response = await host.GetTestClient().GetAsync($"/auth/login?returnUrl={rawReturnUrlQueryValue}");
 
         // The real OIDC handler sends the browser to the identity provider; the RedirectUri it returns to after the
         // callback rides in the protected `state` parameter.

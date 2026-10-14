@@ -230,9 +230,12 @@ public static class KanbanAuthenticationApplicationBuilderExtensions
             return null;
         }
 
+        // Same rules as ASP.NET's IsLocalUrl: "/" not followed by "/" or "\\", and no control characters anywhere.
+        // Browsers strip ASCII tab/CR/LF while parsing a Location, so "/\t/evil.example" would become "//evil.example".
         return returnUrl.StartsWith("/", StringComparison.Ordinal) &&
             !returnUrl.StartsWith("//", StringComparison.Ordinal) &&
-            !returnUrl.StartsWith("/\\", StringComparison.Ordinal)
+            !returnUrl.StartsWith("/\\", StringComparison.Ordinal) &&
+            !returnUrl.Any(char.IsControl)
             ? returnUrl
             : null;
     }
