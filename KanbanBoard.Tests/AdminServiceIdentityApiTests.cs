@@ -395,7 +395,11 @@ public sealed class AdminServiceIdentityApiTests
 
         using var forward = await ForwardAsync(mcp, validated, HttpMethod.Get, "/api/projects", null);
         Assert.Equal(HttpStatusCode.Forbidden, forward.StatusCode);
+        Assert.Equal(KanbanInternalApiExtensions.UnknownTokenMessage, (await forward.Content.ReadFromJsonAsync<KanbanErrorDto>())!.Message);
         Assert.Equal(HttpStatusCode.Unauthorized, await ValidationStatusAsync(mcp, issued.PlaintextToken));
+        // The list counts none of its tokens as active.
+        var listed = await admin.GetFromJsonAsync<List<ServiceIdentitySummaryDto>>("/api/admin/service-identities", ProgramDependencyWiringTests.Json);
+        Assert.Equal((true, 0), (Assert.Single(listed!).Disabled, listed![0].ActiveTokenCount));
     }
 
     [Fact]

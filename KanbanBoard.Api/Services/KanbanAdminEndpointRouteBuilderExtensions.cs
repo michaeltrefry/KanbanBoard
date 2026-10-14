@@ -212,8 +212,11 @@ public static class KanbanAdminEndpointRouteBuilderExtensions
                 user.Id,
                 user.DisplayName ?? user.Subject,
                 user.CreatedAtUtc,
-                tokensByIdentity[user.Id].Count(token =>
-                    token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now)),
+                // None of a disabled identity's tokens is accepted, whether or not it was revoked.
+                user.DisabledAtUtc is not null
+                    ? 0
+                    : tokensByIdentity[user.Id].Count(token =>
+                        token.RevokedAtUtc is null && (token.ExpiresAtUtc is null || token.ExpiresAtUtc > now)),
                 tokensByIdentity[user.Id].Max(token => token.LastUsedAtUtc),
                 user.DisabledAtUtc))
             .OrderBy(identity => identity.Name, StringComparer.OrdinalIgnoreCase)
