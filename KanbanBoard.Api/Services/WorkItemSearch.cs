@@ -1,3 +1,4 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
@@ -30,6 +31,7 @@ public static class WorkItemSearch
         string? query,
         Guid? projectId,
         int? limit,
+        AppOptions app,
         CancellationToken cancellationToken)
     {
         if (!TryNormalizeTerms(query, out var terms))
@@ -52,11 +54,12 @@ public static class WorkItemSearch
                 (item.Description != null && item.Description.ToLower().Contains(term)));
         }
 
-        return await items
+        var results = await items
             .OrderBy(item => item.Title)
             .ThenBy(item => item.Id)
             .Take(pageSize)
             .Select(item => new WorkItemSearchResultDto(item.Id, item.ProjectId, item.Title, item.Type, item.Status, item.Estimate, item.Version))
             .ToListAsync(cancellationToken);
+        return results.Select(result => result with { Url = app.StoryUrl(result.Id) }).ToList();
     }
 }

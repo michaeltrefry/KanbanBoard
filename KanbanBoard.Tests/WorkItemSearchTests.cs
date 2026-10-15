@@ -1,3 +1,4 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
@@ -17,7 +18,7 @@ public sealed class WorkItemSearchTests
         AddItem(dbContext, project, "Unrelated", "Nothing here");
         await dbContext.SaveChangesAsync();
 
-        var results = await WorkItemSearch.SearchAsync(dbContext, "foo", null, null, CancellationToken.None);
+        var results = await WorkItemSearch.SearchAsync(dbContext, "foo", null, null, new AppOptions(), CancellationToken.None);
 
         Assert.Equal(
             new[] { titleMatch.Id, descriptionMatch.Id }.OrderBy(id => id),
@@ -38,7 +39,7 @@ public sealed class WorkItemSearchTests
         AddItem(dbContext, beta, "foo in beta", null);
         await dbContext.SaveChangesAsync();
 
-        var results = await WorkItemSearch.SearchAsync(dbContext, "foo", alpha.Id, null, CancellationToken.None);
+        var results = await WorkItemSearch.SearchAsync(dbContext, "foo", alpha.Id, null, new AppOptions(), CancellationToken.None);
 
         Assert.Equal(alphaItem.Id, Assert.Single(results).Id);
     }
@@ -52,7 +53,7 @@ public sealed class WorkItemSearchTests
         AddItem(dbContext, project, "Login page", "Styling");
         await dbContext.SaveChangesAsync();
 
-        var results = await WorkItemSearch.SearchAsync(dbContext, "  login   TOKEN ", null, null, CancellationToken.None);
+        var results = await WorkItemSearch.SearchAsync(dbContext, "  login   TOKEN ", null, null, new AppOptions(), CancellationToken.None);
 
         var result = Assert.Single(results);
         Assert.Equal(both.Id, result.Id);
@@ -71,9 +72,9 @@ public sealed class WorkItemSearchTests
 
         await dbContext.SaveChangesAsync();
 
-        var defaultPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, null, CancellationToken.None);
-        var smallPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, 3, CancellationToken.None);
-        var oversizedPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, 10_000, CancellationToken.None);
+        var defaultPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, null, new AppOptions(), CancellationToken.None);
+        var smallPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, 3, new AppOptions(), CancellationToken.None);
+        var oversizedPage = await WorkItemSearch.SearchAsync(dbContext, "foo", null, 10_000, new AppOptions(), CancellationToken.None);
 
         Assert.Equal(WorkItemSearch.DefaultLimit, defaultPage.Count);
         Assert.Equal(3, smallPage.Count);

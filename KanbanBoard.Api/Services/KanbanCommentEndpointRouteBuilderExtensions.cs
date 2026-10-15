@@ -1,7 +1,9 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -20,6 +22,7 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
             KanbanDbContext dbContext,
             BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
         {
             var now = timeProvider.GetUtcNow();
@@ -77,6 +80,7 @@ public static class KanbanCommentEndpointRouteBuilderExtensions
             var dto = WorkItemDtoMapper.ToDto(
                 item,
                 now,
+                appOptions.Value,
                 await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
                 await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken)) with
             {

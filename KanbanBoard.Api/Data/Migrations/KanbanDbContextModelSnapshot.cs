@@ -430,6 +430,8 @@ namespace KanbanBoard.Api.Data.Migrations
 
                     b.HasIndex("ProjectId", "Sequence");
 
+                    b.HasIndex("WorkItemId", "Sequence");
+
                     b.ToTable("WorkItemChanges");
                 });
 

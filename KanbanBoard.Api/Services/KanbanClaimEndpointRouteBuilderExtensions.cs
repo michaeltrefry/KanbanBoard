@@ -1,7 +1,9 @@
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Data;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Shared.Contracts;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 
 namespace KanbanBoard.Api.Services;
 
@@ -17,9 +19,11 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
             ClaimWorkItemRequest request,
             HttpContext httpContext,
             KanbanDbContext dbContext,
+            BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            HandleAsync(itemId, request.Marker, request.TtlSeconds, httpContext, dbContext, timeProvider,
+            HandleAsync(itemId, request.Marker, request.TtlSeconds, httpContext, dbContext, changeNotifier, timeProvider, appOptions,
                 (claimant, marker, ttl, now) => WorkItemClaims.ClaimAsync(dbContext, itemId, claimant, marker, ttl!.Value, now, cancellationToken),
                 cancellationToken))
             .WithName("ClaimWorkItem");
@@ -29,9 +33,11 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
             ClaimWorkItemRequest request,
             HttpContext httpContext,
             KanbanDbContext dbContext,
+            BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            HandleAsync(itemId, request.Marker, request.TtlSeconds, httpContext, dbContext, timeProvider,
+            HandleAsync(itemId, request.Marker, request.TtlSeconds, httpContext, dbContext, changeNotifier, timeProvider, appOptions,
                 (claimant, marker, ttl, now) => WorkItemClaims.RenewAsync(dbContext, itemId, claimant, marker, ttl!.Value, now, cancellationToken),
                 cancellationToken))
             .WithName("RenewWorkItemClaim");
@@ -41,9 +47,11 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
             ReleaseWorkItemClaimRequest request,
             HttpContext httpContext,
             KanbanDbContext dbContext,
+            BoardChangeNotifier changeNotifier,
             TimeProvider timeProvider,
+            IOptions<AppOptions> appOptions,
             CancellationToken cancellationToken) =>
-            HandleAsync(itemId, request.Marker, null, httpContext, dbContext, timeProvider,
+            HandleAsync(itemId, request.Marker, null, httpContext, dbContext, changeNotifier, timeProvider, appOptions,
                 (claimant, marker, _, now) => WorkItemClaims.ReleaseAsync(dbContext, itemId, claimant, marker, now, cancellationToken),
                 cancellationToken))
             .WithName("ReleaseWorkItemClaim");
@@ -57,7 +65,9 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
         int? ttlSeconds,
         HttpContext httpContext,
         KanbanDbContext dbContext,
+        BoardChangeNotifier changeNotifier,
         TimeProvider timeProvider,
+        IOptions<AppOptions> appOptions,
         Func<AppUser, string, TimeSpan?, DateTimeOffset, Task<WorkItemClaimResult>> write,
         CancellationToken cancellationToken)
     {
@@ -84,12 +94,18 @@ public static class KanbanClaimEndpointRouteBuilderExtensions
 
         var result = await write(claimant, marker, ttlSeconds is null ? null : TimeSpan.FromSeconds(ttlSeconds.Value), now);
         var current = result.Current;
+        if (result.Outcome == WorkItemClaimOutcome.Succeeded)
+        {
+            // Board and story page refresh from the change feed: a claim made through MCP shows up live.
+            changeNotifier.Publish();
+        }
 
         return result.Outcome switch
         {
             WorkItemClaimOutcome.Succeeded => Results.Ok(WorkItemDtoMapper.ToDto(
                 current!,
                 now,
+                appOptions.Value,
                 await WorkItemDependencies.LoadAsync(dbContext, itemId, cancellationToken),
                 await WorkItemLinks.LoadAsync(dbContext, itemId, cancellationToken))),
             WorkItemClaimOutcome.NotFound => Error(StatusCodes.Status404NotFound, KanbanErrorCodes.NotFound,

@@ -8,6 +8,8 @@ using KanbanBoard.Shared.Contracts;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using static KanbanBoard.Tests.KanbanToolsClaimTests;
 
 namespace KanbanBoard.Tests;
 
@@ -97,6 +99,41 @@ public sealed class KanbanToolsReadTests
 
         Assert.Equal("?query=foo", handler.Requests.Single().RequestUri!.Query);
         Assert.Empty(results);
+    }
+
+    // The url of the item's page, as the API makes it, passes through every read tool that returns work items; when
+    // the API has no public address configured it is still written, as null.
+    [Theory]
+    [InlineData("\"https://kanban.example.com/stories/11111111-1111-1111-1111-111111111111\"")]
+    [InlineData("null")]
+    public async Task Read_tools_pass_the_url_of_the_item_page_through(string url)
+    {
+        var item = $$"""{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","blockers":[],"dependents":[],"links":[],"version":1,"label_list":[],"url":{{url}}}""";
+        var hit = $$"""{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":1,"url":{{url}}}""";
+        await using var server = await McpFixture.CreateAsync(PersonalAccessTokenScopes.Read, request =>
+            Json(HttpStatusCode.OK, request.Path switch
+            {
+                "/api/items/search" => $"[{hit}]",
+                "/api/items/by-link" => $"[{item}]",
+                "/api/items" when request.Query.Contains("limit", StringComparison.Ordinal) => $$"""{"items":[{{item}}]}""",
+                "/api/items" => $"[{item}]",
+                _ => item
+            }));
+
+        CallToolResult[] results =
+        [
+            await server.CallAsync("get_work_item", new() { ["itemId"] = Guid.Parse("11111111-1111-1111-1111-111111111111") }),
+            await server.CallAsync("list_work_items", []),
+            await server.CallAsync("list_work_items", new() { ["limit"] = 5 }),
+            await server.CallAsync("search_work_items", new() { ["query"] = "item" }),
+            await server.CallAsync("find_work_items_by_link", new() { ["url"] = "https://example.test/pr/1" })
+        ];
+
+        Assert.All(results, result =>
+        {
+            Assert.NotEqual(true, result.IsError);
+            Assert.Contains($"\"url\":{url}", Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text, StringComparison.Ordinal);
+        });
     }
 
     [Theory]

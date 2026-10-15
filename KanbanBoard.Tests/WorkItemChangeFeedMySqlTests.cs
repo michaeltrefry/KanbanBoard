@@ -56,6 +56,45 @@ public sealed class WorkItemChangeFeedMySqlTests
     }
 
     [Fact]
+    public async Task The_history_of_one_item_is_a_range_of_its_sequences_and_its_project_is_checked_against_its_row_then_its_entries()
+    {
+        var otherProject = Guid.Parse("44444444-4444-4444-4444-444444444444");
+        var database = new FakeDatabase(lockResult: 1, command =>
+            command.CommandText.Contains("MAX(", StringComparison.Ordinal) ? One("m", 41L)
+            : command.CommandText.StartsWith("SELECT `w`.`ProjectId`", StringComparison.Ordinal)
+                // Only otherProject has a row, which says it belongs to another project; ItemId has neither a row nor an entry.
+                ? command.Parameters.Cast<DbParameter>().Any(parameter => Equals(parameter.Value, otherProject.ToString()))
+                    ? One("ProjectId", otherProject.ToString())
+                    : None("ProjectId")
+                : null);
+        using var host = await StartApiAsync(database);
+        var client = host.GetTestClient();
+        var cursor = WorkItemChangeLog.EncodeCursor(41);
+
+        var ofItem = await client.GetFromJsonAsync<WorkItemChangePageDto>($"/api/items/changes?cursor={cursor}&itemId={ItemId}&limit=7");
+        var feedCommands = database.Commands.Count;
+        var ofItemInProject = await client.GetFromJsonAsync<WorkItemChangePageDto>($"/api/items/changes?cursor={cursor}&itemId={ItemId}&projectId={ProjectId}");
+        var texts = database.Commands.Select(command => Normalize(command.Text)).ToList();
+
+        Assert.Equal((cursor, cursor), (ofItem!.NextCursor, ofItemInProject!.NextCursor));
+        const string columns = "SELECT `w`.`Sequence`, `w`.`ActorName`, `w`.`ActorUserId`, `w`.`Changes`, `w`.`CreatedAtUtc`, `w`.`Kind`, `w`.`ProjectId`, `w`.`WorkItemId`\nFROM `WorkItemChanges` AS `w`\n";
+        // IX_WorkItemChanges_WorkItemId_Sequence: the item and a range of sequences, never the project.
+        const string ofOneItem = columns + "WHERE (`w`.`Sequence` > @after) AND (`w`.`WorkItemId` = @itemId)\nORDER BY `w`.`Sequence`\nLIMIT @p";
+        Assert.True(feedCommands == 2, string.Join("\n---\n", texts));
+        Assert.Equal(ofOneItem, texts[0]);
+        // With a project: the item's row by its primary key, then (no row: the item was deleted) one of its entries.
+        Assert.True(texts.Count == 6, string.Join("\n---\n", texts));
+        Assert.Equal("SELECT `w`.`ProjectId`\nFROM `WorkItems` AS `w`\nWHERE `w`.`Id` = @itemId\nLIMIT 1", texts[2]);
+        Assert.Equal("SELECT `w`.`ProjectId`\nFROM `WorkItemChanges` AS `w`\nWHERE `w`.`WorkItemId` = @itemId\nLIMIT 1", texts[3]);
+        Assert.Equal(ofOneItem, texts[4]);
+
+        using var refused = await client.GetAsync($"/api/items/changes?cursor={cursor}&itemId={otherProject}&projectId={ProjectId}");
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+        // The item's row answered: its entries are not looked at, and the feed is not read.
+        Assert.Equal(7, database.Commands.Count);
+    }
+
+    [Fact]
     public async Task An_entry_is_inserted_and_committed_under_the_named_lock_which_is_released_only_after_the_commit()
     {
         var database = new FakeDatabase(lockResult: 1);
@@ -198,6 +237,13 @@ public sealed class WorkItemChangeFeedMySqlTests
     }
 
     private static string Normalize(string sql) => sql.ReplaceLineEndings("\n").TrimEnd();
+
+    private static DataTable None(string name)
+    {
+        var table = new DataTable();
+        table.Columns.Add(name, typeof(string));
+        return table;
+    }
 
     private static DataTable One(string name, object value)
     {

@@ -126,45 +126,61 @@ async function fetchJson(input, init) {
   return text ? JSON.parse(text) : null;
 }
 
+// Ids are encoded: some come from the URL (?project=, ?story=), and an id must stay one path segment.
+const enc = (id) => encodeURIComponent(id);
+
 const api = {
   listProjects: (includeArchived = false) =>
     fetchJson(`/api/projects${includeArchived ? "?includeArchived=true" : ""}`),
   getProjectBoard: (projectId, { includeArchivedEpics = false } = {}) =>
-    fetchJson(`/api/projects/${projectId}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}${includeArchivedEpics ? "?includeArchivedEpics=true" : ""}`),
   createProject: (payload) =>
     fetchJson(`/api/projects`, { method: "POST", body: JSON.stringify(payload) }),
   // PATCH, not PUT: PUT leaves the repository URL and default branch alone.
   updateProject: (id, payload) =>
-    fetchJson(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteProject: (id) =>
-    fetchJson(`/api/projects/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/projects/${enc(id)}`, { method: "DELETE" }),
 
   listProjectEpics: (projectId, includeArchived = false) =>
-    fetchJson(`/api/projects/${projectId}/epics${includeArchived ? "?includeArchived=true" : ""}`),
+    fetchJson(`/api/projects/${enc(projectId)}/epics${includeArchived ? "?includeArchived=true" : ""}`),
   createEpic: (projectId, payload) =>
-    fetchJson(`/api/projects/${projectId}/epics`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/projects/${enc(projectId)}/epics`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpic: (id, payload) =>
-    fetchJson(`/api/epics/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   deleteEpic: (id) =>
-    fetchJson(`/api/epics/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/epics/${enc(id)}`, { method: "DELETE" }),
 
   listEpicDocuments: (epicId) =>
-    fetchJson(`/api/epics/${epicId}/documents`),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`),
   createEpicDocument: (epicId, payload) =>
-    fetchJson(`/api/epics/${epicId}/documents`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epics/${enc(epicId)}/documents`, { method: "POST", body: JSON.stringify(payload) }),
   updateEpicDocument: (id, payload) =>
-    fetchJson(`/api/epic-documents/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/epic-documents/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
 
+  getWorkItem: (id) =>
+    fetchJson(`/api/items/${enc(id)}`),
   createWorkItem: (payload) =>
     fetchJson(`/api/items`, { method: "POST", body: JSON.stringify(payload) }),
   updateWorkItem: (id, payload) =>
-    fetchJson(`/api/items/${id}`, { method: "PUT", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "PUT", body: JSON.stringify(payload) }),
   addWorkItemComment: (id, payload) =>
-    fetchJson(`/api/items/${id}/comments`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/items/${enc(id)}/comments`, { method: "POST", body: JSON.stringify(payload) }),
   moveWorkItem: (id, status, order) =>
-    fetchJson(`/api/items/${id}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
+    fetchJson(`/api/items/${enc(id)}/move`, { method: "POST", body: JSON.stringify({ status, order }) }),
   deleteWorkItem: (id) =>
-    fetchJson(`/api/items/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/items/${enc(id)}`, { method: "DELETE" }),
+  // The whole history of one item, oldest first: the feed read from its start, page after page, filtered to the item.
+  listItemHistory: async (id) => {
+    const entries = [];
+    let query = "fromStart=true";
+    for (;;) {
+      const page = await fetchJson(`/api/items/changes?itemId=${enc(id)}&limit=200&${query}`);
+      entries.push(...page.items);
+      if (page.items.length < 200) return entries;
+      query = `cursor=${encodeURIComponent(page.next_cursor)}`;
+    }
+  },
 
   getCurrentUser: () =>
     fetchJson(`/api/me`),
@@ -173,24 +189,24 @@ const api = {
   createPersonalAccessToken: (payload) =>
     fetchJson(`/api/me/personal-access-tokens`, { method: "POST", body: JSON.stringify(payload) }),
   revokePersonalAccessToken: (id) =>
-    fetchJson(`/api/me/personal-access-tokens/${id}`, { method: "DELETE" }),
+    fetchJson(`/api/me/personal-access-tokens/${enc(id)}`, { method: "DELETE" }),
 
   listServiceIdentities: () =>
     fetchJson(`/api/admin/service-identities`),
   createServiceIdentity: (name) =>
     fetchJson(`/api/admin/service-identities`, { method: "POST", body: JSON.stringify({ name }) }),
   disableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/disable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/disable`, { method: "POST" }),
   enableServiceIdentity: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/enable`, { method: "POST" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/enable`, { method: "POST" }),
   issueServiceIdentityToken: (identityId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`, { method: "POST", body: JSON.stringify(payload) }),
   listServiceIdentityTokens: (identityId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens`),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens`),
   revokeServiceIdentityToken: (identityId, tokenId) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}`, { method: "DELETE" }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}`, { method: "DELETE" }),
   rotateServiceIdentityToken: (identityId, tokenId, payload) =>
-    fetchJson(`/api/admin/service-identities/${identityId}/tokens/${tokenId}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
+    fetchJson(`/api/admin/service-identities/${enc(identityId)}/tokens/${enc(tokenId)}/rotate`, { method: "POST", body: JSON.stringify(payload) }),
 };
 
 /* ============ Feedback hook ============ */
@@ -205,6 +221,57 @@ function useFeedback() {
   const clear = useCallback(() => { clearTimeout(timer.current); setMsg(null); }, []);
   useEffect(() => () => clearTimeout(timer.current), []);
   return { msg, show, clear };
+}
+
+/* ============ Links ============ */
+// A story id as the app writes it: the hyphenated form (any case).
+const STORY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// The path of a story's page.
+function storyPath(id) {
+  return `/stories/${id}`;
+}
+
+// The absolute address of a story's page: the story's own url (from App:PublicBaseUrl, as agents get it) when the
+// API gives one, else this page's origin.
+function storyPageUrl(story) {
+  return story.url || `${window.location.origin}${storyPath(story.id)}`;
+}
+
+// The absolute address of one comment on its story's page.
+function commentPageUrl(story, commentId) {
+  return `${storyPageUrl(story)}#${commentAnchorId(commentId)}`;
+}
+
+// The element id of a comment on the story page, which a #comment-{id} fragment names.
+function commentAnchorId(commentId) {
+  return `comment-${commentId}`;
+}
+
+// The comment id a #comment-{id} fragment names, or null.
+function commentIdFromHash() {
+  const match = window.location.hash.match(/^#comment-(.+)$/);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+// Puts text on the clipboard. The Clipboard API needs a secure context (https or localhost), so elsewhere, or when it
+// refuses, a hidden textarea and execCommand("copy") are tried. Rejects when neither works.
+async function copyToClipboard(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* falls back below */ }
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  let copied = false;
+  try { copied = document.execCommand("copy"); } catch { copied = false; }
+  area.remove();
+  if (!copied) throw new Error("the browser refused to copy");
 }
 
 function FeedbackBar({ msg, onClose }) {
@@ -272,7 +339,7 @@ function Sidebar({ projects, currentProjectId, setProjectId, onNewProject, showA
 
 /* ============ Topbar ============ */
 function Topbar({ project, epic, view, isAdmin, onOpenPalette, onOpenTweaks, onNewItem, onOpenSettings, onOpenAdmin, onOpenBoard }) {
-  const onPage = view === "settings" || view === "admin";
+  const onPage = view === "settings" || view === "admin" || view === "story";
   return (
     <header className="topbar">
       <div className="crumbs">
@@ -721,32 +788,181 @@ function CommandPalette({ open, onClose, items, projects, epics, currentProject,
   );
 }
 
-/* ============ Detail sheet ============ */
-function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment }) {
+/* ============ Story editor (shared by the detail sheet and the story page) ============ */
+// The fields the editor writes, each with the fields of the story that come with it (the epic's name with its id).
+const EDITABLE_FIELDS = {
+  title: ["title"], description: ["description"], type: ["type"], status: ["status"], priority: ["priority"],
+  epicId: ["epicId", "epic"], estimate: ["estimate"], labels: ["labels", "labelList"],
+};
+
+// The editable field whose control has the focus (each control carries data-field), if any.
+function focusedStoryField() {
+  return document.activeElement?.dataset?.field || null;
+}
+
+// Local copy of the story with a 400ms debounced autosave. flush() saves a pending edit now, before navigating away.
+// A save sends only the fields edited since the last one, so it does not write back other fields as they were read.
+function useStoryEditor(story, onUpdate) {
   const [local, setLocal] = useState(story);
   const [saving, setSaving] = useState(false);
+  const saveTimer = useRef(null);
+  const pending = useRef(null);
+  const pendingFields = useRef(new Set());
+  // Fields of saves under way, with how many of them name each.
+  const savingFields = useRef(new Map());
+  // The highest version a save of this editor answered with: a copy read before that save is older than the page.
+  const savedVersion = useRef(0);
+  const inFlight = useRef(Promise.resolve());
+
+  // Another story (or none): an edit of the previous one still waiting for its debounce is saved now, not dropped.
+  useEffect(() => {
+    if (pending.current && pending.current.id !== story?.id) {
+      clearTimeout(saveTimer.current);
+      save(pending.current);
+    }
+    savedVersion.current = 0;
+    setLocal(story);
+  }, [story?.id]);
+
+  const save = (next) => {
+    const fields = [...pendingFields.current];
+    pending.current = null;
+    pendingFields.current = new Set();
+    fields.forEach(f => savingFields.current.set(f, (savingFields.current.get(f) || 0) + 1));
+    setSaving(true);
+    const request = Promise.resolve(onUpdate(next, fields))
+      .then(saved => {
+        if (saved?.id === next.id) savedVersion.current = Math.max(savedVersion.current, saved.version || 0);
+        return saved;
+      })
+      .finally(() => {
+        fields.forEach(f => savingFields.current.set(f, savingFields.current.get(f) - 1));
+        setSaving(false);
+      });
+    inFlight.current = request.catch(() => {});
+    return request;
+  };
+
+  const patch = (p) => {
+    const next = { ...local, ...p };
+    setLocal(next);
+    Object.keys(p).forEach(f => pendingFields.current.add(f));
+    pending.current = next;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(() => save(next), 400);
+  };
+
+  const flush = () => {
+    clearTimeout(saveTimer.current);
+    // A save already under way is waited for too.
+    return pending.current ? save(pending.current) : inFlight.current;
+  };
+
+  // Drops an edit not yet saved, when there is nothing left to save it to (the story was deleted).
+  const discard = () => {
+    clearTimeout(saveTimer.current);
+    pending.current = null;
+    pendingFields.current = new Set();
+  };
+
+  // Whether a field is being edited here: its control has the focus, or an edit of it is not yet saved.
+  const isEditing = (field) =>
+    focusedStoryField() === field || pendingFields.current.has(field) || savingFields.current.get(field) > 0;
+
+  // Takes a copy of the story read from the server, except for the fields being edited here, which keep what the
+  // viewer typed. A copy older than the editor's own last save is dropped (answers null). Otherwise answers the held
+  // fields it would change.
+  const merge = (fresh) => {
+    if (!fresh || (fresh.version || 0) < savedVersion.current) return null;
+    const held = Object.keys(EDITABLE_FIELDS).filter(isEditing);
+    const differs = (f) => local?.id === fresh.id && (fresh[f] ?? null) !== (local[f] ?? null);
+    setLocal(current => {
+      if (!current || current.id !== fresh.id) return current;
+      const next = { ...fresh };
+      held.forEach(f => EDITABLE_FIELDS[f].forEach(key => { next[key] = current[key]; }));
+      return next;
+    });
+    return held.filter(differs);
+  };
+
+  return { local, saving, patch, flush, discard, merge };
+}
+
+function StoryFields({ local, epics, patch }) {
+  return (
+    <div>
+      <div className="sheet-row">
+        <label>Type</label>
+        <select data-field="type" value={local.type} onChange={e => patch({ type: e.target.value })}>
+          {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Status</label>
+        <select data-field="status" value={local.status} onChange={e => patch({ status: e.target.value })}>
+          {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Priority</label>
+        <select data-field="priority" value={local.priority} onChange={e => patch({ priority: e.target.value })}>
+          {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Epic</label>
+        <select data-field="epicId" value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
+          <option value="">(no epic)</option>
+          {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+        </select>
+      </div>
+      <div className="sheet-row">
+        <label>Estimate</label>
+        <input data-field="estimate" type="number" min={0} max={100} value={local.estimate ?? 0}
+               onChange={e => patch({ estimate: Number(e.target.value) })} />
+      </div>
+      <div className="sheet-row">
+        <label>Labels</label>
+        <input data-field="labels" value={parseLabels(local.labels).join(", ")}
+               onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
+      </div>
+    </div>
+  );
+}
+
+// Description, comments and the comment composer. Key it by story id so another story starts with an empty draft.
+// `anchored` (the story page only, so an id is never on the page twice when a slideout opens over it) gives each
+// comment its #comment-{id} anchor and scrolls to and highlights the comment the URL's fragment names.
+function StoryNotes({ storyId, local, merge, patch, onAddComment, onCopyCommentLink, anchored = false }) {
   const [commentAuthor, setCommentAuthor] = useState(() => localStorage.getItem("kanban-comment-author") || "");
   const [commentBody, setCommentBody] = useState("");
   const [commenting, setCommenting] = useState(false);
-  const saveTimer = useRef(null);
-
-  useEffect(() => { setLocal(story); }, [story?.id]);
-  useEffect(() => { setCommentBody(""); }, [story?.id]);
 
   const comments = useMemo(() => (
     [...(local?.comments || [])]
       .sort((a, b) => new Date(a.createdAtUtc).getTime() - new Date(b.createdAtUtc).getTime())
   ), [local?.comments]);
 
-  const patch = (p) => {
-    const next = { ...local, ...p };
-    setLocal(next);
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => {
-      setSaving(true);
-      onUpdate(next).finally(() => setSaving(false));
-    }, 400);
-  };
+  /* #comment-{id}: the comment the URL names is scrolled to and highlighted once, when it is first rendered for that
+     fragment (on load, or when the fragment changes in place). A re-render from a live update neither scrolls again
+     nor drops the highlight; an id with no comment leaves the page where it is. `target` is a new object for each
+     fragment navigation, so it is acted on once per navigation. */
+  const [target, setTarget] = useState(() => ({ id: anchored ? commentIdFromHash() : null }));
+  const [highlightedId, setHighlightedId] = useState(null);
+  const handledTarget = useRef(null);
+  useEffect(() => {
+    if (!anchored) return;
+    const onHash = () => setTarget({ id: commentIdFromHash() });
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [anchored]);
+  useEffect(() => {
+    if (!anchored || handledTarget.current === target) return;
+    handledTarget.current = target;
+    if (!target.id || !comments.some(c => c.id === target.id)) { setHighlightedId(null); return; }
+    setHighlightedId(target.id);
+    document.getElementById(commentAnchorId(target.id))?.scrollIntoView({ block: "center" });
+  }, [anchored, target, comments]);
 
   const submitComment = async () => {
     const author = commentAuthor.trim();
@@ -756,23 +972,105 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
     setCommenting(true);
     try {
       localStorage.setItem("kanban-comment-author", author);
-      const saved = await onAddComment(story.id, { author, body });
-      setLocal(saved);
+      const saved = await onAddComment(storyId, { author, body });
+      // Only while the editor still shows this story (it may have switched to another while the comment saved), and
+      // without the fields being edited, whose edit is not saved yet.
+      merge(saved);
       setCommentBody("");
     } finally {
       setCommenting(false);
     }
   };
 
+  return (
+    <div>
+      <div className="sheet-section-title">Description</div>
+      <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
+        <textarea
+          data-field="description"
+          placeholder="Add a description…"
+          value={local.description || ""}
+          onChange={e => patch({ description: e.target.value })}
+        />
+      </div>
+      <div className="sheet-section-title" style={{marginTop: 18}}>Comments</div>
+      <div className="comments-panel">
+        {comments.length === 0 && (
+          <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
+        )}
+        {comments.map(comment => (
+          <article
+            key={comment.id}
+            id={anchored ? commentAnchorId(comment.id) : undefined}
+            className={`comment-item${highlightedId === comment.id ? " is-target" : ""}`}
+            aria-current={highlightedId === comment.id ? "location" : undefined}
+          >
+            <div className="comment-meta">
+              <span className="comment-author">{comment.author}</span>
+              <span className="comment-meta-end">
+                <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
+                <button type="button" className="comment-copy-link" onClick={() => onCopyCommentLink(comment.id)}
+                        title="Copy a link to this comment"
+                        aria-label={`Copy a link to ${comment.author}'s comment from ${formatDateTime(comment.createdAtUtc)}`}>Copy link</button>
+              </span>
+            </div>
+            <p className="comment-body">{comment.body}</p>
+          </article>
+        ))}
+        <div className="comment-compose">
+          <div className="comment-compose-head">Add Comment</div>
+          <input
+            value={commentAuthor}
+            onChange={e => {
+              setCommentAuthor(e.target.value);
+              localStorage.setItem("kanban-comment-author", e.target.value);
+            }}
+            placeholder="Author"
+          />
+          <textarea
+            value={commentBody}
+            onChange={e => setCommentBody(e.target.value)}
+            placeholder="Add Comment"
+          />
+          <div className="comment-compose-actions">
+            <button
+              className="btn primary"
+              onClick={submitComment}
+              disabled={commenting || !commentAuthor.trim() || !commentBody.trim()}
+            >
+              {commenting ? "Adding…" : "Add Comment"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ Detail sheet ============ */
+function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, onAddComment, onOpenPage, onCopyLink, onCopyCommentLink }) {
+  const { local, saving, patch, flush, merge } = useStoryEditor(story, onUpdate);
+
+  // Saves a pending edit first, so the page loads the story as it was left here.
+  const openPage = () => {
+    const id = story.id;
+    flush().finally(() => onOpenPage(id));
+  };
+
+  // Saves a pending edit before closing: closing may step back to another document (after a reload), which would
+  // otherwise drop an edit not yet saved.
+  const close = () => { flush().finally(onClose); };
+
   if (!story || !local) return null;
   return (
     <>
-      <div className="sheet-overlay" onClick={onClose}/>
+      <div className="sheet-overlay" onClick={close}/>
       <aside className="sheet">
         <header className="sheet-head">
           <div style={{flex:1}}>
             <div className="sheet-eyebrow">{shortKey(projectKey, story.id)} {saving && "· saving…"}</div>
             <input
+              data-field="title"
               className="sheet-title"
               style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
               value={local.title}
@@ -780,98 +1078,321 @@ function DetailSheet({ story, epics, projectKey, onClose, onUpdate, onDelete, on
             />
           </div>
           <div className="sheet-head-actions">
+            <button className="btn ghost" onClick={() => onCopyLink(story)} title="Copy a link to this story's page">Copy link</button>
+            <button className="btn ghost sheet-open-page" onClick={openPage} title="Open as page" aria-label="Open as page">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9.5 2.5h4v4M13.5 2.5 9 7M6.5 13.5h-4v-4M2.5 13.5 7 9"/>
+              </svg>
+            </button>
             <button className="btn ghost" onClick={() => { if (confirm("Delete this item?")) { onDelete(story.id); onClose(); } }}>Delete</button>
-            <button className="btn" onClick={onClose}>Close</button>
+            <button className="btn" onClick={close}>Close</button>
           </div>
         </header>
         <div className="sheet-body">
-          <div>
-            <div className="sheet-row">
-              <label>Type</label>
-              <select value={local.type} onChange={e => patch({ type: e.target.value })}>
-                {WORK_ITEM_TYPES.map(t => <option key={t}>{t}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Status</label>
-              <select value={local.status} onChange={e => patch({ status: e.target.value })}>
-                {STATUS_OPTIONS.map(s => <option key={s} value={s}>{STATUS_LABEL[s]}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Priority</label>
-              <select value={local.priority} onChange={e => patch({ priority: e.target.value })}>
-                {PRIORITY_ORDER.map(p => <option key={p}>{p}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Epic</label>
-              <select value={local.epicId || ""} onChange={e => patch({ epicId: e.target.value || null })}>
-                <option value="">(no epic)</option>
-                {epics.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
-              </select>
-            </div>
-            <div className="sheet-row">
-              <label>Estimate</label>
-              <input type="number" min={0} max={100} value={local.estimate ?? 0}
-                     onChange={e => patch({ estimate: Number(e.target.value) })} />
-            </div>
-            <div className="sheet-row">
-              <label>Labels</label>
-              <input value={parseLabels(local.labels).join(", ")}
-                     onChange={e => patch({ labels: labelsToString(e.target.value.split(",")) })} />
-            </div>
-          </div>
-          <div>
-            <div className="sheet-section-title">Description</div>
-            <div className="sheet-row" style={{gridTemplateColumns:"1fr"}}>
-              <textarea
-                placeholder="Add a description…"
-                value={local.description || ""}
-                onChange={e => patch({ description: e.target.value })}
-              />
-            </div>
-            <div className="sheet-section-title" style={{marginTop: 18}}>Comments</div>
-            <div className="comments-panel">
-              {comments.length === 0 && (
-                <div className="comments-empty">No comments yet. Add context, updates, or investigation notes below.</div>
-              )}
-              {comments.map(comment => (
-                <article key={comment.id} className="comment-item">
-                  <div className="comment-meta">
-                    <span className="comment-author">{comment.author}</span>
-                    <span className="comment-date">{formatDateTime(comment.createdAtUtc)}</span>
-                  </div>
-                  <p className="comment-body">{comment.body}</p>
-                </article>
-              ))}
-              <div className="comment-compose">
-                <div className="comment-compose-head">Add Comment</div>
-                <input
-                  value={commentAuthor}
-                  onChange={e => setCommentAuthor(e.target.value)}
-                  placeholder="Author"
-                />
-                <textarea
-                  value={commentBody}
-                  onChange={e => setCommentBody(e.target.value)}
-                  placeholder="Add Comment"
-                />
-                <div className="comment-compose-actions">
-                  <button
-                    className="btn primary"
-                    onClick={submitComment}
-                    disabled={commenting || !commentAuthor.trim() || !commentBody.trim()}
-                  >
-                    {commenting ? "Adding…" : "Add Comment"}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          <StoryFields local={local} epics={epics} patch={patch}/>
+          <StoryNotes key={story.id} storyId={story.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
+                      onCopyCommentLink={commentId => onCopyCommentLink(story, commentId)}/>
         </div>
       </aside>
     </>
+  );
+}
+
+/* ============ Story page (/stories/{id}) ============ */
+// A link to another story's page. A plain click opens it here; a modified click is left to the browser (new tab).
+function StoryRef({ item, onOpen }) {
+  return (
+    <a className="story-ref" href={storyPath(item.id)}
+       onClick={e => {
+         if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+         e.preventDefault();
+         onOpen(item.id);
+       }}>
+      <span className="story-ref-title">{item.title}</span>
+      <span className="story-ref-status">{STATUS_LABEL[item.status] || item.status}</span>
+    </a>
+  );
+}
+
+// The claim (read-only), the external links and the dependencies in both directions.
+function StoryRelations({ local, onOpenStory }) {
+  const links = local.links || [];
+  const blockers = local.blockers || [];
+  const dependents = local.dependents || [];
+  return (
+    <div className="story-relations">
+      <div className="sheet-section-title">Claim</div>
+      <div className="story-claim">
+        {local.claimant
+          ? <>Claimed by <strong>{local.claimant}</strong> · expires {formatDateTime(local.claim_expires_at_utc)}</>
+          : <span className="story-none">Not claimed</span>}
+      </div>
+
+      <div className="sheet-section-title">Links</div>
+      {links.length === 0 ? <div className="story-none">No links</div> : (
+        <ul className="story-list">
+          {links.map(link => (
+            <li key={link.id}>
+              <span className="story-link-kind">{link.kind}</span>
+              <a href={link.url} target="_blank" rel="noopener noreferrer">{link.url}</a>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="sheet-section-title">Blocked by</div>
+      {blockers.length === 0 ? <div className="story-none">Nothing</div> : (
+        <ul className="story-list">
+          {blockers.map(item => <li key={item.id}><StoryRef item={item} onOpen={onOpenStory}/></li>)}
+        </ul>
+      )}
+
+      <div className="sheet-section-title">Blocks</div>
+      {dependents.length === 0 ? <div className="story-none">Nothing</div> : (
+        <ul className="story-list">
+          {dependents.map(item => <li key={item.id}><StoryRef item={item} onOpen={onOpenStory}/></li>)}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+const CHANGE_KIND_LABEL = {
+  item_created: "Created", item_updated: "Updated", item_moved: "Moved", item_deleted: "Deleted",
+  claimed: "Claimed", claim_renewed: "Claim renewed", claim_released: "Claim released",
+  comment_added: "Comment added", link_added: "Link added", link_removed: "Link removed",
+  dependency_added: "Blocker added", dependency_removed: "Blocker removed",
+};
+
+// One value of a change entry as short text: a comment by its author, a link by its URL, a blocker by its title
+// when the story still lists it, a long text cut.
+function changeValue(field, value, titles) {
+  if (value === null || value === undefined) return "—";
+  if (field === "comment") return `by ${value.author}`;
+  if (field === "link") return `${value.kind} ${value.url}`;
+  if (field === "blocked_by") return titles[value] || value;
+  if (field === "claim_expires_at_utc") return formatDateTime(value);
+  const text = String(value);
+  return text.length > 80 ? text.slice(0, 80) + "…" : text;
+}
+
+// The story's change history, newest first. Read again after each save on this page and after a comment.
+function StoryHistory({ storyId, local, saving, refreshCount }) {
+  const [entries, setEntries] = useState(null);
+  const [error, setError] = useState(null);
+  const request = useRef(0);
+
+  useEffect(() => {
+    if (saving) return;
+    const current = ++request.current;
+    api.listItemHistory(storyId).then(
+      loaded => { if (current === request.current) { setEntries(loaded.reverse()); setError(null); } },
+      e => { if (current === request.current) setError(e.message); });
+  }, [storyId, saving, local.comments?.length, refreshCount]);
+
+  const titles = useMemo(() => Object.fromEntries(
+    [...(local.blockers || []), ...(local.dependents || [])].map(item => [item.id, item.title])
+  ), [local.blockers, local.dependents]);
+
+  return (
+    <div className="story-history">
+      <div className="sheet-section-title" style={{marginTop: 18}}>History</div>
+      {error && <div className="comments-empty">Couldn't load the history: {error}</div>}
+      {!error && entries === null && <div className="story-none">Loading history…</div>}
+      {!error && entries?.length === 0 && <div className="comments-empty">No recorded changes.</div>}
+      {!error && entries?.length > 0 && (
+        <ol className="history-list">
+          {entries.map(entry => (
+            <li key={entry.sequence} className="history-entry">
+              <div className="comment-meta">
+                <span className="comment-author">{CHANGE_KIND_LABEL[entry.kind] || entry.kind}{entry.actor?.name ? ` · ${entry.actor.name}` : ""}</span>
+                <span className="comment-date">{formatDateTime(entry.created_at_utc)}</span>
+              </div>
+              <ul className="history-changes">
+                {entry.changes.filter(change => change.field !== "version").map(change => (
+                  <li key={change.field}>
+                    <span className="history-field">{change.field}</span>{" "}
+                    {changeValue(change.field, change.old, titles)} → {changeValue(change.field, change.new, titles)}
+                  </li>
+                ))}
+              </ul>
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
+function StoryPage({ storyId, projects, epics, changeSeq, onLoaded, onUpdate, onAddComment, onOpenBoard, onOpenStory, onCopyCommentLink }) {
+  const [story, setStory] = useState(null);
+  const [loadState, setLoadState] = useState("loading"); // loading | ready | notFound | deleted | error
+  const [loadError, setLoadError] = useState(null);
+  // Counts the copies of the story taken from the change feed that differ from the last one, so the history is read
+  // again with each (and not for a change to some other story).
+  const [refreshCount, setRefreshCount] = useState(0);
+  // The story as last read, as JSON: a copy equal to it changes nothing on the page.
+  const lastSeen = useRef(null);
+  // The change count when the story was last read (or its load began): a change after it means a newer copy.
+  const seenChangeSeq = useRef(changeSeq);
+  const latestChangeSeq = useRef(changeSeq);
+  latestChangeSeq.current = changeSeq;
+  // Deleted elsewhere while open here: an edit not yet saved has nothing left to go to.
+  const markDeleted = () => { discard(); setLoadState("deleted"); };
+  // A save that finds the story deleted shows the deleted page, not a failed save.
+  const updateFromPage = (next, fields) => onUpdate(next, fields, { onDeleted: markDeleted });
+  const { local, saving, patch, flush, discard, merge } = useStoryEditor(story, updateFromPage);
+  // Saves a pending edit first, so coming back to this page loads the story as it was left.
+  const leave = (projectId, epicId) => { flush().finally(() => onOpenBoard(projectId, epicId)); };
+  const openStory = (id) => { flush().finally(() => onOpenStory(id)); };
+
+  const load = useCallback(async () => {
+    setStory(null);
+    // Not a story id (e.g. /stories/not-a-guid): there is no such story, and the API is not asked.
+    if (!STORY_ID_RE.test(storyId)) {
+      setLoadState("notFound");
+      return;
+    }
+    setLoadState("loading");
+    seenChangeSeq.current = latestChangeSeq.current;
+    try {
+      const loaded = await api.getWorkItem(storyId);
+      lastSeen.current = JSON.stringify(loaded);
+      setStory(loaded);
+      setLoadState("ready");
+      onLoaded(loaded);
+    } catch (e) {
+      setLoadError(e.message);
+      setLoadState(e.status === 404 ? "notFound" : "error");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storyId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  /* Live updates: App's change feed (its one EventSource) counts every change; the story is read again with each. */
+  const latestRefresh = useRef(0);
+  // An update held back for a field with the focus: taken when the field loses it.
+  const heldBack = useRef(false);
+  const refresh = async () => {
+    const current = ++latestRefresh.current;
+    try {
+      const fresh = await api.getWorkItem(storyId);
+      if (current !== latestRefresh.current) return;
+      const held = merge(fresh);
+      if (held === null) return;
+      heldBack.current = held.length > 0;
+      const seen = JSON.stringify(fresh);
+      if (seen === lastSeen.current) return;
+      lastSeen.current = seen;
+      setRefreshCount(n => n + 1);
+    } catch (e) {
+      if (current !== latestRefresh.current) return;
+      if (e.status === 404) markDeleted();
+    }
+  };
+  // A change counted while the story loaded (after its read, before the answer) is read once it is ready.
+  useEffect(() => {
+    if (loadState !== "ready" || changeSeq === seenChangeSeq.current) return;
+    seenChangeSeq.current = changeSeq;
+    void refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [changeSeq, loadState]);
+  // Leaving a field takes what arrived for it while it had the focus (after the focus has moved, so it is not held).
+  const onFieldBlur = () => {
+    if (heldBack.current) setTimeout(() => { void refresh(); }, 0);
+  };
+
+  if (loadState === "deleted") {
+    return (
+      <section className="story-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">Story deleted</div>
+            <h2>This story was deleted</h2>
+          </div>
+          <p>It was deleted elsewhere while it was open here.</p>
+          <div className="settings-actions">
+            <button className="btn" type="button" onClick={() => leave(null, null)}>Back to board</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (loadState === "notFound" || loadState === "error") {
+    const notFound = loadState === "notFound";
+    return (
+      <section className="story-page">
+        <div className="settings-panel settings-unavailable">
+          <div>
+            <div className="sheet-eyebrow">{notFound ? "Story not found" : "Story unavailable"}</div>
+            <h2>{notFound ? "There is no story with this id" : "Couldn't load this story"}</h2>
+          </div>
+          <p>{notFound ? "It may have been deleted, or the link is wrong." : loadError}</p>
+          <div className="settings-actions">
+            {!notFound && <button className="btn" type="button" onClick={load}>Retry</button>}
+            <button className="btn" type="button" onClick={() => leave(null, null)}>Back to board</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (loadState === "loading" || !local) {
+    return <div className="story-page"><div className="app-loading">Loading story…</div></div>;
+  }
+
+  const project = projects.find(p => p.id === local.projectId) || null;
+  // App's epics are those of its selected project, which is not always the story's (until the page scopes the board,
+  // or when the story's project is archived): only the story's project's epics, and its own epic from the story.
+  const storyEpics = epics.filter(e => e.projectId === local.projectId && (!e.isArchived || e.id === local.epicId));
+  const ownEpic = local.epic?.id === local.epicId ? local.epic : null;
+  const epic = storyEpics.find(e => e.id === local.epicId) || ownEpic;
+  const epicOptions = epic && !storyEpics.includes(epic) ? [...storyEpics, epic] : storyEpics;
+  return (
+    <section className="story-page" onBlur={onFieldBlur}>
+      <nav className="story-crumbs" aria-label="Breadcrumb">
+        <a href={`/?project=${local.projectId}`}
+           onClick={e => { e.preventDefault(); leave(local.projectId, null); }}>
+          {project?.name || "Project"}
+        </a>
+        {epic && <>
+          <span className="sep">›</span>
+          <a href={`/?project=${local.projectId}&epic=${epic.id}`}
+             onClick={e => { e.preventDefault(); leave(local.projectId, epic.id); }}>
+            {epic.name}
+          </a>
+        </>}
+        <span className="sep">›</span>
+        <span className="story-crumb-current">{local.title}</span>
+      </nav>
+      <div className="story-page-panel">
+        <header className="sheet-head">
+          <div style={{flex:1}}>
+            <div className="sheet-eyebrow">{shortKey(project?.key, local.id)} {saving && "· saving…"}</div>
+            <input
+              data-field="title"
+              className="sheet-title"
+              style={{background:"transparent", border:0, outline:"none", padding:0, width:"100%"}}
+              value={local.title}
+              onChange={e => patch({ title: e.target.value })}
+            />
+          </div>
+        </header>
+        <div className="story-page-body">
+          <div>
+            <StoryFields local={local} epics={epicOptions} patch={patch}/>
+            <StoryRelations local={local} onOpenStory={openStory}/>
+          </div>
+          <div>
+            <StoryNotes key={local.id} storyId={local.id} local={local} merge={merge} patch={patch} onAddComment={onAddComment}
+                        onCopyCommentLink={commentId => onCopyCommentLink(story, commentId)} anchored/>
+            <StoryHistory storyId={local.id} local={local} saving={saving} refreshCount={refreshCount}/>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -1885,6 +2406,32 @@ function viewFromUrl() {
   return view === "settings" || view === "admin" ? view : "board";
 }
 
+// The segment of a /stories/{segment} path, or null anywhere else. It may not be a story id: the story page then
+// shows its not-found state without asking the API.
+function storyIdFromUrl() {
+  const match = window.location.pathname.match(/^\/stories\/([^/]+)\/?$/);
+  return match ? match[1] : null;
+}
+
+const STORY_NOT_FOUND = "There is no story with this id; it may have been deleted.";
+
+// The board view's ?story= as written (not checked), or null; only the board view has a slideout.
+function rawSheetParam() {
+  if (storyIdFromUrl() || viewFromUrl() !== "board") return null;
+  return new URLSearchParams(window.location.search).get("story") || null;
+}
+
+// The story open in the board's slideout (?story={id}), or null; a ?story= that is not a story id counts as none.
+function sheetStoryIdFromUrl() {
+  const id = rawSheetParam();
+  return id && STORY_ID_RE.test(id) ? id : null;
+}
+
+// True when the board's ?story= is not a story id: it is dropped from the URL with the not-found message.
+function sheetParamIsInvalid() {
+  return !!rawSheetParam() && !sheetStoryIdFromUrl();
+}
+
 function App() {
   const [projects, setProjects] = useState([]);
   const [epics, setEpics] = useState([]);
@@ -1900,6 +2447,10 @@ function App() {
     return params.get("epic") || null;
   });
   const [currentView, setCurrentView] = useState(() => viewFromUrl());
+  // Set while the story page is showing; the URL is then /stories/{id} and the board's query is left out.
+  const [currentStoryId, setCurrentStoryId] = useState(() => storyIdFromUrl());
+  // Counts the changes signalled by the change feed (/api/changes).
+  const [changeSeq, setChangeSeq] = useState(0);
   // Only shows the Admin entry point; the API refuses every admin call of anyone who is not an admin.
   const [isAdmin, setIsAdmin] = useState(false);
 
@@ -1907,8 +2458,27 @@ function App() {
   const skipUrlPush = useRef(false);       // suppresses pushState when state change came from popstate
   const skipEpicReset = useRef(true);      // keep URL-loaded epic on initial mount + on popstate
   const initialUrlSyncDone = useRef(false);
+  const replaceUrlOnce = useRef(false);    // the next URL change corrects the current entry rather than adding one
 
   const [selectedStory, setSelectedStory] = useState(null);
+  // A slideout story named by the URL (load or Back/Forward) and not open yet: it is looked up, then opened.
+  const [pendingSheetId, setPendingSheetId] = useState(() => sheetStoryIdFromUrl());
+  // What the URL's ?story= shows: the open slideout, else the one being looked up.
+  const sheetStoryId = currentView === "board" && !currentStoryId ? (selectedStory?.id || pendingSheetId) : null;
+  // What the URL is made from, as last rendered: popstate compares the URL it lands on with it.
+  const urlStateRef = useRef(null);
+  urlStateRef.current = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
+  const selectedStoryRef = useRef(null);
+  selectedStoryRef.current = selectedStory;
+  const pendingSheetRef = useRef(null);
+  pendingSheetRef.current = pendingSheetId;
+  const currentProjectRef = useRef(null);
+  currentProjectRef.current = currentProjectId;
+  const sheetLookup = useRef(null);        // the id of the slideout story being read from the API
+  const badSheetParam = useRef(sheetParamIsInvalid()); // the page was loaded with a ?story= that is not a story id
+  // Set while Close's history.back() is on its way, so a second close does not step back a second entry.
+  const sheetClosing = useRef(false);
+  const sheetClosingTimer = useRef(null);
   const [activeDoc, setActiveDoc] = useState(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
@@ -1948,30 +2518,99 @@ function App() {
     if (currentView !== "board") params.set("view", currentView);
     if (currentProjectId) params.set("project", currentProjectId);
     if (currentView === "board" && currentEpicId) params.set("epic", currentEpicId);
+    const boardQs = params.toString();
+    if (sheetStoryId) params.set("story", sheetStoryId);
     const qs = params.toString();
-    const newUrl = `${window.location.pathname}${qs ? "?" + qs : ""}`;
+    const newUrl = currentStoryId ? storyPath(currentStoryId) : `/${qs ? "?" + qs : ""}`;
     const currentUrl = window.location.pathname + window.location.search;
     if (newUrl === currentUrl) {
       initialUrlSyncDone.current = true;
       return;
     }
-    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView };
-    if (!initialUrlSyncDone.current) {
-      window.history.replaceState(state, "", newUrl);
+    // Only the slideout changed: opening it pushes (so Back closes it); switching to another card or closing it
+    // replaces, so cards looked at one after another do not stack up in the history.
+    const currentParams = new URLSearchParams(window.location.search);
+    const hadSheet = currentParams.has("story");
+    currentParams.delete("story");
+    const sheetOnly = !currentStoryId && window.location.pathname === "/" && currentParams.toString() === boardQs;
+    const state = { projectId: currentProjectId, epicId: currentEpicId, view: currentView, storyId: currentStoryId, sheetStoryId };
+    if (!initialUrlSyncDone.current || replaceUrlOnce.current) {
+      replaceUrlOnce.current = false;
+      // Correcting the same story page's address keeps its #comment-{id}; pushes to another address drop the fragment.
+      const keepHash = currentStoryId && storyIdFromUrl() === currentStoryId ? window.location.hash : "";
+      window.history.replaceState(state, "", newUrl + keepHash);
       initialUrlSyncDone.current = true;
+    } else if (sheetOnly && hadSheet) {
+      // An entry pushed by opening the slideout stays marked so, so Close can still step back over it.
+      window.history.replaceState({ ...state, sheetPushed: !!sheetStoryId && !!window.history.state?.sheetPushed }, "", newUrl);
     } else {
-      window.history.pushState(state, "", newUrl);
+      window.history.pushState({ ...state, sheetPushed: sheetOnly && !!sheetStoryId }, "", newUrl);
     }
-  }, [bootstrapped, currentProjectId, currentEpicId, currentView]);
+  }, [bootstrapped, currentProjectId, currentEpicId, currentView, currentStoryId, sheetStoryId]);
+
+  // A ?story= the page was loaded with that is not a story id: the first URL sync above has dropped it; say so.
+  useEffect(() => {
+    if (bootstrapped && badSheetParam.current) {
+      badSheetParam.current = false;
+      show(STORY_NOT_FOUND);
+    }
+  }, [bootstrapped, show]);
+
+  // Closes the slideout. When opening it added the history entry, steps back over it (as browser Back does), so Back
+  // afterwards does not reopen it; otherwise (e.g. the board was loaded with ?story=) just drops it. Used by Close,
+  // the overlay and Delete, and when the story is gone (deleted elsewhere).
+  const closeSheet = useCallback(() => {
+    if (sheetClosing.current) return; // a step back is already on its way: a second one would leave the board
+    const open = selectedStoryRef.current;
+    const urlSheet = new URLSearchParams(window.location.search).get("story");
+    if (open && urlSheet === open.id && window.history.state?.sheetPushed) {
+      sheetClosing.current = true;
+      // popstate clears it; this is in case it never comes.
+      window.clearTimeout(sheetClosingTimer.current);
+      sheetClosingTimer.current = window.setTimeout(() => { sheetClosing.current = false; }, 1000);
+      window.history.back();
+    } else {
+      setSelectedStory(null);
+    }
+  }, []);
+  useEffect(() => () => window.clearTimeout(sheetClosingTimer.current), []);
 
   /* Sync state <- URL on back/forward */
   useEffect(() => {
     const onPop = () => {
+      sheetClosing.current = false;
+      window.clearTimeout(sheetClosingTimer.current);
       const params = new URLSearchParams(window.location.search);
+      if (sheetParamIsInvalid()) {
+        // Not a story id: never looked up; dropped from this entry as a story that does not exist would be.
+        params.delete("story");
+        const qs = params.toString();
+        window.history.replaceState(window.history.state, "", `${window.location.pathname}${qs ? "?" + qs : ""}${window.location.hash}`);
+        show(STORY_NOT_FOUND);
+      }
       const nextProject = params.get("project") || null;
       const nextEpic = params.get("epic") || null;
       const nextView = viewFromUrl();
-      skipUrlPush.current = true;
+      const nextStory = storyIdFromUrl();
+      const nextSheet = sheetStoryIdFromUrl();
+      // Only a popstate that changes what the URL is made from re-runs the URL sync, which then must not push. One that
+      // changes none of it (e.g. a same-document #comment-{id} navigation) must not set the flag: nothing would clear
+      // it, and the next real navigation would not be pushed.
+      const cur = urlStateRef.current;
+      const nextSheetShown = !nextStory && nextView === "board" ? nextSheet : null;
+      const changes = nextStory !== cur.storyId || nextSheetShown !== cur.sheetStoryId
+        || (!nextStory && (nextProject !== cur.projectId || nextEpic !== cur.epicId || nextView !== cur.view));
+      skipUrlPush.current = changes;
+      setCurrentStoryId(nextStory);
+      // Back from an opened slideout closes it (useStoryEditor saves a pending edit as it closes); Forward reopens it.
+      if (selectedStoryRef.current?.id !== nextSheet) {
+        setSelectedStory(null);
+        setPendingSheetId(nextSheet);
+      } else {
+        setPendingSheetId(null);
+      }
+      // A story page's URL carries no board query: leave the board state alone, the page sets its project once it loads.
+      if (nextStory) return;
       setCurrentProjectId(prev => {
         // Only suppress the project-change effect's epic reset if we'd
         // otherwise clobber a valid URL-provided epic.
@@ -2053,17 +2692,26 @@ function App() {
   }, [showArchivedProjects]);
 
   /* Fetch epics + board items + all docs when project changes */
+  // The project the latest load is for: an answer for any other project arrived late and is dropped.
+  const latestDetailProjectId = useRef(null);
   const loadProjectDetail = useCallback(async (projectId) => {
+    latestDetailProjectId.current = projectId;
     if (!projectId) { setEpics([]); setItems([]); setDocs([]); return; }
     try {
       const [board, epicList] = await Promise.all([
         api.getProjectBoard(projectId, { includeArchivedEpics: true }),
         api.listProjectEpics(projectId, true),
       ]);
+      if (latestDetailProjectId.current !== projectId) return;
       setEpics(epicList);
       const nextItems = board.items || [];
       setItems(nextItems);
-      setSelectedStory(current => current ? nextItems.find(item => item.id === current.id) || null : current);
+      // The open slideout gets the story as it is now; a story deleted elsewhere closes it (stepping back over the
+      // entry its opening added, so Back afterwards is not a step to an identical entry).
+      const open = selectedStoryRef.current;
+      const fresh = open && nextItems.find(item => item.id === open.id);
+      if (fresh) setSelectedStory(current => current?.id === fresh.id ? fresh : current);
+      else if (open) closeSheet();
 
       // Drop the current epic selection if it isn't valid for this project
       // (e.g. a stale ?epic=... in the URL after reloading into another project).
@@ -2071,12 +2719,13 @@ function App() {
 
       // Load docs for all epics in the project (small N — fine).
       const nextDocs = (await Promise.all(epicList.map(e => api.listEpicDocuments(e.id).catch(() => [])))).flat();
+      if (latestDetailProjectId.current !== projectId) return;
       setDocs(nextDocs);
       setActiveDoc(current => current ? nextDocs.find(doc => doc.id === current.id) || null : current);
     } catch (e) {
       show(`Couldn't load project: ${e.message}`);
     }
-  }, [show]);
+  }, [show, closeSheet]);
 
   const refreshLiveView = useCallback(async () => {
     const activeProjectId = currentProjectId;
@@ -2101,6 +2750,47 @@ function App() {
     loadProjectDetail(currentProjectId);
   }, [currentProjectId, loadProjectDetail]);
 
+  /* Opens the slideout story the URL names: from the board when it is there, else read from the API (it may be in
+     another project, which the board then switches to). A story that does not exist drops ?story= with a message. */
+  useEffect(() => {
+    if (!bootstrapped || !pendingSheetId) return;
+    if (currentView !== "board" || currentStoryId) { setPendingSheetId(null); return; }
+    const id = pendingSheetId;
+    const known = items.find(item => item.id === id);
+    if (known) {
+      sheetLookup.current = null;
+      setSelectedStory(known);
+      setPendingSheetId(null);
+      return;
+    }
+    if (sheetLookup.current === id) return;
+    sheetLookup.current = id;
+    api.getWorkItem(id).then(story => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      if (story.projectId && story.projectId !== currentProjectRef.current) {
+        // Drops an answer still on its way for the project being left, so it cannot close the slideout.
+        latestDetailProjectId.current = story.projectId;
+        // The URL named a story of another project: the corrected URL replaces it, so Back does not land on it again.
+        replaceUrlOnce.current = true;
+        setCurrentProjectId(prev => {
+          if (prev !== story.projectId) skipEpicReset.current = true;
+          return story.projectId;
+        });
+        setCurrentEpicId(story.epicId || null);
+      }
+      setSelectedStory(story);
+      setPendingSheetId(null);
+    }, e => {
+      if (sheetLookup.current !== id) return;
+      sheetLookup.current = null;
+      if (pendingSheetRef.current !== id) return;
+      setPendingSheetId(null);
+      show(e.status === 404 ? STORY_NOT_FOUND : `Couldn't open the story: ${e.message}`);
+    });
+  }, [bootstrapped, pendingSheetId, items, currentView, currentStoryId, show]);
+
   useEffect(() => {
     if (!bootstrapped || typeof window.EventSource === "undefined") return undefined;
 
@@ -2108,12 +2798,15 @@ function App() {
     let eventSource = null;
     let reconnectTimer = null;
     let refreshTimer = null;
+    let reconnecting = false;
 
     const scheduleRefresh = () => {
       window.clearTimeout(refreshTimer);
       refreshTimer = window.setTimeout(() => {
         if (!disposed) {
           void refreshLiveView();
+          // The story page reads its story again on this; it has no EventSource of its own.
+          setChangeSeq(seq => seq + 1);
         }
       }, 150);
     };
@@ -2123,11 +2816,14 @@ function App() {
 
       eventSource = new window.EventSource("/api/changes");
       eventSource.addEventListener("changed", scheduleRefresh);
+      // Changes made while the stream was down were never signalled: a reconnect refreshes once.
+      if (reconnecting) eventSource.onopen = scheduleRefresh;
       eventSource.onerror = () => {
         eventSource?.close();
         eventSource = null;
 
         if (!disposed) {
+          reconnecting = true;
           reconnectTimer = window.setTimeout(connect, 2000);
         }
       };
@@ -2178,22 +2874,37 @@ function App() {
     }
   };
 
-  const updateStory = async (next) => {
+  // Writes the given fields of the story (every field without a list): a field left out keeps its value on the server.
+  // A story deleted elsewhere is taken off the board and out of the slideout; onDeleted (the story page) shows it.
+  const updateStory = async (next, fields, { onDeleted } = {}) => {
+    const payload = {
+      epicId: next.epicId || null,
+      title: next.title,
+      description: next.description || null,
+      type: next.type,
+      status: next.status,
+      priority: next.priority,
+      estimate: next.estimate ?? null,
+      labels: next.labels || null,
+    };
     try {
-      const saved = await api.updateWorkItem(next.id, {
-        epicId: next.epicId || null,
-        title: next.title,
-        description: next.description || null,
-        type: next.type,
-        status: next.status,
-        priority: next.priority,
-        estimate: next.estimate ?? null,
-        labels: next.labels || null,
-      });
+      const saved = await api.updateWorkItem(next.id, fields
+        ? Object.fromEntries(Object.entries(payload).filter(([field]) => fields.includes(field)))
+        : payload);
       setItems(cur => cur.map(s => s.id === saved.id ? saved : s));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
+      return saved;
     } catch (e) {
+      if (e.status === 404) {
+        setItems(cur => cur.filter(s => s.id !== next.id));
+        if (selectedStoryRef.current?.id === next.id) closeSheet();
+        if (onDeleted) onDeleted();
+        else show("This story was deleted elsewhere; the edit was not saved.");
+        return null;
+      }
       show(`Save failed: ${e.message}`);
+      return null;
     }
   };
 
@@ -2210,7 +2921,8 @@ function App() {
     try {
       const saved = await api.addWorkItemComment(id, payload);
       setItems(cur => cur.map(item => item.id === saved.id ? saved : item));
-      if (selectedStory?.id === saved.id) setSelectedStory(saved);
+      // The sheet as it is now, not as it was when the request started: it may show another story by then.
+      setSelectedStory(current => current?.id === saved.id ? saved : current);
       return saved;
     } catch (e) {
       show(`Comment failed: ${e.message}`);
@@ -2336,7 +3048,7 @@ function App() {
     return <div className="app-loading">Loading your workspace…</div>;
   }
 
-  if (projects.length === 0 && currentView === "board") {
+  if (projects.length === 0 && currentView === "board" && !currentStoryId) {
     return (
       <div className="app-empty">
         <div>
@@ -2361,15 +3073,55 @@ function App() {
     setSelectedStory(null);
     setActiveDoc(null);
     setPaletteOpen(false);
+    setCurrentStoryId(null);
     setCurrentView("settings");
   };
   const openAdmin = () => {
     setSelectedStory(null);
     setActiveDoc(null);
     setPaletteOpen(false);
+    setCurrentStoryId(null);
     setCurrentView("admin");
   };
-  const openBoard = () => setCurrentView("board");
+  const openBoard = () => {
+    setCurrentStoryId(null);
+    setCurrentView("board");
+  };
+
+  /* Story page */
+  // Points the board at a project and epic without the project change clearing the epic.
+  const scopeBoard = (projectId, epicId) => {
+    setCurrentProjectId(prev => {
+      if (prev !== projectId) skipEpicReset.current = true;
+      return projectId;
+    });
+    setCurrentEpicId(epicId);
+  };
+  const openStoryPage = (id) => {
+    setSelectedStory(null);
+    setActiveDoc(null);
+    setPaletteOpen(false);
+    setCurrentStoryId(id);
+  };
+  // The breadcrumb: back to the board, scoped to the story's project and epic when it has them.
+  const openBoardFromStory = (projectId, epicId) => {
+    if (projectId) scopeBoard(projectId, epicId);
+    openBoard();
+  };
+  const onStoryLoaded = (story) => scopeBoard(story.projectId, story.epicId || null);
+
+  /* Board slideout (?story={id}) */
+  const openSheet = (story) => {
+    setPendingSheetId(null);
+    setSelectedStory(story);
+  };
+  const copyLink = (url) => {
+    copyToClipboard(url).then(
+      () => show("Link copied to the clipboard", "success"),
+      e => show(`Couldn't copy the link (${e.message}): ${url}`));
+  };
+  const copyStoryLink = (story) => copyLink(storyPageUrl(story));
+  const copyCommentLink = (story, commentId) => copyLink(commentPageUrl(story, commentId));
 
   return (
     <div className="shell">
@@ -2378,6 +3130,7 @@ function App() {
         currentProjectId={currentProjectId}
         setProjectId={(id) => {
           setCurrentProjectId(id);
+          setCurrentStoryId(null);
           setCurrentView("board");
         }}
         onNewProject={() => setProjectModal({ open: true, project: null })}
@@ -2388,7 +3141,7 @@ function App() {
         <Topbar
           project={currentProject}
           epic={currentEpic}
-          view={currentView === "admin" && !isAdmin ? "board" : currentView}
+          view={currentStoryId ? "story" : currentView === "admin" && !isAdmin ? "board" : currentView}
           isAdmin={isAdmin}
           onOpenPalette={() => setPaletteOpen(true)}
           onOpenTweaks={() => setTweaksOpen(v => !v)}
@@ -2397,7 +3150,21 @@ function App() {
           onOpenAdmin={openAdmin}
           onOpenBoard={openBoard}
         />
-        {currentView === "settings" ? (
+        {currentStoryId ? (
+          <StoryPage
+            key={currentStoryId}
+            storyId={currentStoryId}
+            projects={projects}
+            epics={epics}
+            changeSeq={changeSeq}
+            onLoaded={onStoryLoaded}
+            onUpdate={updateStory}
+            onAddComment={addComment}
+            onOpenBoard={openBoardFromStory}
+            onOpenStory={openStoryPage}
+            onCopyCommentLink={copyCommentLink}
+          />
+        ) : currentView === "settings" ? (
           <UserSettingsView show={show} />
         ) : currentView === "admin" && isAdmin ? (
           <AdminView show={show} />
@@ -2427,7 +3194,7 @@ function App() {
             <Board
               items={boardItems}
               projectKey={currentProject?.key}
-              onOpen={(s) => setSelectedStory(s)}
+              onOpen={openSheet}
               onMove={moveStory}
               showAging={tweaks.showAging}
             />
@@ -2442,19 +3209,22 @@ function App() {
         projects={projects}
         epics={epics}
         currentProject={currentProject}
-        onOpenStory={(s) => setSelectedStory(s)}
+        onOpenStory={openSheet}
         onQuickAdd={quickAdd}
-        setProjectId={setCurrentProjectId}
-        setEpicId={setCurrentEpicId}
+        setProjectId={(id) => { setCurrentProjectId(id); openBoard(); }}
+        setEpicId={(id) => { setCurrentEpicId(id); openBoard(); }}
       />
       <DetailSheet
         story={selectedStory}
         projectKey={currentProject?.key}
         epics={epics.filter(e => !e.isArchived)}
-        onClose={() => setSelectedStory(null)}
+        onClose={closeSheet}
         onUpdate={updateStory}
         onDelete={deleteStory}
         onAddComment={addComment}
+        onOpenPage={openStoryPage}
+        onCopyLink={copyStoryLink}
+        onCopyCommentLink={copyCommentLink}
       />
       <DocSheet
         doc={activeDoc}

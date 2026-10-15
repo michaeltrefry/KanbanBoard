@@ -15,11 +15,11 @@ public sealed class KanbanToolsArgumentTests
     private static readonly Guid OtherId = Guid.Parse("55555555-5555-5555-5555-555555555555");
 
     private const string ItemJson =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","epicId":null,"epic":null,"title":"Item","description":null,"type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"],"url":null}""";
 
-    // ItemJson as the tools return it: the null properties left out, except estimate and the four claim fields.
+    // ItemJson as the tools return it: the null properties left out, except estimate, the four claim fields and url.
     private const string ItemText =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"]}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","priority":"Medium","order":0,"estimate":null,"labels":"factory","comments":[],"createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00","claimant":null,"claimant_id":null,"claim_marker":null,"claim_expires_at_utc":null,"blockers":[],"dependents":[],"links":[],"version":3,"label_list":["factory"],"url":null}""";
 
     private const string ProjectJson =
         """{"id":"22222222-2222-2222-2222-222222222222","name":"App","key":"APP","description":null,"isArchived":false,"createdAtUtc":"2026-10-12T12:00:00+00:00","totalItems":2,"openItems":1,"repository_url":null,"default_branch":"main"}""";
@@ -43,7 +43,7 @@ public sealed class KanbanToolsArgumentTests
         """{"id":"66666666-6666-6666-6666-666666666666","epicId":"44444444-4444-4444-4444-444444444444","title":"Plan","body":"P","createdAtUtc":"2026-10-12T12:00:00+00:00","updatedAtUtc":"2026-10-12T12:00:00+00:00"}""";
 
     private const string HitJson =
-        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":3}""";
+        """{"id":"11111111-1111-1111-1111-111111111111","projectId":"22222222-2222-2222-2222-222222222222","title":"Item","type":"Story","status":"Ready","estimate":null,"version":3,"url":null}""";
 
     // Every tool with every argument it declares. A tool that cannot take all of them in one call has several calls.
     // Array: whether the API answers the tool with a list.
@@ -90,7 +90,7 @@ public sealed class KanbanToolsArgumentTests
         ["add_work_item_comment"] = (false, [new() { ["itemId"] = Id, ["body"] = "note", ["author"] = "claude", ["idempotency_key"] = "k" }]),
         ["add_issue_comment"] = (false, [new() { ["itemId"] = Id, ["author"] = "claude", ["body"] = "note", ["idempotency_key"] = "k" }]),
         ["list_work_item_comments"] = (false, [new() { ["id"] = Id, ["limit"] = 10, ["cursor"] = "c" }]),
-        ["list_changes"] = (false, [new() { ["cursor"] = "c", ["project_id"] = Id, ["limit"] = 10, ["from_start"] = false }]),
+        ["list_changes"] = (false, [new() { ["cursor"] = "c", ["project_id"] = Id, ["item_id"] = Id, ["limit"] = 10, ["from_start"] = false }]),
         ["create_work_item"] = (false,
         [
             new()

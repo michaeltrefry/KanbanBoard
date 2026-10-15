@@ -735,6 +735,7 @@ body::before {
 }
 [data-theme="paper"] .sheet-title { font-weight: 500; font-size: 26px; }
 .sheet-head-actions { display: flex; gap: 6px; }
+.sheet-open-page { display: inline-flex; align-items: center; }
 
 .sheet-body {
   padding: 18px 22px;
@@ -813,6 +814,32 @@ body::before {
   font-family: var(--font-mono);
 }
 
+/* The comment a #comment-{id} link names: an outline as well as the tint, so it does not rely on colour alone. */
+.comment-item { scroll-margin: 24px; }
+.comment-item.is-target {
+  border-color: var(--accent);
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+  background: var(--accent-soft);
+}
+
+.comment-meta-end {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.comment-copy-link {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+.comment-copy-link:hover { color: var(--accent); text-decoration: underline; }
+.comment-copy-link:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: 2px; color: var(--accent); }
+
 .comment-body {
   margin: 0;
   color: var(--ink-2);
@@ -866,6 +893,66 @@ body::before {
 .comment-compose-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+/* ---------- Story page ---------- */
+.story-page {
+  flex: 1;
+  padding: 22px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+.story-crumbs {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--muted);
+  min-width: 0;
+}
+.story-crumbs a { color: var(--ink-2); text-decoration: none; }
+.story-crumbs a:hover { color: var(--accent); text-decoration: underline; }
+.story-crumbs .sep { opacity: 0.5; }
+.story-crumb-current {
+  color: var(--ink); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 40ch;
+}
+.story-page-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+}
+.story-page-body {
+  padding: 18px 22px;
+  display: grid; gap: 28px;
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr);
+  align-items: start;
+}
+.story-relations { display: grid; gap: 6px; margin-top: 18px; }
+.story-relations .sheet-section-title { margin-top: 12px; }
+.story-none { color: var(--muted); font-size: 12px; }
+.story-claim { font-size: 13px; color: var(--ink-2); }
+.story-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.story-list li { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.story-list a { color: var(--ink-2); overflow-wrap: anywhere; }
+.story-list a:hover { color: var(--accent); }
+.story-link-kind {
+  flex: none; font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+}
+.story-ref { display: flex; flex: 1; gap: 8px; align-items: baseline; min-width: 0; text-decoration: none; }
+.story-ref-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.story-ref-status { flex: none; font-size: 11px; color: var(--muted); }
+.history-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.history-entry {
+  padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel-2);
+}
+.history-changes {
+  list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 2px;
+  font-size: 12px; color: var(--ink-2); overflow-wrap: anywhere;
+}
+.history-field { color: var(--muted); font-weight: 600; }
+@media (max-width: 900px) {
+  .story-page { padding: 14px; }
+  .story-page-body { grid-template-columns: 1fr; gap: 18px; }
 }
 
 /* ---------- User settings ---------- */

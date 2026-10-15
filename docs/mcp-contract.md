@@ -265,7 +265,7 @@ The server lists 37 tools: 14 read tools and 23 write tools.
 
 #### `get_work_item`
 
-**Read tool.** Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version.
+**Read tool.** Fetch a single work item by id, including its description, status, comments, its blockers and dependents with their current status, and its external links. estimate is null when not set; label_list is the labels as a list (labels is the same labels as one comma-separated string); version counts the updates and moves of the item, and can be passed to update_work_item and move_work_item as expected_version; url is the page of the item on the board, null when the server has no public address configured.
 
 | Argument | Type | Required | Default | Allowed values | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -285,7 +285,7 @@ The server lists 37 tools: 14 read tools and 23 write tools.
 
 #### `list_changes`
 
-**Read tool.** Read the change feed: every change to a work item, oldest first, as an object {"items": [...], "next_cursor": "..."}. next_cursor is always set, also when items is empty: pass it as cursor to the next call to get the entries written since, each exactly once and in the order they were written. Called without cursor it returns no entries and the cursor of the newest entry, which is where to start following from; from_start true starts at the oldest entry instead. Reading again from the same cursor returns the same entries; fewer entries than limit means the end of the feed was reached. Each entry is {sequence, item_id, project_id, kind, actor, changes, created_at_utc}. kind is one of item_created, item_updated, item_moved, item_deleted, claimed, claim_renewed, claim_released, comment_added, link_added, link_removed, dependency_added, dependency_removed. actor is {id, name} of the identity whose token or browser session made the change, and is left out when the write carried neither. changes lists {field, old, new} for each field the write changed: the item's own fields (title, description, type, status, priority, order, estimate, labels, epic_id, version), the stored claim (claimant_id, claimant, claim_marker, claim_expires_at_utc), comment ({id, author, body}), link ({id, kind, url}), or blocked_by (the id of the blocking item; the entry is on the blocked item). Deleting an item, or its project, also writes one dependency_removed on every item left that it blocked. A text longer than 16384 characters (a description, a comment body) is stored cut to its first 16384 characters, and that change then carries old_truncated true or new_truncated true (left out otherwise): read the item for the whole text. Entries stay after their item is deleted. A write that was refused or changed nothing has no entry (except update_work_item and move_work_item, which always advance version and record it), and neither has a change to a project or an epic itself. A project_id no project has is not refused: it returns no entries and the cursor that was passed. A malformed cursor, a cursor of another tool, a cursor ahead of the newest entry of the feed (the database was restored to an earlier state; start again without cursor), cursor together with from_start, or a limit outside 1 to 200 is refused with code invalid_argument.
+**Read tool.** Read the change feed: every change to a work item, oldest first, as an object {"items": [...], "next_cursor": "..."}. next_cursor is always set, also when items is empty: pass it as cursor to the next call to get the entries written since, each exactly once and in the order they were written. Called without cursor it returns no entries and the cursor of the newest entry, which is where to start following from; from_start true starts at the oldest entry instead. Reading again from the same cursor returns the same entries; fewer entries than limit means the end of the feed was reached. Each entry is {sequence, item_id, project_id, kind, actor, changes, created_at_utc}. kind is one of item_created, item_updated, item_moved, item_deleted, claimed, claim_renewed, claim_released, comment_added, link_added, link_removed, dependency_added, dependency_removed. actor is {id, name} of the identity whose token or browser session made the change, and is left out when the write carried neither. changes lists {field, old, new} for each field the write changed: the item's own fields (title, description, type, status, priority, order, estimate, labels, epic_id, version), the stored claim (claimant_id, claimant, claim_marker, claim_expires_at_utc), comment ({id, author, body}), link ({id, kind, url}), or blocked_by (the id of the blocking item; the entry is on the blocked item). Deleting an item, or its project, also writes one dependency_removed on every item left that it blocked. A text longer than 16384 characters (a description, a comment body) is stored cut to its first 16384 characters, and that change then carries old_truncated true or new_truncated true (left out otherwise): read the item for the whole text. Entries stay after their item is deleted. A write that was refused or changed nothing has no entry (except update_work_item and move_work_item, which always advance version and record it), and neither has a change to a project or an epic itself. A project_id no project has is not refused: it returns no entries and the cursor that was passed; nor is an item_id no item has (an item that was deleted keeps its entries). A malformed cursor, a cursor of another tool, a cursor ahead of the newest entry of the feed (the database was restored to an earlier state; start again without cursor), cursor together with from_start, item_id together with a project_id that does not own the item, or a limit outside 1 to 200 is refused with code invalid_argument.
 
 | Argument | Type | Required | Default | Allowed values | Description |
 | --- | --- | --- | --- | --- | --- |
@@ -293,6 +293,7 @@ The server lists 37 tools: 14 read tools and 23 write tools.
 | `project_id` | string (GUID) | no |  |  | Only entries of work items of this project. The cursor is a position in the whole feed, so one cursor can be used with any project_id or with none. |
 | `limit` | integer | no |  |  | Most entries to return, 1 to 200. 50 when not passed. |
 | `from_start` | boolean | no | `false` |  | true reads from the oldest entry of the feed. Cannot be combined with cursor. |
+| `item_id` | string (GUID) | no |  |  | Only entries of this work item: its history, with from_start true. Like project_id it keeps the cursor a position in the whole feed. |
 
 #### `list_epic_documents`
 
@@ -604,6 +605,7 @@ Every tool that returns a work item returns this shape.
 | `links` | array of [Link](#link) | always | Oldest first. `[]` when there are none. |
 | `version` | integer | always | The write counter. See [`version`](#version-and-expected_version). |
 | `label_list` | array of string | always | The labels of `labels` as a list, in the same order. `[]` when there are none. |
+| `url` | string | always, `null` when the server has no public address configured | The page of the item on the board: `{PublicBaseUrl}/stories/{id}`, from the API's `App:PublicBaseUrl` setting, never from the request. |
 | `comment_id` | GUID | left out when the answer is not that of `add_work_item_comment` or `add_issue_comment` | The id of the comment that was added, or of the earlier comment of a repeated `idempotency_key`. |
 | `comment_created` | boolean | left out when the answer is not that of `add_work_item_comment` or `add_issue_comment` | `false` for a repeated `idempotency_key`. |
 | `created` | boolean | left out when the answer is not that of `create_work_item` or `create_epic_work_item` | `false` for a repeated `idempotency_key`. |
@@ -658,6 +660,7 @@ An entry of the answer of `search_work_items`.
 | `status` | string | always | |
 | `estimate` | integer | always, `null` when not set | |
 | `version` | integer | always | |
+| `url` | string | always, `null` when the server has no public address configured | The page of the item, as `url` of a [work item](#work-item). |
 
 ### Work item page
 
@@ -803,7 +806,7 @@ One legacy exception, for callers from before `clear`: `update_work_item` still 
 
 The server leaves a field without a value out of the answer, except the fields it promises in every answer. The [shapes](#shapes) say which is which for every field; in short:
 
-- **Always present, `null` when empty:** `estimate`, `claimant`, `claimant_id`, `claim_marker`, `claim_expires_at_utc` on a work item; `estimate` on a search result; `repository_url` and `default_branch` on a project and on a board; `old` and `new` of a change.
+- **Always present, `null` when empty:** `estimate`, `claimant`, `claimant_id`, `claim_marker`, `claim_expires_at_utc`, `url` on a work item; `estimate` and `url` on a search result; `repository_url` and `default_branch` on a project and on a board; `old` and `new` of a change.
 - **Left out when empty:** `description` (project, board, epic, work item), `epicId`, `epic` and `labels` of a work item, `author_id` of a comment, `actor` of a change entry, `next_cursor` of a work item page and of a comment page, and the fields that belong to one tool's answer (`created`, `comment_id`, `comment_created`).
 - **Always present and never `null`:** everything else, including the arrays (`comments`, `blockers`, `dependents`, `links`, `label_list`, `items`), which are `[]` when empty, and `next_cursor` of `list_changes`.
 

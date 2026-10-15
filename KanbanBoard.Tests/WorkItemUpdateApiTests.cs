@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using KanbanBoard.Api.Configuration;
 using KanbanBoard.Api.Models;
 using KanbanBoard.Api.Services;
 using KanbanBoard.Shared.Contracts;
@@ -434,12 +435,12 @@ public sealed class WorkItemUpdateApiTests
         var item = new WorkItem { Title = "Old", Labels = "api, Backend ,two words,,100%" };
         var none = new WorkItem { Title = "None", Labels = null };
 
-        var dto = WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow);
+        var dto = WorkItemDtoMapper.ToDto(item, DateTimeOffset.UtcNow, new AppOptions());
 
         // The string exactly as stored, and its labels.
         Assert.Equal("api, Backend ,two words,,100%", dto.Labels);
         Assert.Equal(["api", "Backend", "two words", "100%"], dto.LabelList);
-        Assert.Empty(WorkItemDtoMapper.ToDto(none, DateTimeOffset.UtcNow).LabelList);
+        Assert.Empty(WorkItemDtoMapper.ToDto(none, DateTimeOffset.UtcNow, new AppOptions()).LabelList);
     }
 
     [Fact]
@@ -497,6 +498,28 @@ public sealed class WorkItemUpdateApiTests
                 Assert.Equal(isWith ? 2 : 1, item.GetProperty("version").GetInt64());
             });
         }
+    }
+
+    [Fact]
+    public async Task A_partial_put_of_the_web_ui_changes_only_the_fields_it_names_and_a_null_clears_description_and_epic()
+    {
+        using var api = new ApiApplication();
+        using var client = api.CreateClient();
+        var (project, epic) = await CreateProjectAsync(client, "PART");
+        var created = await CreateAsync(client, project, new { title = "Title", description = "Body", type = "Story", status = "Ready", priority = "High", estimate = 5, labels = "api,backend", epicId = epic });
+
+        var title = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { title = "x" });
+        var description = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { description = (string?)null });
+        var epicCleared = await SendAsync<WorkItemDto>(client, HttpMethod.Put, $"/api/items/{created.Id}", new { epicId = (Guid?)null });
+
+        Assert.Equal(
+            ("x", "Body", WorkItemType.Story, WorkItemStatus.Ready, WorkItemPriority.High, 5, "api,backend", epic, 2L),
+            (title.Title, title.Description, title.Type, title.Status, title.Priority, title.Estimate, title.Labels, title.EpicId, title.Version));
+        Assert.Equal(((string?)null, epic, "x", 5, "api,backend"), (description.Description, description.EpicId, description.Title, description.Estimate, description.Labels));
+        Assert.Equal(
+            ("x", (string?)null, WorkItemType.Story, WorkItemStatus.Ready, WorkItemPriority.High, 5, "api,backend", (Guid?)null, 4L),
+            (epicCleared.Title, epicCleared.Description, epicCleared.Type, epicCleared.Status, epicCleared.Priority, epicCleared.Estimate, epicCleared.Labels, epicCleared.EpicId, epicCleared.Version));
+        Assert.Equal(epicCleared, await client.GetFromJsonAsync<WorkItemDto>($"/api/items/{created.Id}", Json), Same);
     }
 
     [Fact]
